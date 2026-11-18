@@ -1,0 +1,599 @@
+import { mkdtemp, readFile, readdir } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, sep } from "node:path";
+import { strToU8, zipSync } from "fflate";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { REPORT_SCHEMA, type SharedFile, orchestratorPrompt, parseReport } from "../src/agents.js";
+import { type AttachmentInfo, AttachmentRepo } from "../src/attachments.js";
+import { type Config, ConfigSchema } from "../src/config.js";
+import { deriveKey } from "../src/crypto.js";
+import { NOTES_MAX_CHARS, NotesRepo } from "../src/notes.js";
+import { FsStore } from "../src/store.js";
+import { REPO_RULES, type AgentSpec, defaultTeam, rosterText } from "../src/team.js";
+import { GitHub } from "../src/github.js";
+import {
+  FALLBACK_COMMIT_EMAIL,
+  commitIdentity,
+  configSecrets,
+  makeRedactor,
+  materializeAttachments,
+  notesToSave,
+  saveProjectNotes,
+  subagentLabel,
+  taskGitHubToken,
+  teamQueryOptions,
+} from "../src/worker.js";
+
+const baseConfig = (): Config => ConfigSchema.parse({});
+
+const NO_WRITER = /no enabled agent can change code/i;
+
+const designer: AgentSpec = {
+  id: "designer",
+  name: "Dana",
+  role: "Designer",
+  emoji: ":art:",
+  description: "Reviews UI changes for layout, accessibility and consistency with the design system.",
+  instructions: "You are the Designer. Look at the UI the change touches and report problems with fixes.",
+  access: "read",
+  model: "",
+  enabled: true,
+};
+
+describe("orchestratorPrompt", () => {
+  it("uses Pointer's name, the org, the roster and the owner's instructions", () => {
+    const config = baseConfig();
+    config.orgName = "Acme";
+    config.team.pointer.name = "Atlas";
+    config.team.pointer.instructions = "Always write commit-style PR titles.";
+    config.team.agents[0]!.name = "Sara";
+    const prompt = orchestratorPrompt(config);
+    expect(prompt).toContain("You are Atlas");
+    expect(prompt).toContain("Acme");
+    expect(prompt).toContain(rosterText(config.team));
+    expect(prompt).toContain("- coder: Sara, Coder (can change code).");
+    expect(prompt).toContain("Always write commit-style PR titles.");
+    expect(prompt).toContain(REPO_RULES.trim());
+  });
+
+  it("keeps the workflow, publishing and blocked rules", () => {
+    const prompt = orchestratorPrompt(baseConfig());
+    expect(prompt).toMatch(/acceptance criteria/i);
+    expect(prompt).toMatch(/at most three rounds/i);
+    expect(prompt).toMatch(/git diff/);
+    expect(prompt).toMatch(/You do not edit files yourself/);
+    expect(prompt).toMatch(/pushes the branch and opens the pull request/);
+    expect(prompt).toMatch(/report it as blocked/i);
+    expect(prompt).toMatch(/"Change code" access/);
+    expect(prompt).toMatch(/becomes the pull request description/);
+    expect(prompt).not.toMatch(NO_WRITER);
+  });
+
+  it("is driven by the roster, not by fixed agent ids", () => {
+    const config = baseConfig();
+    config.team.agents = [{ ...config.team.agents[0]!, id: "builder", name: "Bob", role: "Builder" }, designer];
+    const prompt = orchestratorPrompt(config);
+    expect(prompt).toContain("- builder: Bob, Builder (can change code).");
+    expect(prompt).toContain("- designer: Dana, Designer (looks only).");
+    expect(prompt).not.toMatch(/\bcoder\b|\breviewer\b|\bqa\b/);
+    expect(prompt).not.toMatch(NO_WRITER);
+  });
+
+  it("leaves disabled agents out of the roster", () => {
+    const config = baseConfig();
+    config.team.agents.find((a) => a.id === "writer")!.enabled = false;
+    const prompt = orchestratorPrompt(config);
+    expect(prompt).not.toContain("- writer:");
+    expect(prompt).toContain("- researcher:");
+  });
+
+  it("warns when no enabled agent can change code", () => {
+    const config = baseConfig();
+    for (const a of config.team.agents) if (a.access === "write") a.enabled = false;
+    const prompt = orchestratorPrompt(config);
+    expect(prompt).toMatch(NO_WRITER);
+    expect(prompt).not.toContain("- coder:");
+  });
+
+  it("copes with an empty team", () => {
+    const config = baseConfig();
+    config.team.agents = [];
+    const prompt = orchestratorPrompt(config);
+    expect(prompt).toContain("(no agents enabled)");
+    expect(prompt).toMatch(NO_WRITER);
+  });
+});
+
+describe("report", () => {
+  it("asks for the verifying agents' verdicts", () => {
+    expect(REPORT_SCHEMA.properties.verification.description).toBe(
+      "Checks actually run and their real results, and the verdicts of the agents who verified.",
+    );
+  });
+
+  it("falls back to a Pointer title", () => {
+    expect(parseReport(undefined, "plain").title).toBe("Pointer update");
+    expect(parseReport({ kind: "answer", summary: "s" }, "").title).toBe("Pointer update");
+  });
+});
+
+describe("subagentLabel", () => {
+  it("labels a known agent with its emoji, name and role", () => {
+    const team = defaultTeam();
+    team.agents[0]!.name = "Sara";
+    expect(subagentLabel(team, "coder")).toBe(":hammer_and_wrench: Sara (Coder)");
+    expect(subagentLabel(team, "reviewer")).toBe(":mag: Reviewer");
+  });
+
+  it("falls back for unknown or missing types", () => {
+    const team = defaultTeam();
+    expect(subagentLabel(team, "general-purpose")).toBe(":robot_face: general-purpose");
+    expect(subagentLabel(team, undefined)).toBe(":robot_face: agent");
+  });
+});
+
+describe("teamQueryOptions", () => {
+  it("builds the subagents, permissions and system prompt from the configured team", () => {
+    const config = baseConfig();
+    config.team.agents.find((a) => a.id === "writer")!.enabled = false;
+    config.team.agents.push(designer);
+    const opts = teamQueryOptions(config);
+    expect(Object.keys(opts.agents)).toEqual(["coder", "reviewer", "qa", "researcher", "designer"]);
+    expect(opts.agents.designer!.tools).toEqual(["Read", "Glob", "Grep", "WebSearch", "WebFetch"]);
+    expect(opts.allowedTools).toEqual(
+      expect.arrayContaining(["Read", "Glob", "Grep", "Bash", "Agent", "Task", "Edit", "Write", "WebSearch", "WebFetch"]),
+    );
+    expect(opts.systemPrompt).toEqual({ type: "preset", preset: "claude_code", append: orchestratorPrompt(config) });
+  });
+
+  it("runs the task at the repo task effort", () => {
+    const config = baseConfig();
+    expect(teamQueryOptions(config).effort).toBe("medium");
+    config.team.pointer.taskEffort = "high";
+    expect(teamQueryOptions(config).effort).toBe("high");
+  });
+
+  it("does not allow editing when no agent can change code", () => {
+    const config = baseConfig();
+    for (const a of config.team.agents) if (a.access === "write") a.enabled = false;
+    const opts = teamQueryOptions(config);
+    expect(opts.allowedTools).not.toContain("Edit");
+    expect(opts.allowedTools).not.toContain("Write");
+    expect(opts.allowedTools).toEqual(expect.arrayContaining(["WebSearch", "WebFetch", "Bash", "Agent"]));
+  });
+});
+
+const NOTES_HEADING = "Project notes from earlier tasks (may be outdated; verify before relying on them)";
+
+describe("project notes", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("puts the repo's notes in the orchestrator prompt under a cautious heading", () => {
+    const projectNotes = "- Tests: npm test (needs Node 22)\n- Migrations live in db/";
+    const prompt = orchestratorPrompt(baseConfig(), { projectNotes });
+    expect(prompt).toContain(NOTES_HEADING);
+    expect(prompt).toContain(projectNotes);
+    expect(prompt.indexOf(NOTES_HEADING)).toBeLessThan(prompt.indexOf(projectNotes));
+    // Notes are reference material: the ground rules still come after and take precedence.
+    expect(prompt.indexOf(projectNotes)).toBeLessThan(prompt.indexOf(REPO_RULES.trim()));
+  });
+
+  it("omits the notes section when there are no notes", () => {
+    expect(orchestratorPrompt(baseConfig())).not.toContain(NOTES_HEADING);
+    expect(orchestratorPrompt(baseConfig(), {})).not.toContain(NOTES_HEADING);
+    expect(orchestratorPrompt(baseConfig(), { projectNotes: "  \n " })).not.toContain(NOTES_HEADING);
+  });
+
+  it("always asks Pointer to curate the notes in its report, never in the checkout", () => {
+    for (const prompt of [orchestratorPrompt(baseConfig()), orchestratorPrompt(baseConfig(), { projectNotes: "x" })]) {
+      expect(prompt).toMatch(/projectNotes/);
+      expect(prompt).toMatch(/every task \(changes, answers and blocked tasks alike\)/);
+      expect(prompt).toMatch(/6000 characters/);
+      expect(prompt).toMatch(/Return "" to leave them unchanged/);
+      expect(prompt).toMatch(/never write them into a file/i);
+    }
+  });
+
+  it("passes the notes through teamQueryOptions", () => {
+    const config = baseConfig();
+    const opts = teamQueryOptions(config, { projectNotes: "- uses pnpm" });
+    expect(opts.systemPrompt).toEqual({
+      type: "preset",
+      preset: "claude_code",
+      append: orchestratorPrompt(config, { projectNotes: "- uses pnpm" }),
+    });
+    expect(teamQueryOptions(config).systemPrompt).toEqual({
+      type: "preset",
+      preset: "claude_code",
+      append: orchestratorPrompt(config),
+    });
+  });
+
+  it("requires projectNotes in the report schema", () => {
+    expect(REPORT_SCHEMA.required).toContain("projectNotes");
+    const prop = REPORT_SCHEMA.properties.projectNotes;
+    expect(prop.type).toBe("string");
+    expect(prop.description).toMatch(/full updated project notes for this repository/);
+    expect(prop.description).toMatch(/6000 characters/);
+    expect(prop.description).toMatch(/how to build, test and run/);
+    expect(prop.description).toMatch(/obsolete/);
+    expect(prop.description).toMatch(/no secrets or tokens/i);
+    expect(prop.description).toMatch(/Return "" to leave them unchanged/);
+  });
+
+  it("parses projectNotes from the report, defaulting to empty", () => {
+    const base = { kind: "answer", title: "t", summary: "s", verification: "", risks: "" };
+    expect(parseReport({ ...base, projectNotes: "- uses pnpm" }, "").projectNotes).toBe("- uses pnpm");
+    expect(parseReport(base, "").projectNotes).toBe("");
+    expect(parseReport({ ...base, projectNotes: 42 }, "").projectNotes).toBe("");
+    expect(parseReport(undefined, "plain").projectNotes).toBe("");
+  });
+
+  it("decides what to save: nothing when empty or unchanged, trimmed text otherwise", () => {
+    expect(notesToSave("- a", "")).toBeNull();
+    expect(notesToSave("- a", "  \n ")).toBeNull();
+    expect(notesToSave("", "")).toBeNull();
+    expect(notesToSave("- a\n- b", "- a\n- b")).toBeNull();
+    expect(notesToSave("- a\n- b", "\n- a\n- b  \n")).toBeNull();
+    expect(notesToSave("- a", "- a\n- b")).toBe("- a\n- b");
+    expect(notesToSave("", "  - first note \n")).toBe("- first note");
+  });
+
+  it("truncates notes that are too long at the last newline before the limit", () => {
+    const line = `- ${"x".repeat(97)}\n`; // 100 chars
+    const reported = line.repeat(NOTES_MAX_CHARS / 100 + 5);
+    const saved = notesToSave("", reported)!;
+    expect(saved.length).toBeLessThanOrEqual(NOTES_MAX_CHARS);
+    expect(saved).toBe(line.repeat(NOTES_MAX_CHARS / 100).trimEnd());
+    expect(reported.startsWith(saved)).toBe(true);
+
+    const noNewlines = "y".repeat(NOTES_MAX_CHARS + 50);
+    expect(notesToSave("", noNewlines)).toBe("y".repeat(NOTES_MAX_CHARS));
+
+    // Unchanged once truncated: nothing to save.
+    expect(notesToSave(saved, reported)).toBeNull();
+  });
+
+  it("saves changed notes and leaves unchanged ones alone", async () => {
+    const store = new FsStore(await mkdtemp(join(tmpdir(), "army-worker-notes-")));
+    const notes = new NotesRepo(store, deriveKey("k"));
+    expect(await saveProjectNotes(notes, "acme/api", "", "- uses pnpm")).toBe(true);
+    expect((await notes.get("acme/api"))!.text).toBe("- uses pnpm");
+
+    const put = vi.spyOn(notes, "put");
+    expect(await saveProjectNotes(notes, "acme/api", "- uses pnpm", "- uses pnpm\n")).toBe(false);
+    expect(await saveProjectNotes(notes, "acme/api", "- uses pnpm", "")).toBe(false);
+    expect(put).not.toHaveBeenCalled();
+  });
+
+  it("redacts known credentials from the notes it stores", async () => {
+    const store = new FsStore(await mkdtemp(join(tmpdir(), "army-worker-notes-")));
+    const notes = new NotesRepo(store, deriveKey("k"));
+    const redact = makeRedactor(["sk-ant-secret123"]);
+    await saveProjectNotes(notes, "acme/api", "", "- API key sk-ant-secret123 works", redact);
+    expect((await notes.get("acme/api"))!.text).toBe("- API key [redacted] works");
+  });
+
+  it("never fails the task when saving fails, and keeps note content out of the log", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const throwing = { put: vi.fn().mockRejectedValue(new Error("bucket unavailable")) };
+    expect(await saveProjectNotes(throwing, "acme/api", "", "- secret-ish detail")).toBe(false);
+    expect(log).toHaveBeenCalledWith("[worker] could not save project notes: bucket unavailable");
+
+    const refusing = { put: vi.fn().mockResolvedValue({ ok: false, error: "Repos look like owner/repo." }) };
+    expect(await saveProjectNotes(refusing, "acme/api", "", "- another detail")).toBe(false);
+    expect(log).toHaveBeenCalledWith("[worker] could not save project notes: Repos look like owner/repo.");
+
+    const logged = log.mock.calls.flat().join("\n");
+    expect(logged).not.toContain("secret-ish detail");
+    expect(logged).not.toContain("another detail");
+  });
+});
+
+const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+const THREAD = { channel: "C1", threadTs: "100.1" };
+
+/** A real, encrypted AttachmentRepo seeded like a Slack thread: a design, a screenshot and a zip. */
+async function seededRepo(): Promise<AttachmentRepo> {
+  const store = new FsStore(await mkdtemp(join(tmpdir(), "army-worker-att-store-")));
+  const repo = new AttachmentRepo(store, deriveKey("k"));
+  const zip = zipSync({
+    "mobile/index.html": strToU8("<p>mobile</p>"),
+    "mobile/css/site.css": strToU8("p{color:red}"),
+    "../../evil.txt": strToU8("escaped"),
+    "/abs.txt": strToU8("absolute"),
+    "mobile\\..\\..\\win.txt": strToU8("windows"),
+  });
+  const add = async (name: string, mime: string, bytes: Uint8Array, sourceId: string) => {
+    const r = await repo.add(THREAD, { name, mime, bytes, source: "slack", sourceId });
+    if (!r.ok) throw new Error(r.error);
+  };
+  await add("Chat Section.html", "text/html", strToU8("<section>chat</section>"), "F1");
+  await add("image.png", "image/png", PNG, "F2");
+  await add("Mobile-html.zip", "application/zip", zip, "F3");
+  return repo;
+}
+
+/** Every file under dir, relative, with forward slashes. */
+async function tree(dir: string): Promise<string[]> {
+  const entries = await readdir(dir, { recursive: true, withFileTypes: true });
+  return entries
+    .filter((e) => e.isFile())
+    .map((e) => join(e.parentPath, e.name).slice(dir.length + 1).split(sep).join("/"))
+    .sort();
+}
+
+/** A stand-in repo for names and failures the real AttachmentRepo would never produce. */
+function stubRepo(files: { name: string; bytes: Uint8Array | null | Error; mime?: string }[]) {
+  const infos: AttachmentInfo[] = files.map((f, i) => ({
+    id: `a-0000000${i}`,
+    name: f.name,
+    mime: f.mime ?? "application/octet-stream",
+    size: 1,
+    source: "slack",
+    addedAt: "2026-11-18T00:00:00.000Z",
+  }));
+  return {
+    list: vi.fn(async () => infos),
+    get: vi.fn(async (_thread: unknown, id: string) => {
+      const bytes = files[infos.findIndex((i) => i.id === id)]!.bytes;
+      if (bytes instanceof Error) throw bytes;
+      return bytes ? Buffer.from(bytes) : null;
+    }),
+  };
+}
+
+describe("materializeAttachments", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("writes the thread's files with safe names and expands zips into a subfolder", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const root = await mkdtemp(join(tmpdir(), "army-worker-att-"));
+    const dir = join(root, "attachments");
+    const files = await materializeAttachments(await seededRepo(), THREAD, dir);
+
+    expect(await tree(dir)).toEqual([
+      "Chat Section.html",
+      "Mobile-html/mobile/css/site.css",
+      "Mobile-html/mobile/index.html",
+      "image.png",
+    ]);
+    expect(await readFile(join(dir, "Chat Section.html"), "utf8")).toBe("<section>chat</section>");
+    expect(new Uint8Array(await readFile(join(dir, "image.png")))).toEqual(PNG);
+    expect(await readFile(join(dir, "Mobile-html", "mobile", "index.html"), "utf8")).toBe("<p>mobile</p>");
+
+    expect(files).toEqual([
+      { path: join(dir, "Chat Section.html"), name: "Chat Section.html", size: 23 },
+      { path: join(dir, "image.png"), name: "image.png", size: PNG.byteLength },
+      {
+        path: join(dir, "Mobile-html", "mobile", "index.html"),
+        name: "mobile/index.html",
+        size: 13,
+        fromZip: "Mobile-html.zip",
+      },
+      {
+        path: join(dir, "Mobile-html", "mobile", "css", "site.css"),
+        name: "mobile/css/site.css",
+        size: 12,
+        fromZip: "Mobile-html.zip",
+      },
+    ]);
+
+    // Traversal and absolute entries are skipped: nothing lands outside the zip's folder.
+    expect(await tree(root)).toEqual((await tree(dir)).map((f) => `attachments/${f}`));
+    const logged = log.mock.calls.flat().join("\n");
+    expect(logged).toMatch(/skipped/i);
+    expect(logged).not.toContain("escaped");
+    expect(logged).not.toContain("evil");
+    expect(logged).not.toContain("<p>mobile</p>");
+  });
+
+  it("returns nothing and creates nothing when the thread has no files", async () => {
+    const root = await mkdtemp(join(tmpdir(), "army-worker-att-"));
+    const store = new FsStore(await mkdtemp(join(tmpdir(), "army-worker-att-store-")));
+    const repo = new AttachmentRepo(store, deriveKey("k"));
+    expect(await materializeAttachments(repo, THREAD, join(root, "attachments"))).toEqual([]);
+    expect(await readdir(root)).toEqual([]);
+  });
+
+  it("suffixes duplicate names and strips path separators and dot segments", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const root = await mkdtemp(join(tmpdir(), "army-worker-att-"));
+    const dir = join(root, "attachments");
+    const repo = stubRepo([
+      { name: "image.png", bytes: strToU8("one") },
+      { name: "image.png", bytes: strToU8("two") },
+      { name: "IMAGE.png", bytes: strToU8("three") },
+      { name: "../../escape.txt", bytes: strToU8("e") },
+      { name: "..", bytes: strToU8("dots") },
+      { name: "a/b\\c.txt", bytes: strToU8("abc") },
+      { name: "design.zip", bytes: zipSync({ "x.html": strToU8("x") }), mime: "application/zip" },
+      { name: "design", bytes: strToU8("plain") },
+    ]);
+    const files = await materializeAttachments(repo, THREAD, dir);
+    expect(files.map((f) => f.path.slice(dir.length + 1))).toEqual([
+      "image.png",
+      "image-2.png",
+      "IMAGE-3.png",
+      "escape.txt",
+      "file",
+      "a_b_c.txt",
+      join("design", "x.html"),
+      "design-2",
+    ]);
+    for (const f of files) expect(f.path.startsWith(dir + sep)).toBe(true);
+    expect(await readFile(join(dir, "image.png"), "utf8")).toBe("one");
+    expect(await readFile(join(dir, "image-2.png"), "utf8")).toBe("two");
+    expect(await readFile(join(dir, "IMAGE-3.png"), "utf8")).toBe("three");
+    expect(await tree(root)).toEqual((await tree(dir)).map((f) => `attachments/${f}`));
+  });
+
+  it("skips files that are missing, unreadable or broken zips, and keeps going", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const dir = join(await mkdtemp(join(tmpdir(), "army-worker-att-")), "attachments");
+    const repo = stubRepo([
+      { name: "gone.png", bytes: null },
+      { name: "secret-name.txt", bytes: new Error("decrypt failed: secret detail") },
+      { name: "broken.zip", bytes: strToU8("not a zip at all"), mime: "application/zip" },
+      { name: "ok.css", bytes: strToU8("a{}") },
+    ]);
+    const files = await materializeAttachments(repo, THREAD, dir);
+    expect(files.map((f) => f.name)).toEqual(["ok.css"]);
+    expect(await tree(dir)).toEqual(["ok.css"]);
+    expect(log).toHaveBeenCalled();
+    const logged = log.mock.calls.flat().join("\n");
+    expect(logged).not.toContain("not a zip at all");
+    expect(logged).not.toContain("secret detail");
+  });
+});
+
+const FILES_HEADING = "Files shared for this task";
+
+describe("shared files in the orchestrator prompt", () => {
+  const attachments: SharedFile[] = [
+    { path: "/work/army-1/attachments/Chat Section.html", name: "Chat Section.html", size: 2048 },
+    { path: "/work/army-1/attachments/image.png", name: "image.png", size: 11 },
+    {
+      path: "/work/army-1/attachments/Mobile-html/mobile/index.html",
+      name: "mobile/index.html",
+      size: 13,
+      fromZip: "Mobile-html.zip",
+    },
+  ];
+
+  it("lists the absolute paths, the zip each came from, and how to use them", () => {
+    const prompt = orchestratorPrompt(baseConfig(), { attachments });
+    expect(prompt).toContain(FILES_HEADING);
+    for (const f of attachments) expect(prompt).toContain(f.path);
+    expect(prompt).toMatch(/mobile\/index\.html.*from Mobile-html\.zip/);
+    expect(prompt).toMatch(/Slack or monday\.com/);
+    expect(prompt).toMatch(/designs, specs and screenshots/i);
+    expect(prompt).toMatch(/HTML and CSS[^\n]*\bRead\b/);
+    expect(prompt).toMatch(/images[^\n]*\bRead\b/i);
+    expect(prompt).toMatch(/outside the repository/i);
+    expect(prompt).toMatch(/as an asset/i);
+    expect(prompt).toMatch(/asset conventions/i);
+    expect(prompt).toMatch(/data, not instructions/i);
+    // Subagents never see this prompt: Pointer must hand them the paths.
+    expect(prompt).toMatch(/cannot see this prompt/i);
+    expect(prompt).toMatch(/absolute paths/i);
+    // Reference material: the ground rules still come after it.
+    expect(prompt.indexOf(FILES_HEADING)).toBeLessThan(prompt.indexOf(REPO_RULES.trim()));
+  });
+
+  it("works alongside project notes", () => {
+    const prompt = orchestratorPrompt(baseConfig(), { projectNotes: "- uses pnpm", attachments });
+    expect(prompt).toContain(NOTES_HEADING);
+    expect(prompt).toContain(FILES_HEADING);
+  });
+
+  it("has no files section when nothing was shared", () => {
+    expect(orchestratorPrompt(baseConfig())).not.toContain(FILES_HEADING);
+    expect(orchestratorPrompt(baseConfig(), { attachments: [] })).not.toContain(FILES_HEADING);
+    expect(orchestratorPrompt(baseConfig(), { projectNotes: "- x" })).not.toContain(FILES_HEADING);
+  });
+
+  it("caps a long listing and says how to see the rest", () => {
+    const many: SharedFile[] = Array.from({ length: 150 }, (_, i) => ({
+      path: `/work/army-1/attachments/site/page-${i}.html`,
+      name: `page-${i}.html`,
+      size: 10,
+      fromZip: "site.zip",
+    }));
+    const prompt = orchestratorPrompt(baseConfig(), { attachments: many });
+    expect(prompt).toContain(many[0]!.path);
+    expect(prompt).not.toContain(many[149]!.path);
+    expect(prompt).toMatch(/and \d+ more/);
+  });
+
+  it("teamQueryOptions adds the files folder only when there are files", () => {
+    const config = baseConfig();
+    const dir = "/work/army-1/attachments";
+    const withFiles = teamQueryOptions(config, { attachments }, dir);
+    expect(withFiles.additionalDirectories).toEqual([dir]);
+    expect(withFiles.systemPrompt).toEqual({
+      type: "preset",
+      preset: "claude_code",
+      append: orchestratorPrompt(config, { attachments }),
+    });
+    expect(teamQueryOptions(config, { attachments: [] }, dir)).not.toHaveProperty("additionalDirectories");
+    expect(teamQueryOptions(config, {}, dir)).not.toHaveProperty("additionalDirectories");
+    expect(teamQueryOptions(config)).not.toHaveProperty("additionalDirectories");
+    expect(teamQueryOptions(config, { attachments })).not.toHaveProperty("additionalDirectories");
+  });
+});
+
+describe("GitHub connection for a task", () => {
+  const PRIMARY = "github_pat_primary_0000000000000";
+  const EXTRA = "ghp_extra_connection_000000000000";
+  const withExtra = () =>
+    ConfigSchema.parse({
+      github: {
+        token: PRIMARY,
+        allowedOwners: ["Acme"],
+        extra: [{ id: "gh-abc123", token: EXTRA, login: "shosh", allowed: ["Partner-Co/Acme"] }],
+      },
+    });
+
+  it("uses the primary token when it is the only connection, as before", () => {
+    const config = ConfigSchema.parse({ github: { token: PRIMARY, allowedOwners: ["Acme"] } });
+    expect(taskGitHubToken(config, "Acme/acme-platform")).toEqual({ ok: true, token: PRIMARY });
+    expect(taskGitHubToken(config, "acme/web")).toEqual({ ok: true, token: PRIMARY });
+    const open = ConfigSchema.parse({ github: { token: PRIMARY } });
+    expect(taskGitHubToken(open, "anyone/thing")).toEqual({ ok: true, token: PRIMARY });
+  });
+
+  it("uses the extra connection's token for the repository it covers", () => {
+    const config = withExtra();
+    expect(taskGitHubToken(config, "Partner-Co/Acme")).toEqual({ ok: true, token: EXTRA });
+    expect(taskGitHubToken(config, "partner-co/acme")).toEqual({ ok: true, token: EXTRA });
+    expect(taskGitHubToken(config, "Acme/web")).toEqual({ ok: true, token: PRIMARY });
+  });
+
+  it("refuses a repository no connection is allowed to work on, with a clear message", () => {
+    const expected = { ok: false, error: "No GitHub connection is allowed to work on Partner-Co/other; add one on the admin page." };
+    expect(taskGitHubToken(withExtra(), "Partner-Co/other")).toEqual(expected);
+    expect(taskGitHubToken(ConfigSchema.parse({}), "Partner-Co/other")).toEqual(expected);
+  });
+
+  it("redacts every credential in the config, including every GitHub token and its git header", () => {
+    const config = withExtra();
+    config.anthropic.apiKey = "sk-ant-secret-key-1";
+    config.slack.botToken = "xoxb-secret-bot-token";
+    config.slack.signingSecret = "signing-secret-123";
+    config.monday.token = "monday-secret-token";
+    const redact = makeRedactor(configSecrets(config));
+    const headers = [PRIMARY, EXTRA].map((t) => new GitHub(t).gitAuthHeader());
+    const leaked = [
+      PRIMARY,
+      EXTRA,
+      ...headers,
+      ...headers.map((h) => h.split(" ").pop()!),
+      "sk-ant-secret-key-1",
+      "xoxb-secret-bot-token",
+      "signing-secret-123",
+      "monday-secret-token",
+    ];
+    const text = redact(`fatal: ${leaked.join(" | ")}`);
+    for (const secret of leaked) expect(text).not.toContain(secret);
+    expect(text).toContain("[redacted]");
+    // An empty config has nothing to redact and leaves text alone.
+    expect(makeRedactor(configSecrets(ConfigSchema.parse({})))("plain text")).toBe("plain text");
+  });
+});
+
+describe("commitIdentity", () => {
+  it("authors commits as the token owner's GitHub noreply address, so Vercel links them to a team member", () => {
+    expect(commitIdentity("Pointer", { id: 1234567, login: "octo-dev" })).toEqual({
+      name: "Pointer (via octo-dev)",
+      email: "1234567+octo-dev@users.noreply.github.com",
+    });
+  });
+
+  it("falls back to an address GitHub links to nobody when the owner is unknown or malformed", () => {
+    for (const viewer of [undefined, { id: 0, login: "x" }, { id: 5, login: "bad login" }, { id: 5, login: "a@b" }]) {
+      expect(commitIdentity("Pointer", viewer)).toEqual({ name: "Pointer", email: FALLBACK_COMMIT_EMAIL });
+    }
+    expect(FALLBACK_COMMIT_EMAIL).not.toContain("users.noreply.github.com");
+  });
+});

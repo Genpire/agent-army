@@ -1,0 +1,56 @@
+{
+  "name": "agent-army",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Self-hosted Slack assistant (Pointer) with a team of Claude agents that answer questions, research, and turn requests into pull requests.",
+  "license": "MIT",
+  "homepage": "https://github.com/Genpire/agent-army#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Genpire/agent-army.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Genpire/agent-army/issues"
+  },
+  "keywords": [
+    "slack",
+    "slack-bot",
+    "claude",
+    "claude-agent-sdk",
+    "ai-agents",
+    "multi-agent",
+    "github",
+    "pull-requests",
+    "code-review",
+    "self-hosted",
+    "cloud-run"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "worker": "node dist/worker.js",
+    "dev": "tsx watch src/server.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.326",
+    "@google-cloud/run": "^4.2.0",
+    "@google-cloud/storage": "^9.0.0",
+    "@slack/web-api": "^8.4.0",
+    "express": "^5.3.0",
+    "fflate": "0.8.2",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.6",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
+  }
+}

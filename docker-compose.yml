@@ -1,0 +1,17 @@
+# Run anywhere Docker runs:  docker compose up -d --build
+# Then open http://localhost:8080 (put HTTPS in front before pointing Slack at it).
+services:
+  agent-army:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      MASTER_KEY: ${MASTER_KEY:?set MASTER_KEY in .env (openssl rand -base64 32)}
+      SETUP_TOKEN: ${SETUP_TOKEN:-}
+      PUBLIC_URL: ${PUBLIC_URL:-}
+      RUNNER: local
+    volumes:
+      - army-data:/data
+volumes:
+  army-data:

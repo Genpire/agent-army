@@ -1,0 +1,47 @@
+name: Bug report
+description: Something does not work as the README says it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. **Remove tokens, keys, private repo names and message contents** from anything you paste.
+        Security problems go through [private reporting](https://github.com/Genpire/agent-army/security/advisories/new), not here.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. In a Pointer channel, send "…"
+        2. …
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Where it runs
+      options:
+        - Google Cloud Run (deploy/gcp.sh)
+        - Docker / docker compose
+        - npm run dev
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Commit
+      description: The commit you deployed (`git rev-parse --short HEAD`).
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant server or worker log lines, with secrets removed.
+      render: text
