@@ -25,7 +25,7 @@ export function taskStatus(t: Task): StatusView {
       return { label: "Running", variant: "accent", description: "The team is working on it.", isPulsing: true };
     case "done":
       if (t.kind === "blocked") return { label: "Blocked", variant: "warning", description: "The team could not go on and said why in the thread." };
-      if (t.kind === "answer") return { label: "Answered", variant: "success", description: "Answered in Slack without changing code." };
+      if (t.kind === "answer") return { label: "Answered", variant: "success", description: "Answered without changing code." };
       if (t.prUrl) return { label: "PR opened", variant: "success", description: "The change is in a pull request, ready for review." };
       return { label: "Done", variant: "success", description: "Finished." };
     case "failed":

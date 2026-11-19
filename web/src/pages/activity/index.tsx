@@ -50,7 +50,7 @@ export default function ActivityPage() {
   return (
     <PageFrame
       title="Activity"
-      description="Repo tasks the team ran from Slack, their progress and what they cost."
+      description="Repo tasks from Slack and the console: their progress, results and what they cost."
       actions={
         <>
           <LiveNote error={tasks.error} />
@@ -88,7 +88,7 @@ export default function ActivityPage() {
           ) : all.length === 0 ? (
             <EmptyState
               title="No repo tasks yet"
-              description={`Ask ${pointer} in Slack to change a repository, for example "@${pointer} in owner/repo: fix the login bug". Its progress shows up here.`}
+              description={`Ask ${pointer} in Chat or in Slack to change a repository, for example "in owner/repo: fix the login bug". Its progress shows up here.`}
               icon={<Icon icon={ChatBubbleLeftRightIcon} size="lg" />}
             />
           ) : visible.length === 0 ? (

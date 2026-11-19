@@ -238,7 +238,7 @@ export default function OverviewPage() {
           ) : recent.length === 0 ? (
             <EmptyState
               title="No repo tasks yet"
-              description={`Ask ${pointer} in Slack to change a repository, for example "@${pointer} in owner/repo: fix the login bug".`}
+              description={`Ask ${pointer} in Chat or in Slack to change a repository, for example "in owner/repo: fix the login bug".`}
               icon={<Icon icon={ChatBubbleLeftRightIcon} size="lg" />}
             />
           ) : (

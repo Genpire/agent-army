@@ -1,10 +1,71 @@
+<div align="center">
+
 # Agent Army
 
+**Your own AI engineering team, running in 5 minutes.**
+
+Pointer, a self-hosted assistant for Slack and the web, leads a team of Claude agents that answer questions, research, read your code and turn requests into reviewed pull requests, and you can watch every step while they work.
+
 [![CI](https://github.com/Genpire/agent-army/actions/workflows/ci.yml/badge.svg)](https://github.com/Genpire/agent-army/actions/workflows/ci.yml)
+[![Image](https://github.com/Genpire/agent-army/actions/workflows/release.yml/badge.svg)](https://github.com/Genpire/agent-army/pkgs/container/agent-army)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-A self-hosted Slack assistant, **Pointer**, with a team of Claude agents that answer questions, research, read your code and turn requests into pull requests. One container, deployable anywhere, configured entirely from its own web page.
+[Run it in 5 minutes](#run-it-in-5-minutes) · [Try the demo](#try-the-demo) · [Screenshots](#screenshots) · [Deploy to Cloud Run](#google-cloud-run) · [Contributing](CONTRIBUTING.md)
+
+<img src="docs/screenshots/chat-task-live.png" alt="The console's Chat page: Pointer has put the team on acme/web, and the task card shows the current step, the plan, and the files the Coder is editing" width="100%">
+
+</div>
+
+## Why Agent Army
+
+- **Ask where you already work.** In Slack (DMs, channels, threads) or in the console's Chat page. Pointer answers questions, researches the web, reads GitHub and the files you share, remembers what you tell it, and opens monday.com tickets.
+- **A team, not a single bot.** Pointer plans; a Coder builds; a Reviewer and QA check the work. Rename them, edit their instructions, add your own roles and pick a model and effort for each.
+- **Watch it work.** Every repo task shows its step (clone, setup, plan, build, verify, publish, checks), the plan as a checklist, what each agent did and for how long, the files and commands, and the result.
+- **It checks its own work.** Agents start your app and click through UI changes in a headless browser with screenshots, wait for CI and fix failing checks, and pick up review comments on the pull request.
+- **Humans stay in charge.** Agents only ever open pull requests; they never push to your branches or merge.
+- **Yours.** MIT licensed and self-hosted: your code, conversations and keys stay in your deployment. You pay only for the Claude API you use, with per-task budgets.
+
+## Run it in 5 minutes
+
+You need Docker and an [Anthropic API key](https://console.anthropic.com). Slack, GitHub and monday.com are optional: connect them later from the console.
+
+```bash
+docker run -d --name agent-army -p 8080:8080 -v agent-army-data:/data \
+  -e MASTER_KEY="$(openssl rand -base64 32)" ghcr.io/genpire/agent-army:latest
+docker logs agent-army 2>&1 | grep setup     # prints the one-time setup token
+```
+
+1. Open http://localhost:8080, paste the setup token and choose an admin password.
+2. On **Integrations → Claude**, paste your API key.
+3. Open **Chat** and ask Pointer anything.
+4. To have the team change code, connect **GitHub** on the same page and ask for a change, for example "in owner/repo: add a dark mode toggle". It comes back as a pull request.
+
+The `MASTER_KEY` encrypts everything the deployment stores; the container keeps it across restarts, so recreate the container with the same key. To use Slack, the deployment must be reachable over public HTTPS: [deploy to Cloud Run](#google-cloud-run), or put a tunnel or TLS proxy in front (see [Anywhere else](#anywhere-else-vm-laptop-kubernetes)).
+
+## Try the demo
+
+See the whole console with sample data, without any account or key:
+
+```bash
+git clone https://github.com/Genpire/agent-army.git && cd agent-army
+npm install && npm run demo
+```
+
+Open http://localhost:8080 and sign in with `agent-army-demo`. The demo seeds a fictional company with tasks, conversations, memory and project notes, and runs a simulated team: ask for a change in Chat and watch it go from plan to pull request. Nothing is sent to Claude, Slack or GitHub.
+
+## Screenshots
+
+| | |
+| --- | --- |
+| <img src="docs/screenshots/overview.png" alt="Overview: Claude spend this month, what is running now, readiness of every integration and recent tasks"> | <img src="docs/screenshots/team.png" alt="Team: each agent with what it does, its access, model and effort, and how a repo task flows through them"> |
+| **Overview:** spend, what is running now, readiness and recent tasks. | **Team:** who does what, their access and models, and how work flows. |
+| <img src="docs/screenshots/integrations.png" alt="Integrations: Claude, Slack, GitHub and monday.com with their status and setup steps"> | <img src="docs/screenshots/activity-dark.png" alt="Activity in dark mode: a finished task with its plan, team, checks and screenshots"> |
+| **Integrations:** every connection, who it is connected as, and how to set it up. | **Activity:** every task's full story: plan, team, files, checks, screenshots. |
+| <img src="docs/screenshots/chat-dark.png" alt="Chat in dark mode: a finished task with its pull request, passing checks and the result message"> | <img src="docs/screenshots/chat-task-live.png" alt="Chat: a task in progress with its live details"> |
+| **Chat:** results arrive as messages, with the pull request and checks. | **Live details:** the step, the plan and each agent's work as it happens. |
+
+## How it works
 
 - **Pointer:** talk to it in a DM, in channels you mark as Pointer channels, or in any thread it is part of. It answers questions, researches the web, reads GitHub and the files you share (designs, code, screenshots, PDFs, zips), remembers facts you give it, opens and updates monday.com tickets (optional), and hands work to its team. Built on the Claude Agent SDK.
 - **The team:** agents you list, name, edit and create on the admin page, for any role: engineering (Coder, Reviewer, QA) or not (Researcher, Writer). Pointer picks the agent whose description fits the job.
@@ -28,20 +89,6 @@ one isolated worker per task
 
 GitHub: review or /pointer comment on the team's PR ──webhook──► follow-up task in the same thread or conversation
 ```
-
-## Quick start
-
-You need Docker (or Node.js 22+), an [Anthropic API key](https://console.anthropic.com), and a Slack workspace where you can install apps. A GitHub token is optional: without one, Pointer still chats and researches.
-
-```bash
-git clone https://github.com/Genpire/agent-army.git
-cd agent-army
-cp .env.example .env                 # set MASTER_KEY=$(openssl rand -base64 32)
-docker compose up -d --build
-docker compose logs agent-army | grep setup   # the one-time setup token
-```
-
-Open http://localhost:8080, paste the setup token, and follow the [onboarding](#onboarding-in-the-web-page) steps. Slack must reach `/slack/events` over public HTTPS: for a quick try, run a tunnel such as `cloudflared tunnel --url http://localhost:8080`, set `PUBLIC_URL` in `.env` to its URL and restart. For a lasting setup, [deploy to Cloud Run](#google-cloud-run) or behind your own TLS proxy.
 
 ## Deploy
 
@@ -90,18 +137,18 @@ Workers run as child processes of the server (`RUNNER=local`). Slack needs to re
 ## Onboarding (in the web page)
 
 1. **Admin account**: paste the setup token, choose a password.
-2. **Claude**: an Anthropic API key. Use a dedicated key with a spend limit.
-3. **Slack**: click *Create Slack app* (the manifest is pre-filled with this deployment's URL and Pointer's name), install it to your workspace, paste the Bot User OAuth Token and Signing Secret. Invite Pointer to the channels where you want it.
-4. **GitHub**: a fine-grained personal access token, ideally on a dedicated bot account, limited to the repos the agents may touch, with *Contents: read/write*, *Pull requests: read/write*, *Metadata: read*, and for the [CI checks](#ci-checks) loop *Checks: read*, *Commit statuses: read* and *Actions: read*. Optionally restrict it to owners or exact repos. For repos outside your organisation, add more tokens under *Other GitHub connections* (see [GitHub connections](#github-connections)). Without GitHub, Pointer still chats; GitHub questions and repo tasks say GitHub is not connected. Optionally add the webhook for [pull request reviews](#pull-request-reviews) on the same card.
-5. **monday.com** (optional): an API token so Pointer can open and update tickets, a default board and the boards it may use. See [monday.com](#mondaycom).
-6. **Projects and rules** (optional): channel → default repo, Pointer channels, who may talk to Pointer, budget and turn limits per task, how long to wait for CI checks and how many fix rounds to run. Per repo, the **Repo setup** card holds a setup command, how to start the app and environment variables (see [Repo setup](#repo-setup)).
+2. **Claude** (Integrations): an Anthropic API key. Use a dedicated key with a spend limit.
+3. **Slack** (Integrations, optional if you only use the console): click *Create Slack app* (the manifest is pre-filled with this deployment's URL and Pointer's name), install it to your workspace, paste the Bot User OAuth Token and Signing Secret. Invite Pointer to the channels where you want it.
+4. **GitHub** (Integrations): a fine-grained personal access token, ideally on a dedicated bot account, limited to the repos the agents may touch, with *Contents: read/write*, *Pull requests: read/write*, *Metadata: read*, and for the [CI checks](#ci-checks) loop *Checks: read*, *Commit statuses: read* and *Actions: read*. Optionally restrict it to owners or exact repos. For repos outside your organisation, add more tokens under *Other GitHub connections* (see [GitHub connections](#github-connections)). Without GitHub, Pointer still chats; GitHub questions and repo tasks say GitHub is not connected. Optionally add the webhook for [pull request reviews](#pull-request-reviews) on the same pane.
+5. **monday.com** (Integrations, optional): an API token so Pointer can open and update tickets, a default board and the boards it may use. See [monday.com](#mondaycom).
+6. **Projects** and **Settings** (optional): channel → default repo and Pointer channels (Projects), who may talk to Pointer, budget and turn limits per task, how long to wait for CI checks and how many fix rounds to run (Settings). Per repo, **Projects → Repo setup** holds a setup command, how to start the app and environment variables (see [Repo setup](#repo-setup)).
 7. **Team** (optional): rename Pointer, give it extra instructions, edit or add agents.
 
 Every credential is verified before it is saved, stored encrypted (AES-256-GCM with `MASTER_KEY`), and never sent back to the browser.
 
 ## GitHub connections
 
-Pointer can hold several GitHub tokens: the primary one on the **GitHub** card, plus up to 10 more under **Other GitHub connections** on the same card. Each has its own allow list.
+Pointer can hold several GitHub tokens: the primary one on **Integrations → GitHub**, plus up to 10 more under **Other connections** on the same pane. Each has its own allow list.
 
 - **Allow lists** are comma separated, and each entry is an owner (`your-org`: every repo of that organisation or user) or an exact repo (`someone/some-repo`). Empty means any repository the token can reach.
 - **Which token is used:** for a repo, the most specific match wins: an exact repo entry, then an owner entry, then a connection with an empty allow list. A repo that no connection allows is refused, for GitHub reads and repo tasks alike.
@@ -192,7 +239,7 @@ The platform then commits, pushes the branch and opens the pull request, waits f
 
 **Unfinished work is kept.** When a task times out (`TASK_TIMEOUT_MIN`, 50 minutes by default) or hits its budget or turn limit, the worker commits what the team has, pushes the branch and opens a **draft** pull request (or comments on the thread's existing one), and says in Slack why it stopped. Reply in the thread (for example `continue`) to resume on the same branch; when the work finishes, the draft is marked ready for review. If the team had changed nothing, there is nothing to publish.
 
-**Progress while the team works.** The progress message is a live dashboard: what is happening now, the lead's plan as a checklist (the lead keeps it with TodoWrite, or TaskCreate/TaskUpdate), which agents are working and for how long, the latest steps (files edited, commands run, each agent's report line) and the files changed so far. Every few minutes (5 by default; **Progress update every** on the Projects card, 0 turns it off) a new update is posted in the thread, so followers are notified. Ask in the thread "how is it going?" and Pointer answers from the same saved progress with its `repo_task_status` tool. All of this is built from the Agent SDK's message stream and costs no Claude credit.
+**Progress while the team works.** The progress message is a live dashboard: what is happening now, the lead's plan as a checklist (the lead keeps it with TodoWrite, or TaskCreate/TaskUpdate), which agents are working and for how long, the latest steps (files edited, commands run, each agent's report line) and the files changed so far. Every few minutes (5 by default; **Progress update every** on the Settings page, 0 turns it off) a new update is posted in the thread, so followers are notified. Ask in the thread "how is it going?" and Pointer answers from the same saved progress with its `repo_task_status` tool. All of this is built from the Agent SDK's message stream and costs no Claude credit.
 
 ### Browser checks
 
@@ -214,9 +261,9 @@ Set `BROWSER=off` on the worker to give the agents no browser. Outside the Docke
 
 After pushing, the worker waits for the pull request's checks: GitHub Actions check runs and the commit statuses other services report (Vercel deployments, for example).
 
-- **Wait for checks** (Projects card, `limits.ciWaitMin`): up to 15 minutes by default, at most 60. `0` skips waiting.
+- **Wait for checks** (**Settings**, `limits.ciWaitMin`): up to 15 minutes by default, at most 60. `0` skips waiting.
 - **Fix rounds for failing checks** (`limits.ciFixRounds`): when checks fail, the team gets each failing check's output and annotations and the end of its GitHub Actions job log, fixes the problem, and the worker pushes and waits again. 2 rounds by default, at most 5; `0` only reports the failures. Fix rounds count against the task's budget, and the worker stops in time to publish before its deadline (`JOB_TIMEOUT_MIN`).
-- The Slack result has a *Checks* line: passed, failed (with the failing checks' names), still running when the wait ended, or no checks. The Activity card on the admin page shows the same.
+- The Slack result has a *Checks* line: passed, failed (with the failing checks' names), still running when the wait ended, or no checks. The **Activity** page and the task's card in Chat show the same.
 
 A fine-grained token needs *Checks: read*, *Commit statuses: read* and *Actions: read* (for job logs) on top of *Contents* and *Pull requests* read/write. Editing an existing token's permissions on GitHub keeps its value, so nothing changes on the admin page. A classic token with the `repo` scope covers them.
 
@@ -236,18 +283,18 @@ Set it up:
 1. On the admin page, open **GitHub → Pull request reviews (webhook)**. It shows the payload URL (`https://<your deployment>/github/webhook`).
 2. In GitHub, open the repository's (or, to cover all its repos, the organisation's) **Settings → Webhooks → Add webhook**.
 3. **Payload URL**: the URL from step 1. **Content type**: `application/json`.
-4. **Secret**: click **Generate** on the card (or use `openssl rand -hex 32`), copy it into GitHub, and **Save** it on the card. It is stored encrypted and never shown again.
+4. **Secret**: click **Generate** on **Integrations → GitHub → Pull request reviews** (or use `openssl rand -hex 32`), copy it into GitHub, and **Save** it there. It is stored encrypted and never shown again.
 5. **Which events**: *Let me select individual events*, then tick **Pull request reviews** and **Issue comments** (untick *Pushes*).
 6. Keep **Active** ticked and click **Add webhook**. The webhook's *Recent Deliveries* tab on GitHub shows each delivery and the response.
 
-Each delivery is checked against the secret (HMAC-SHA256, GitHub's `X-Hub-Signature-256` header) before anything else. **Remove** on the card deletes the secret, after which deliveries are refused.
+Each delivery is checked against the secret (HMAC-SHA256, GitHub's `X-Hub-Signature-256` header) before anything else. **Remove** there deletes the secret, after which deliveries are refused.
 
 ## The team
 
-The **Team** card on the admin page holds Pointer's settings and the agent list.
+The **Team** page holds Pointer's settings, the agent list and how a repo task flows through the agents.
 
 - **Pointer:** its name, extra instructions (appended to its built-in prompt), and per-message limits for conversations: budget (default $1) and turns (default 40).
-- **Model and effort:** the chat model (empty uses the Claude card's model), the chat effort and the repo task effort (`low`, `medium`, `high`, `xhigh`, `max`; both default to `medium`). Each agent can set its own model and effort; an empty effort follows the chat or repo task it is part of. Higher effort thinks longer: better on hard work, slower, and more credit. Sonnet 5.5 costs half as much as Opus 5.5 per token, and Haiku 5.5 far less.
+- **Model and effort:** the chat model (empty uses the model set on **Integrations → Claude**), the chat effort and the repo task effort (`low`, `medium`, `high`, `xhigh`, `max`; both default to `medium`). Each agent can set its own model and effort; an empty effort follows the chat or repo task it is part of. Higher effort thinks longer: better on hard work, slower, and more credit. Sonnet 5.5 costs half as much as Opus 5.5 per token, and Haiku 5.5 far less.
 - **Agents:** a fresh deployment starts with Coder, Reviewer, QA, Researcher and Writer. Add, edit, disable or delete agents. Each has a name, role, emoji, *When should Pointer use this agent?* (Pointer chooses agents by this), instructions, access, model and an enabled switch. The id is derived from the name and does not change.
 
 | Access | Tools in repo tasks |
@@ -271,7 +318,7 @@ USER node
 
 ## Memory
 
-Ask Pointer to remember something (`remember that…`) or forget it, and it carries the fact into every later conversation. Memory holds up to 100 facts of up to 500 characters each, stored encrypted like the config. The **Memory** card lists every fact with its date and a delete button.
+Ask Pointer to remember something (`remember that…`) or forget it, and it carries the fact into every later conversation. Memory holds up to 100 facts of up to 500 characters each, stored encrypted like the config. The **Memory** page lists every fact with its date and a delete button.
 
 Memory is **shared**: every conversation sees every fact, including conversations in public channels. Pointer is told never to save secrets or personal data; don't ask it to.
 
@@ -281,17 +328,17 @@ What the team has learned about each repository (how to build and test it, conve
 
 - **Repo tasks** read the repo's notes at the start (as possibly outdated hints to verify) and rewrite them at the end: they keep what is still true, add what the task learned, drop what is obsolete, and never include secrets. Notes are saved after successful and blocked tasks alike.
 - **In Slack**, Pointer sees the notes for the thread's repo (else the channel's default repo), can read any repo's notes, and adds a line when you say `remember for owner/repo that …`. Notes follow the GitHub allow lists.
-- **On the admin page**, the **Project notes** card lists every repo with its size and last update. Open one to edit it, or add notes for a new repo (`owner/repo`). Saving empty notes deletes them.
+- **On the admin page**, **Projects → Project notes** lists every repo with its size and last update. Open one to edit it, or add notes for a new repo (`owner/repo`). Saving empty notes deletes them.
 
 Notes are limited to 8 000 characters per repo, stored encrypted in the data store (`notes/<owner>__<repo>.enc`), and never written into the checkout, so they never end up in a pull request.
 
 ## Repo setup
 
-How repo tasks prepare and run one repository, set per repo on the admin page's **Repo setup** card. Everything is optional; a repo without a setup is worked out from the project itself.
+How repo tasks prepare and run one repository, set per repo on **Projects → Repo setup**. Everything is optional; a repo without a setup is worked out from the project itself.
 
 - **Setup command**, e.g. `npm ci`, `pip install -r requirements.txt` or `make deps`: run once with `bash` in the checkout after the clone, before the team starts, with the repo's environment variables below. It may run for up to 15 minutes. The team is told whether it worked, how long it took and the last lines of its output (with secrets redacted); when it failed, the team works around it or reports what is missing.
 - **Start command** and **App URL**, e.g. `npm run dev` and `http://localhost:3000`: how the agents start the app and where it answers, for [browser checks](#browser-checks). Without them, the agents use the project's own dev script.
-- **Environment variables**: `NAME=value` lines (one per line; `export ` and quotes around a value are dropped, as in a `.env` file), set in the agents' shell and for the setup command. Values are stored encrypted with the config and never sent back to the browser: the card lists names only. To change a value, enter the line again; leave a name out to keep it; remove one with its **Remove** button. At most 100 per repo; names use letters, digits and `_`, and the names the platform sets itself (`PATH`, `HOME`, `ANTHROPIC_API_KEY`, `MASTER_KEY`, …) are refused.
+- **Environment variables**: `NAME=value` lines (one per line; `export ` and quotes around a value are dropped, as in a `.env` file), set in the agents' shell and for the setup command. Values are stored encrypted with the config and never sent back to the browser: the page lists names only. To change a value, enter the line again; leave a name out to keep it; remove one with its **Remove** button. At most 100 per repo; names use letters, digits and `_`, and the names the platform sets itself (`PATH`, `HOME`, `ANTHROPIC_API_KEY`, `MASTER_KEY`, …) are refused.
 
 The team's prompt gets the variable names, never their values, with the rule not to print them, write them into files or commit `.env` files. The values are also redacted from everything the worker posts or logs. Anything in the agents' shell can still be read by the agents and by the repo's code they run (see [Security model](#security-model)), so use development or test credentials, not production ones.
 
@@ -305,15 +352,15 @@ Optional. With monday.com connected, Pointer can work with tickets from Slack:
 
 It never deletes or archives anything. When a request names no board, Pointer uses the default board; with no default, it asks.
 
-**Connect it** on the admin page's **monday.com** card:
+**Connect it** on **Integrations → monday.com**:
 
 1. In monday.com, click your avatar and choose **Developers**.
 2. Open **My access tokens**, choose **Show** and copy the token.
-3. Paste it into the card. It is verified with monday.com, stored encrypted and never shown again.
+3. Paste it into the pane. It is verified with monday.com, stored encrypted and never shown again.
 
 The token acts as the monday.com user who created it, with everything that user can see and change. Use a dedicated monday.com user (for example "Pointer bot") that is a member of only the boards Pointer should work on.
 
-Once connected, the card offers:
+Once connected, the pane offers:
 
 - **Default board for tickets**, picked from your most recently used boards (search finds others).
 - **Boards Pointer may use**: board ids, comma separated (the number in a board's URL, `…/boards/1234567890`). Empty means every board the token's user can see. When set, Pointer cannot read or change any other board, and the default board must be one of them.
@@ -338,7 +385,7 @@ Until you do, @mentions still work, but DMs, Pointer channels and unmentioned th
 - **GitHub webhook:** `POST /github/webhook` refuses any delivery whose HMAC-SHA256 signature does not match the shared secret, and starts work only for feedback from people with write access to the repository (`OWNER`, `MEMBER`, `COLLABORATOR`) on pull requests the team opened. Bots and the platform's own comments are ignored. The follow-up runs on the same repo, so it is bound by the same allow lists and limits as any task.
 - **Secrets:** in repo tasks the agents' shell gets a minimal environment (no master key, Slack or GitHub tokens) plus the variables the owner set for that repo under [Repo setup](#repo-setup), git credentials are passed per command and never written to `.git/config`, and a shell guard blocks pushing, credential changes and reading platform secrets. The repo's variables, memory, project notes, shared files, the webhook secret and the monday.com token are stored encrypted with the master key; variable values are never sent to the browser or the team's prompt and are redacted from what the worker posts and logs. Message text and file contents are never logged. The Slack token is sent only to `https://files.slack.com` when downloading a file.
 - **Browser:** the browser tools run Chromium in its own process, outside the shell guard, with an environment that holds no secrets. The tool that runs arbitrary code in that process (`browser_run_code_unsafe`) is not offered. Screenshots are written outside the checkout and posted only in the task's own thread.
-- **Limits:** per-message budget and turns for conversations (Team card), per-task budget, turn limit and timeout for repo tasks (Projects card), plus the CI wait and fix rounds, which run within the same budget and the worker's deadline. At most six answers are worked on at once; the rest wait their turn.
+- **Limits:** per-message budget and turns for conversations (**Team**), per-task budget, turn limit and timeout for repo tasks (**Settings**), plus the CI wait and fix rounds, which run within the same budget and the worker's deadline. At most six answers are worked on at once; the rest wait their turn.
 
 Known limits, stated plainly:
 
@@ -413,7 +460,7 @@ Besides the admin API, the service takes `POST /slack/events` from Slack and `PO
 | `GET /api/conversations/:id` | | `{ conversation, tasks, live? }`. `conversation`: `{ id, title, createdAt, updatedAt, pending, taskIds, messages: [{ id, role: "user" \| "pointer", text, at, costUsd?, isError?, activity?, tasks?, result? }] }` (Markdown text; `activity` is Pointer's steps, `tasks` the repo tasks started with that message, `result` marks a task milestone `{ taskId, milestone: "pr" \| "checks" \| "end" }`). `tasks`: its repo tasks, newest first, with progress. `live` while Pointer answers: `{ messageId, startedAt, text, activity, tasks }`. |
 | `POST /api/conversations/:id/messages` | `{ text }` | Sends a message (up to 8 000 characters); `409` while Pointer is still answering. `202` with `{ conversation }`. |
 | `POST /api/conversations/:id/delete` | | Deletes the conversation (`404` if unknown). Its repo tasks keep running. |
-| `GET /api/usage` | | Claude spend this calendar month (UTC): `{ month, chat: { usd, count }, tasks: { usd, count }, totalUsd, topTasks: [{ id, repo, instruction, costUsd, createdAt }] }`. Chat is tallied from each reply's reported cost; tasks from their records. The Activity card and Slack's `status` show it. |
+| `GET /api/usage` | | Claude spend this calendar month (UTC): `{ month, chat: { usd, count }, tasks: { usd, count }, totalUsd, topTasks: [{ id, repo, instruction, costUsd, createdAt }] }`. Chat is tallied from each reply's reported cost; tasks from their records. The Overview and Activity pages and Slack's `status` show it. |
 
 ## Development
 
