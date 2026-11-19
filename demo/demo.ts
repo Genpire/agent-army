@@ -115,6 +115,38 @@ async function seedConfig(): Promise<void> {
         },
       },
     };
+    c.gitlab = {
+      token: "glpat-demo-not-a-real-token-000000",
+      baseUrl: "https://gitlab.com",
+      username: "acme-bot",
+      userId: 4242,
+      allowed: ["acme-group"],
+      webhookSecret: "demo-gitlab-webhook-secret-0123456789",
+    };
+    c.jira = {
+      siteUrl: "https://acme.atlassian.net",
+      email: "pointer-bot@example.com",
+      token: "demo-jira-token-not-real-0000000000",
+      userName: "Pointer bot",
+      accountId: "557058:demo",
+      defaultProjectKey: "WEB",
+      allowedProjectKeys: ["WEB", "API"],
+      confluence: true,
+      automation: {
+        enabled: true,
+        webhookSecret: "demo-jira-webhook-secret-0123456789",
+        projects: {
+          WEB: { repo: "acme/web", startStatus: "Ready for dev", workingStatus: "In Progress", reviewStatus: "In Review", doneStatus: "Done", stuckStatus: "" },
+        },
+      },
+    };
+    c.miro = {
+      token: "demo-miro-token-not-real-000000",
+      userName: "Pointer bot",
+      teamName: "Acme",
+      defaultBoardId: "uXjVDemo0001=",
+      allowedBoardIds: [],
+    };
     c.bindings = { C0ACMEWEB1: "acme/web", C0ACMEAPI1: "acme/api" };
     c.repoSetup = {
       "acme/web": {
