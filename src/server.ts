@@ -3,9 +3,21 @@ import { fileURLToPath } from "node:url";
 import { AttachmentRepo } from "./attachments.js";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { z } from "zod";
-import { CHANNEL_RE, ConfigRepo, REPO_RE, isReady, publicView, resolveMasterKey } from "./config.js";
+import {
+  CHANNEL_RE,
+  ConfigRepo,
+  ENV_KEY_RE,
+  REPO_RE,
+  RESERVED_ENV_KEYS,
+  type RepoSetup,
+  RepoSetupSchema,
+  isReady,
+  publicView,
+  resolveMasterKey,
+} from "./config.js";
 import { hashPassword, randomToken, safeEqual, signSession, verifyPassword, verifySession } from "./crypto.js";
 import { handleSlackEvent } from "./dispatch.js";
+import { RecentSet } from "./listen.js";
 import { MEMORY_MAX_FACTS, MemoryRepo } from "./memory.js";
 import { MondayClient, MondayError, checkMonday } from "./monday.js";
 import { NOTES_MAX_CHARS, NotesRepo } from "./notes.js";
@@ -18,6 +30,7 @@ import { TaskRepo } from "./tasks.js";
 import { TeamSchema } from "./team.js";
 import { checkAnthropic, checkGithub, checkSlack } from "./validate.js";
 import { UsageRepo } from "./usage.js";
+import { handleGithubWebhook, parseGithubPayload, verifyGithubSignature } from "./webhook.js";
 
 const SESSION_COOKIE = "army_session";
 const SESSION_TTL_MS = 1000 * 60 * 60 * 12;
@@ -37,6 +50,44 @@ const ALLOW_LIST = z
   .transform((xs) => [...new Set(xs)]);
 const CONNECTION_ID = z.string().max(40).regex(/^gh-[0-9a-f]{6,}$/, "Connection ids look like gh-1a2b3c.");
 const MAX_EXTRA_GITHUB = 10;
+const CI_WAIT_ERROR = "The wait for checks is a whole number of minutes from 0 to 60.";
+const CI_FIX_ERROR = "Fix rounds are a whole number from 0 to 5.";
+/** GitHub event names, e.g. pull_request_review. */
+const GITHUB_EVENT = z.string().max(100).regex(/^[a-z_]+$/);
+/** The webhook secret pasted in GitHub and on the admin page: printable ASCII without spaces. "" removes it. */
+const WEBHOOK_SECRET = z.union([
+  z.literal(""),
+  z
+    .string()
+    .min(20, "Use a secret of at least 20 characters.")
+    .max(200, "Use a secret of at most 200 characters.")
+    .regex(/^[\x21-\x7e]+$/, "Use printable characters without spaces in the secret."),
+]);
+const REPO_INPUT = z.string().trim().max(200).regex(REPO_RE, "Repos look like owner/repo.");
+const ENV_VALUE_MAX = 10_000;
+/** Variables to set (a string) or delete (null); names left out are kept. */
+const ENV_CHANGES = z
+  .record(
+    z.string(),
+    z.union([
+      z
+        .string()
+        .min(1, "Empty values are not allowed; send null to delete a variable.")
+        .max(ENV_VALUE_MAX, `Variable values are limited to ${ENV_VALUE_MAX} characters.`),
+      z.null(),
+    ]),
+  )
+  .superRefine((env, ctx) => {
+    const names = Object.keys(env);
+    const invalid = names.find((k) => !ENV_KEY_RE.test(k));
+    if (invalid !== undefined) {
+      const shown = invalid.length > 40 ? `${invalid.slice(0, 40)}…` : invalid;
+      ctx.addIssue({ code: "custom", message: `"${shown}" is not a variable name: use letters, digits and _, and do not start with a digit.` });
+      return;
+    }
+    const reserved = names.find((k) => env[k] !== null && RESERVED_ENV_KEYS.has(k));
+    if (reserved) ctx.addIssue({ code: "custom", message: `${reserved} is reserved by the platform.` });
+  });
 
 function newConnectionId(taken: Set<string>): string {
   for (;;) {
@@ -166,10 +217,37 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env) {
     }
   });
 
+  // ---------- GitHub webhook: reviews and comments on the team's pull requests ----------
+  const seenDeliveries = new RecentSet(2000);
+  app.post("/github/webhook", express.raw({ type: "*/*", limit: "5mb" }), async (req, res) => {
+    const secret = (await configRepo.load()).github.webhookSecret;
+    if (!secret) return void res.status(404).json({ error: "GitHub webhook is not configured" });
+    const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+    if (!verifyGithubSignature(secret, rawBody, req.get("x-hub-signature-256"))) {
+      return void res.status(401).json({ error: "Invalid signature." });
+    }
+    const event = GITHUB_EVENT.safeParse(req.get("x-github-event"));
+    if (!event.success) return void res.status(400).json({ error: "Missing or invalid X-GitHub-Event header." });
+    const payload = parseGithubPayload(rawBody, req.get("content-type"));
+    if (payload === undefined) return void res.status(400).json({ error: "Invalid JSON." });
+
+    // A redelivery carries the same id; the first delivery is already handled.
+    const delivery = (req.get("x-github-delivery") ?? "").slice(0, 100);
+    if (delivery && seenDeliveries.has(delivery)) return void res.status(200).json({ ok: true, duplicate: true });
+    if (delivery) seenDeliveries.add(delivery);
+
+    if (event.data === "ping") return void res.status(200).json({ ok: true });
+    // Answer first (GitHub gives up after 10 seconds); the follow-up starts after this.
+    res.status(202).json({ ok: true });
+    void handleGithubWebhook(event.data, payload, slackDeps).catch(() => console.error(`[github] ${event.data} failed`));
+  });
+
   // ---------- Admin API ----------
   // A full team (30 agents with up to 8 000-character instructions) is larger
   // than any other admin payload. The general parser skips an already-read body.
   app.use("/api/team", express.json({ limit: "1mb" }));
+  // A repo setup can hold 100 variables of up to 10 000 characters each.
+  app.use("/api/repo-setup", express.json({ limit: "2mb" }));
   app.use("/api", express.json({ limit: "100kb" }));
 
   const body = <T extends z.ZodType>(schema: T, req: Request, res: Response): z.infer<T> | undefined => {
@@ -196,6 +274,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env) {
             runner: runner.kind,
             storage: store.describe(),
             eventsUrl: `${baseUrl(req)}/slack/events`,
+            githubWebhookUrl: `${baseUrl(req)}/github/webhook`,
           }
         : {}),
     });
@@ -348,6 +427,72 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env) {
     res.json({ ok: true });
   });
 
+  // ---------- GitHub webhook secret ----------
+  // "" removes it, which turns the webhook off. The secret is never returned.
+  app.post("/api/github/webhook", requireAdmin, async (req, res) => {
+    const input = body(z.object({ secret: z.string().trim().pipe(WEBHOOK_SECRET) }), req, res);
+    if (!input) return;
+    await configRepo.update((c) => {
+      c.github.webhookSecret = input.secret || undefined;
+    });
+    res.json({ ok: true, url: `${baseUrl(req)}/github/webhook` });
+  });
+
+  // ---------- Per-repo setup for repo tasks ----------
+  // Fields left out are kept; env merges by name (null deletes). Values are never returned.
+  app.post("/api/repo-setup", requireAdmin, async (req, res) => {
+    const input = body(
+      z.object({
+        repo: REPO_INPUT,
+        setupCommand: z.string().trim().max(2000, "The setup command is limited to 2000 characters.").optional(),
+        startCommand: z.string().trim().max(500, "The start command is limited to 500 characters.").optional(),
+        appUrl: z.string().trim().max(300, "The app URL is limited to 300 characters.").optional(),
+        env: ENV_CHANGES.optional(),
+      }),
+      req,
+      res,
+    );
+    if (!input) return;
+    let error: string | undefined;
+    const updated = await configRepo.update((c) => {
+      const existingKey = repoSetupKey(c.repoSetup, input.repo);
+      const current: RepoSetup = (existingKey && c.repoSetup[existingKey]) || RepoSetupSchema.parse({});
+      const env = { ...current.env };
+      for (const [name, value] of Object.entries(input.env ?? {})) {
+        if (value === null) delete env[name];
+        else env[name] = value;
+      }
+      const merged = RepoSetupSchema.safeParse({
+        setupCommand: input.setupCommand ?? current.setupCommand,
+        startCommand: input.startCommand ?? current.startCommand,
+        appUrl: input.appUrl ?? current.appUrl,
+        env,
+      });
+      if (!merged.success) {
+        error = merged.error.issues[0]?.message ?? "Invalid repository setup.";
+        return;
+      }
+      if (existingKey) delete c.repoSetup[existingKey];
+      c.repoSetup[input.repo] = merged.data;
+    });
+    if (error) return void res.status(400).json({ error });
+    res.json({ ok: true, repoSetup: publicView(updated).repoSetup[input.repo] });
+  });
+
+  app.post("/api/repo-setup/delete", requireAdmin, async (req, res) => {
+    const input = body(z.object({ repo: REPO_INPUT }), req, res);
+    if (!input) return;
+    let found = false;
+    await configRepo.update((c) => {
+      const key = repoSetupKey(c.repoSetup, input.repo);
+      if (!key) return;
+      delete c.repoSetup[key];
+      found = true;
+    });
+    if (!found) return void res.status(404).json({ error: "Not found." });
+    res.json({ ok: true });
+  });
+
   app.post("/api/settings", requireAdmin, async (req, res) => {
     const input = body(
       z.object({
@@ -357,7 +502,14 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env) {
         bindings: z.record(z.string().regex(CHANNEL_RE, "Channel IDs look like C012ABCDEF"), z.string().regex(REPO_RE, "Repos look like owner/repo")).optional(),
         pointerChannels: z.array(z.string().regex(CHANNEL_RE, "Channel IDs look like C012ABCDEF")).max(100).optional(),
         limits: z
-          .object({ maxTurns: z.number(), maxBudgetUsd: z.number(), maxParallel: z.number(), progressEveryMin: z.number() })
+          .object({
+            maxTurns: z.number(),
+            maxBudgetUsd: z.number(),
+            maxParallel: z.number(),
+            progressEveryMin: z.number(),
+            ciWaitMin: z.number().int(CI_WAIT_ERROR).min(0, CI_WAIT_ERROR).max(60, CI_WAIT_ERROR),
+            ciFixRounds: z.number().int(CI_FIX_ERROR).min(0, CI_FIX_ERROR).max(5, CI_FIX_ERROR),
+          })
           .partial()
           .optional(),
       }),
@@ -506,6 +658,12 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env) {
   });
 
   return { app, runner, store };
+}
+
+/** The stored key of a repo's setup: repo names are compared without letter case. */
+function repoSetupKey(setups: Record<string, RepoSetup>, repo: string): string | undefined {
+  const wanted = repo.toLowerCase();
+  return Object.keys(setups).find((k) => k.toLowerCase() === wanted);
 }
 
 /** The first issue as one line. An agent's issue names the agent, so the page can show where it is. */

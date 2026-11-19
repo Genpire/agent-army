@@ -34,7 +34,8 @@ import {
   unreact,
   userName,
 } from "./slack.js";
-import { type Task, type ThreadState, newTaskId } from "./tasks.js";
+import type { ThreadState } from "./tasks.js";
+import { startThreadTask } from "./thread-task.js";
 import {
   type Command,
   helpText,
@@ -307,39 +308,23 @@ function repoTaskStarter(ctx: Ctx, thread: ThreadState | null): StartRepoTask {
       if (!instruction.trim()) return { ok: false, error: "Say what the team should do." };
 
       const threadTs = taskThreadTs(e);
-      const ack = await slack.chat.postMessage({
-        channel: e.channel,
-        thread_ts: threadTs,
-        text:
-          thread && thread.repo === target
-            ? `:saluting_face: Continuing on \`${target}\` (branch \`${thread.branch}\`)…`
-            : `:saluting_face: On it. Putting the team on \`${target}\`…`,
-      });
+      const started = await startThreadTask(
+        { tasks: deps.tasks, runner: deps.runner, slack, redact: ctx.redact },
+        {
+          repo: target,
+          channel: e.channel,
+          threadTs,
+          userId: e.user,
+          instruction,
+          ackText:
+            thread && thread.repo === target
+              ? `:saluting_face: Continuing on \`${target}\` (branch \`${thread.branch}\`)…`
+              : `:saluting_face: On it. Putting the team on \`${target}\`…`,
+          trigger: "slack",
+        },
+      );
       state.postedThreads.add(`${e.channel}:${threadTs}`);
-
-      const now = new Date().toISOString();
-      const task: Task = {
-        id: newTaskId(),
-        createdAt: now,
-        updatedAt: now,
-        status: "queued",
-        repo: target,
-        channel: e.channel,
-        threadTs,
-        progressTs: ack.ts,
-        userId: e.user,
-        instruction: instruction.trim(),
-      };
-      await deps.tasks.save(task);
-      try {
-        await deps.runner.launch(task.id);
-      } catch (err) {
-        task.status = "failed";
-        task.error = `Could not start a worker: ${ctx.redact(errorText(err))}`;
-        await deps.tasks.save(task);
-        return { ok: false, error: task.error };
-      }
-      return { ok: true, taskId: task.id, repo: target };
+      return started.ok ? { ok: true, taskId: started.taskId, repo: target } : started;
     } catch (err) {
       return { ok: false, error: `Could not start the task: ${ctx.redact(errorText(err))}` };
     }

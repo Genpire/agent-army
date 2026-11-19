@@ -419,6 +419,7 @@ describe("handleSlackEvent: start_repo_task", () => {
       userId: "U1",
       instruction: "handle the empty case",
       status: "queued",
+      trigger: "slack",
     });
     expect(t.posts[1]).toMatchObject({ thread_ts: "200.1", text: "The team is on it." });
   });
@@ -505,6 +506,24 @@ describe("handleSlackEvent: start_repo_task", () => {
     expect(results[0]).toMatchObject({ ok: false, error: expect.stringContaining("quota exceeded") });
     const [task] = await t.tasks.recent();
     expect(task).toMatchObject({ status: "failed", error: expect.stringContaining("quota exceeded") });
+  });
+
+  it("saves nothing when the progress message cannot be posted, and redacts the reason", async () => {
+    const t = await setup();
+    const realPost = t.client.chat.postMessage;
+    let failed = false;
+    t.client.chat.postMessage = async (m) => {
+      if (!failed) {
+        failed = true;
+        throw new Error("channel_not_found for xoxb-secret-token");
+      }
+      return realPost(m);
+    };
+    const results = t.brainStartsTask({ instruction: "add a healthcheck" });
+    await t.mention("C1", "1.1", "add a healthcheck");
+    expect(results[0]).toEqual({ ok: false, error: "Could not start the task: channel_not_found for [redacted]" });
+    expect(await t.tasks.recent()).toHaveLength(0);
+    expect(t.launched).toHaveLength(0);
   });
 });
 

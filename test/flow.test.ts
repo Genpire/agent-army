@@ -223,6 +223,29 @@ describe("admin API and Slack events", () => {
       expect((await state()).config.limits).toEqual({ maxTurns: 200, maxBudgetUsd: 20, maxParallel: 5, progressEveryMin: 0, ciWaitMin: 15, ciFixRounds: 2 });
     });
 
+    it("merges and validates the CI wait and fix rounds", async () => {
+      expect((await post("/api/settings", { limits: { ciWaitMin: 30 } })).status).toBe(200);
+      expect((await state()).config.limits).toEqual({ maxTurns: 200, maxBudgetUsd: 20, maxParallel: 5, progressEveryMin: 0, ciWaitMin: 30, ciFixRounds: 2 });
+      expect((await post("/api/settings", { limits: { ciWaitMin: 0, ciFixRounds: 5 } })).status).toBe(200);
+      expect((await state()).config.limits).toMatchObject({ maxParallel: 5, ciWaitMin: 0, ciFixRounds: 5 });
+
+      for (const limits of [{ ciWaitMin: 61 }, { ciWaitMin: -1 }, { ciWaitMin: 1.5 }]) {
+        const res = await post("/api/settings", { limits });
+        expect(res.status).toBe(400);
+        expect(await res.json()).toEqual({ error: "The wait for checks is a whole number of minutes from 0 to 60." });
+      }
+      for (const limits of [{ ciFixRounds: 6 }, { ciFixRounds: -1 }, { ciFixRounds: 0.5 }]) {
+        const res = await post("/api/settings", { limits });
+        expect(res.status).toBe(400);
+        expect(await res.json()).toEqual({ error: "Fix rounds are a whole number from 0 to 5." });
+      }
+      expect((await post("/api/settings", { limits: { ciFixRounds: "2" } })).status).toBe(400);
+      expect((await state()).config.limits).toMatchObject({ ciWaitMin: 0, ciFixRounds: 5 });
+
+      expect((await post("/api/settings", { limits: { ciWaitMin: 15, ciFixRounds: 2 } })).status).toBe(200);
+      expect((await state()).config.limits).toEqual({ maxTurns: 200, maxBudgetUsd: 20, maxParallel: 5, progressEveryMin: 0, ciWaitMin: 15, ciFixRounds: 2 });
+    });
+
     it("saves Pointer channels and validates them", async () => {
       const ok = await post("/api/settings", { pointerChannels: ["C0POINTER", "G0PRIVATE", "C0POINTER"] });
       expect(ok.status).toBe(200);
@@ -385,6 +408,169 @@ describe("admin API and Slack events", () => {
       expect(await res.json()).toEqual({ ok: true });
       expect((await github()).extra).toEqual([]);
       expect((await post("/api/github/connections/delete", { id })).status).toBe(404);
+    });
+  });
+
+  describe("GitHub webhook secret", () => {
+    const SECRET = "whsec-0123456789abcdefghij";
+    const error = async (input: unknown) => {
+      const res = await post("/api/github/webhook", input);
+      return { status: res.status, error: (await res.json()).error as string };
+    };
+
+    it("is admin only, and the state gives the webhook URL", async () => {
+      expect((await post("/api/github/webhook", { secret: SECRET }, false)).status).toBe(401);
+      const s = await state();
+      expect(s.githubWebhookUrl).toBe(`${base}/github/webhook`);
+      expect(s.config.github.webhook).toEqual({ configured: false });
+      expect((await (await get("/api/state", false)).json()).githubWebhookUrl).toBeUndefined();
+    });
+
+    it("saves the secret without ever returning it, and removes it", async () => {
+      const res = await post("/api/github/webhook", { secret: ` ${SECRET} ` });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true, url: `${base}/github/webhook` });
+      const s = await state();
+      expect(s.config.github.webhook).toEqual({ configured: true });
+      expect(JSON.stringify(s)).not.toContain(SECRET);
+
+      const removed = await post("/api/github/webhook", { secret: "" });
+      expect(removed.status).toBe(200);
+      expect(await removed.json()).toEqual({ ok: true, url: `${base}/github/webhook` });
+      expect((await state()).config.github.webhook).toEqual({ configured: false });
+    });
+
+    it("rejects a short, long, spaced or missing secret and keeps the saved one", async () => {
+      expect((await post("/api/github/webhook", { secret: SECRET })).status).toBe(200);
+      expect(await error({ secret: "short-secret" })).toEqual({ status: 400, error: "Use a secret of at least 20 characters." });
+      expect(await error({ secret: "x".repeat(201) })).toEqual({ status: 400, error: "Use a secret of at most 200 characters." });
+      expect(await error({ secret: "has a space 0123456789abc" })).toEqual({ status: 400, error: "Use printable characters without spaces in the secret." });
+      expect((await error({ secret: "tab\there-0123456789abcdef" })).status).toBe(400);
+      expect((await error({ secret: "ünïcödé-0123456789abcdefg" })).status).toBe(400);
+      expect((await error({})).status).toBe(400);
+      expect((await error({ secret: 12345678901234567890 })).status).toBe(400);
+      expect((await state()).config.github.webhook).toEqual({ configured: true });
+      expect((await post("/api/github/webhook", { secret: "" })).status).toBe(200);
+    });
+  });
+
+  describe("repo setup", () => {
+    const setups = async () => (await state()).config.repoSetup as Record<string, unknown>;
+    const save = async (input: unknown) => {
+      const res = await post("/api/repo-setup", input);
+      return { status: res.status, json: await res.json() };
+    };
+    const SECRET_VALUE = "sk_test_repo_setup_value_0123456789";
+
+    it("is admin only", async () => {
+      expect((await post("/api/repo-setup", { repo: "acme/web" }, false)).status).toBe(401);
+      expect((await post("/api/repo-setup/delete", { repo: "acme/web" }, false)).status).toBe(401);
+    });
+
+    it("creates a setup and returns it without the variables' values", async () => {
+      const created = await save({
+        repo: "Acme/Web",
+        setupCommand: " npm ci ",
+        startCommand: "npm run dev",
+        appUrl: "http://localhost:3000",
+        env: { STRIPE_KEY: SECRET_VALUE, DATABASE_URL: "postgres://localhost/dev" },
+      });
+      expect(created).toEqual({
+        status: 200,
+        json: {
+          ok: true,
+          repoSetup: { setupCommand: "npm ci", startCommand: "npm run dev", appUrl: "http://localhost:3000", envKeys: ["DATABASE_URL", "STRIPE_KEY"] },
+        },
+      });
+      expect(await setups()).toEqual({
+        "Acme/Web": { setupCommand: "npm ci", startCommand: "npm run dev", appUrl: "http://localhost:3000", envKeys: ["DATABASE_URL", "STRIPE_KEY"] },
+      });
+      expect(JSON.stringify(await state())).not.toContain(SECRET_VALUE);
+    });
+
+    it("merges field by field, deletes variables with null and keeps the rest", async () => {
+      const merged = await save({ repo: "Acme/Web", startCommand: "npm start", env: { DATABASE_URL: null, NODE_ENV: "test" } });
+      expect(merged.json.repoSetup).toEqual({
+        setupCommand: "npm ci",
+        startCommand: "npm start",
+        appUrl: "http://localhost:3000",
+        envKeys: ["NODE_ENV", "STRIPE_KEY"],
+      });
+
+      // Another letter case is the same repo, stored under the name as given now.
+      const recased = await save({ repo: "acme/web", appUrl: "" });
+      expect(recased.json.repoSetup).toEqual({ setupCommand: "npm ci", startCommand: "npm start", appUrl: "", envKeys: ["NODE_ENV", "STRIPE_KEY"] });
+      expect(Object.keys(await setups())).toEqual(["acme/web"]);
+
+      // Deleting a variable that is not there changes nothing.
+      expect((await save({ repo: "acme/web", env: { MISSING: null } })).json.repoSetup.envKeys).toEqual(["NODE_ENV", "STRIPE_KEY"]);
+    });
+
+    it("rejects invalid input and keeps the saved setup", async () => {
+      const before = await setups();
+      const error = async (input: unknown) => {
+        const { status, json } = await save(input);
+        return { status, error: json.error as string };
+      };
+      expect(await error({ repo: "not a repo" })).toEqual({ status: 400, error: "Repos look like owner/repo." });
+      expect(await error({ repo: "../x" })).toEqual({ status: 400, error: "Repos look like owner/repo." });
+      expect(await error({ repo: "acme/web", env: { PATH: "/tmp" } })).toEqual({ status: 400, error: "PATH is reserved by the platform." });
+      expect(await error({ repo: "acme/web", env: { ANTHROPIC_API_KEY: "x" } })).toEqual({ status: 400, error: "ANTHROPIC_API_KEY is reserved by the platform." });
+      expect(await error({ repo: "acme/web", env: { EMPTY: "" } })).toEqual({
+        status: 400,
+        error: "Empty values are not allowed; send null to delete a variable.",
+      });
+      expect(await error({ repo: "acme/web", env: { "1BAD": "x" } })).toEqual({
+        status: 400,
+        error: '"1BAD" is not a variable name: use letters, digits and _, and do not start with a digit.',
+      });
+      expect(await error({ repo: "acme/web", env: { "BAD-NAME": null } })).toMatchObject({ status: 400 });
+      // A "__proto__" name is dropped by the parser, never stored.
+      const proto = await fetch(base + "/api/repo-setup", {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie },
+        body: '{"repo":"acme/web","env":{"__proto__":"x"}}',
+      });
+      expect((await proto.json()).repoSetup.envKeys).toEqual(["NODE_ENV", "STRIPE_KEY"]);
+      expect(await error({ repo: "acme/web", env: { BIG: "x".repeat(10_001) } })).toEqual({
+        status: 400,
+        error: "Variable values are limited to 10000 characters.",
+      });
+      expect(await error({ repo: "acme/web", env: { NUM: 5 } })).toMatchObject({ status: 400 });
+      expect(await error({ repo: "acme/web", appUrl: "localhost:3000" })).toEqual({
+        status: 400,
+        error: "The app URL must start with http:// or https://",
+      });
+      expect(await error({ repo: "acme/web", setupCommand: "x".repeat(2001) })).toEqual({
+        status: 400,
+        error: "The setup command is limited to 2000 characters.",
+      });
+      expect(await error({ repo: "acme/web", startCommand: 42 })).toMatchObject({ status: 400 });
+
+      // At most 100 variables in all, counting the ones already saved.
+      const many = Object.fromEntries(Array.from({ length: 99 }, (_, i) => [`VAR_${i}`, "v"]));
+      expect(await error({ repo: "acme/web", env: many })).toEqual({ status: 400, error: "At most 100 variables per repository" });
+      expect(await setups()).toEqual(before);
+
+      // A large but valid setup fits through the request size limit.
+      const big = Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`BIG_${i}`, "y".repeat(10_000)]));
+      const saved = await save({ repo: "acme/big", env: big });
+      expect(saved.status).toBe(200);
+      expect(saved.json.repoSetup.envKeys).toHaveLength(20);
+    });
+
+    it("deletes a setup, and 404s when there is none", async () => {
+      const res = await post("/api/repo-setup/delete", { repo: "ACME/web" });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true });
+      expect(Object.keys(await setups())).toEqual(["acme/big"]);
+
+      const again = await post("/api/repo-setup/delete", { repo: "acme/web" });
+      expect(again.status).toBe(404);
+      expect(await again.json()).toEqual({ error: "Not found." });
+      expect((await post("/api/repo-setup/delete", { repo: "bad repo" })).status).toBe(400);
+      expect((await post("/api/repo-setup/delete", { repo: "acme/big" })).status).toBe(200);
+      expect(await setups()).toEqual({});
     });
   });
 
