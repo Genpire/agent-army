@@ -24,6 +24,11 @@ SERVICE_CPU="${SERVICE_CPU:-8}"
 SERVICE_MEMORY="${SERVICE_MEMORY:-8Gi}"
 JOB_CPU="${JOB_CPU:-8}"
 JOB_MEMORY="${JOB_MEMORY:-8Gi}"
+# Hard deadline of one task's worker. The team's own run stops at
+# TASK_TIMEOUT_MIN (50); waiting for the pull request's checks, fix rounds and
+# publishing happen after it, so the job gets more time. Cloud Run Jobs allow
+# up to 24 h.
+JOB_TIMEOUT_MIN="${JOB_TIMEOUT_MIN:-180}"
 [ -n "$PROJECT" ] || { echo "Set PROJECT=<gcp-project-id>"; exit 1; }
 
 BUCKET="${PROJECT}-${NAME}-data"
@@ -76,9 +81,9 @@ echo "==> Worker job (one isolated container per task)"
 $G run jobs deploy "${JOB}" --region "${REGION}" --image "${IMAGE}" \
   --service-account "${WORKER_SA}" \
   --command node --args dist/worker.js \
-  --set-env-vars "${COMMON_ENV}" \
+  --set-env-vars "${COMMON_ENV},JOB_TIMEOUT_MIN=${JOB_TIMEOUT_MIN}" \
   --set-secrets "MASTER_KEY=${NAME}-master-key:latest" \
-  --cpu "${JOB_CPU}" --memory "${JOB_MEMORY}" --task-timeout 3600 --max-retries 0
+  --cpu "${JOB_CPU}" --memory "${JOB_MEMORY}" --task-timeout "$((JOB_TIMEOUT_MIN * 60))" --max-retries 0
 
 # The server may start worker executions (with the task id as an override) and nothing else.
 $G run jobs add-iam-policy-binding "${JOB}" --region "${REGION}" \
@@ -109,9 +114,14 @@ New install: open the URL, create the admin account with the setup token, then
 connect Claude, Slack and GitHub in the page. Nothing else needs to be configured.
 
 Already have a Slack app from an earlier version? Update it so Pointer receives
-DMs and channel messages: on the page, Slack > "Already created the app? Update
-it", copy the manifest into https://api.slack.com/apps > your app > App Manifest,
-Save, then Install App > Reinstall.
+DMs and channel messages and can post screenshots (files:write): on the page,
+Slack > "Already created the app? Update it", copy the manifest into
+https://api.slack.com/apps > your app > App Manifest, Save, then Install App >
+Reinstall.
+
+Pull request reviews: to let reviews on the team's pull requests start
+follow-up tasks, add a GitHub webhook to ${URL}/github/webhook (see the
+GitHub card on the page).
 
 Smoke test (runs Pointer once inside the worker job, no Slack needed):
   gcloud run jobs execute ${JOB} --project ${PROJECT} --region ${REGION} \\

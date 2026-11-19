@@ -17,6 +17,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && mkdir -p /data && chown node:node /data
 WORKDIR /app
 COPY --from=build /app/node_modules ./node_modules
+# Headless Chromium for browser checks in repo tasks (the Playwright MCP server).
+# Installed with the Playwright CLI that @playwright/mcp uses, so the browser
+# build matches it; system libraries come with --with-deps. Set BROWSER=off at
+# runtime to give agents no browser.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN node node_modules/playwright/cli.js install --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/* \
+    && chmod -R a+rX /ms-playwright
 COPY --from=build /app/dist ./dist
 COPY package.json ./
 COPY public ./public
