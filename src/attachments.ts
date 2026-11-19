@@ -15,8 +15,8 @@ export interface AttachmentInfo {
   name: string;
   mime: string;
   size: number;
-  source: "slack" | "monday";
-  /** Slack file id or monday asset id, used to avoid storing the same file twice. */
+  source: "slack" | "monday" | "jira";
+  /** Slack file id, monday asset id or Jira issue/attachment id, used to avoid storing the same file twice. */
   sourceId?: string;
   addedAt: string;
 }
