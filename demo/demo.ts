@@ -56,6 +56,9 @@ const asset = (name: string) => readFile(new URL(`./assets/${name}`, import.meta
 const DEMO_NAMES: Record<string, string> = { coder: "Sara", reviewer: "Omar", qa: "Lina", researcher: "Kenji", writer: "Maya", hr: "Noor", scout: "Diego" };
 const TEAM: Team = defaultTeam();
 for (const a of TEAM.agents) a.name = DEMO_NAMES[a.id] ?? a.name;
+/** Apps the demo agents have (seedConfig connects them): Sara and Lina read Sentry and Vercel, Kenji reads Linear and Notion. */
+const DEMO_AGENT_APPS: Record<string, string[]> = { coder: ["app-sentry", "app-vercel"], qa: ["app-sentry", "app-vercel"], researcher: ["app-linear", "app-notion"] };
+for (const a of TEAM.agents) a.apps = DEMO_AGENT_APPS[a.id] ?? [];
 /** How the worker labels an agent's work, e.g. ":hammer_and_wrench: Sara (Coder)". */
 const label = (id: string) => agentLabel(TEAM.agents.find((a) => a.id === id)!);
 const CODER = label("coder");
@@ -147,6 +150,82 @@ async function seedConfig(): Promise<void> {
       defaultBoardId: "uXjVDemo0001=",
       allowedBoardIds: [],
     };
+    // Apps connected through their MCP servers (fake sign-ins; nothing is called in the demo).
+    const tool = (name: string, description: string, readOnly = true) => ({ name, description, readOnly });
+    const signedIn = { type: "oauth" as const, oauth: { tokens: { access_token: "demo-oauth-token-not-real", token_type: "Bearer" }, expiresAt: Date.now() + 30 * 24 * 3_600_000 } };
+    const checkedAt = new Date(Date.now() - 2 * 3_600_000).toISOString();
+    c.apps = [
+      {
+        id: "app-linear",
+        name: "Linear",
+        presetId: "linear",
+        url: "https://mcp.linear.app/mcp",
+        transport: "http",
+        auth: signedIn,
+        access: "write",
+        disabledTools: [],
+        tools: [tool("list_issues", "List issues"), tool("get_issue", "Read an issue"), tool("create_issue", "Create an issue", false), tool("update_issue", "Update an issue", false)],
+        checkedAt,
+        agentIds: ["researcher"],
+        enabled: true,
+      },
+      {
+        id: "app-sentry",
+        name: "Sentry",
+        presetId: "sentry",
+        url: "https://mcp.sentry.dev/mcp",
+        transport: "http",
+        auth: signedIn,
+        access: "read",
+        disabledTools: [],
+        tools: [tool("search_issues", "Search issues"), tool("get_issue_details", "Read an issue and its events"), tool("update_issue", "Resolve or assign an issue", false)],
+        checkedAt,
+        agentIds: ["coder", "qa"],
+        enabled: true,
+      },
+      {
+        id: "app-vercel",
+        name: "Vercel",
+        presetId: "vercel",
+        url: "https://mcp.vercel.com",
+        transport: "http",
+        auth: signedIn,
+        access: "read",
+        disabledTools: [],
+        tools: [tool("list_deployments", "List deployments"), tool("get_deployment_build_logs", "Read a deployment's build logs")],
+        checkedAt,
+        agentIds: ["coder", "qa"],
+        enabled: true,
+      },
+      {
+        id: "app-notion",
+        name: "Notion",
+        presetId: "notion",
+        url: "https://mcp.notion.com/mcp",
+        transport: "http",
+        auth: signedIn,
+        access: "read",
+        disabledTools: [],
+        tools: [tool("search", "Search pages and databases"), tool("fetch", "Read a page")],
+        checkedAt,
+        agentIds: ["researcher"],
+        enabled: true,
+      },
+      {
+        id: "app-stripe",
+        name: "Stripe",
+        presetId: "stripe",
+        url: "https://mcp.stripe.com",
+        transport: "http",
+        auth: { type: "bearer", token: "rk_test_demo_not_a_real_key_000000" },
+        access: "read",
+        disabledTools: [],
+        tools: [tool("list_customers", "List customers"), tool("list_subscriptions", "List subscriptions"), tool("create_refund", "Refund a payment", false)],
+        checkedAt,
+        agentIds: [],
+        enabled: true,
+      },
+    ];
     c.bindings = { C0ACMEWEB1: "acme/web", C0ACMEAPI1: "acme/api" };
     c.repoSetup = {
       "acme/web": {
