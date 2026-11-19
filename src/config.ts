@@ -566,7 +566,8 @@ export function integrationSecrets(c: Config): string[] {
       case "bearer":
         return [a.auth.token];
       case "headers":
-        return Object.values(a.auth.headers);
+        // The whole value, and the key inside a templated one ("Token token=<key>", "ApiKey <key>").
+        return Object.values(a.auth.headers).flatMap((v) => [v, ...v.split(/[\s=]+/).filter((part) => part.length >= 12)]);
       case "oauth": {
         const t = a.auth.oauth.tokens ?? {};
         const client = a.auth.oauth.clientInformation ?? {};

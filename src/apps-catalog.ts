@@ -6,18 +6,25 @@
  * list sorted by category, then name. Anything else is still reachable as a
  * custom app or through the MCP Registry search (apps-registry.ts).
  */
+import { MORE_APPS } from "./apps-catalog-more.js";
 
 export const APP_CATEGORIES = [
+  "AI & search",
   "Automation",
+  "Communication",
   "CRM & support",
   "Data",
   "Deploy & cloud",
   "Design",
   "Developer tools",
   "Docs & knowledge",
+  "Files & productivity",
+  "Finance & HR",
+  "Marketing & analytics",
   "Monitoring",
   "Payments",
   "Project management",
+  "Security",
 ] as const;
 export type AppCategory = (typeof APP_CATEGORIES)[number];
 
@@ -80,7 +87,7 @@ export interface CatalogApp {
   urlHint?: string;
 }
 
-export const APP_CATALOG: CatalogApp[] = [
+const BASE_APPS: CatalogApp[] = [
   {
     id: "make",
     name: "Make",
@@ -522,4 +529,9 @@ export const APP_CATALOG: CatalogApp[] = [
 ];
 
 /** A catalog entry by id. */
+/** Every catalog app (these and apps-catalog-more.ts), sorted by category, then name. */
+export const APP_CATALOG: CatalogApp[] = [...BASE_APPS, ...MORE_APPS].sort(
+  (x, y) => x.category.localeCompare(y.category) || x.name.localeCompare(y.name),
+);
+
 export const catalogApp = (id: string | undefined): CatalogApp | undefined => (id ? APP_CATALOG.find((a) => a.id === id) : undefined);
