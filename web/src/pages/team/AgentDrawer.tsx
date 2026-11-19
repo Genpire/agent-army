@@ -6,6 +6,8 @@ import { Heading } from "@astryxdesign/core/Heading";
 import { HStack } from "@astryxdesign/core/HStack";
 import { Icon } from "@astryxdesign/core/Icon";
 import { Layout, LayoutContent, LayoutFooter } from "@astryxdesign/core/Layout";
+import { Link } from "@astryxdesign/core/Link";
+import { MultiSelector } from "@astryxdesign/core/MultiSelector";
 import { RadioList, RadioListItem } from "@astryxdesign/core/RadioList";
 import { Selector } from "@astryxdesign/core/Selector";
 import { Switch } from "@astryxdesign/core/Switch";
@@ -15,8 +17,10 @@ import { TextInput } from "@astryxdesign/core/TextInput";
 import { VStack } from "@astryxdesign/core/VStack";
 import { type ReactNode, useMemo, useState } from "react";
 import { ConfirmButton } from "../../components/ConfirmButton";
+import { href } from "../../lib/router";
 import { ACCESS_OPTIONS, type AgentSpec } from "../../lib/types";
 import { useAction } from "../../lib/useAction";
+import { useSkillLibrary } from "../skills/useSkillLibrary";
 import { ACCESS_ICON } from "./AccessToken";
 import { AgentEmoji } from "./AgentEmoji";
 import {
@@ -87,6 +91,55 @@ function FormSection({ title, description, children }: { title: string; descript
         {description && <Text type="supporting">{description}</Text>}
       </VStack>
       {children}
+    </VStack>
+  );
+}
+
+/**
+ * The library's skills this agent has. Skills given to every agent are shown,
+ * not picked: they are changed on the Skills page.
+ */
+function SkillsField({ value, onChange, lead }: { value: string[]; onChange: (skills: string[]) => void; lead: string }) {
+  const library = useSkillLibrary();
+  const skills = library.data?.skills ?? [];
+  const forEveryone = skills.filter((s) => s.assignedTo === "all").map((s) => s.name);
+  const pickable = skills.filter((s) => s.assignedTo !== "all");
+  const installed = new Set(pickable.map((s) => s.name));
+  const manage = (
+    <Link href={href("skills")} isStandalone>
+      Skills page
+    </Link>
+  );
+
+  if (library.error) return <Text color="secondary">Couldn't load the skills library: {library.error}</Text>;
+  if (library.data && skills.length === 0) {
+    return (
+      <Text type="supporting">
+        No skills are installed yet. Add or find some on the {manage}; {lead} and the agents use them once they are installed.
+      </Text>
+    );
+  }
+  return (
+    <VStack gap={2}>
+      {(!library.data || pickable.length > 0) && (
+        <MultiSelector
+          label="Skills"
+          isLabelHidden
+          placeholder="Pick skills"
+          options={pickable.map((s) => ({ value: s.name, label: s.name }))}
+          value={value.filter((name) => installed.has(name))}
+          onChange={onChange}
+          triggerDisplay="badges"
+          hasSearch={pickable.length > 12}
+          isLoading={!library.data}
+          isDisabled={!library.data}
+          width="100%"
+        />
+      )}
+      <Text type="supporting">
+        {forEveryone.length ? `Every agent also has ${forEveryone.join(", ")}. ` : ""}
+        Install skills and choose who uses them on the {manage}.
+      </Text>
     </VStack>
   );
 }
@@ -221,6 +274,11 @@ function AgentForm({ target, takenIds, lead, onClose, onSave, onDelete }: Omit<A
                   description="How hard it thinks. Higher is slower and uses more credit."
                 />
               </Grid>
+            </FormSection>
+
+            <Divider />
+            <FormSection title="Skills" description="Skills from the team's library this agent has loaded when it starts work.">
+              <SkillsField value={draft.skills} onChange={set("skills")} lead={lead} />
             </FormSection>
 
             <Divider />

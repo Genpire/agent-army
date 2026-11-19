@@ -41,11 +41,13 @@ import { type QueryFn, createPointerBrain } from "./pointer.js";
 import type { PointerBrain, SlackDeps, SlackMessageEvent } from "./pointer-types.js";
 import { type Runner, createRunner } from "./runner.js";
 import { SCREENSHOT_NAME_RE, ScreenshotRepo, TASK_ID_RE, screenshotType } from "./screenshots.js";
+import { SCOUT_NEED_MAX_CHARS, findSkills } from "./skill-scout.js";
+import { type FetchLike, SKILL_LIMITS, SkillLibrary, SkillsPluginCache, skillView } from "./skills.js";
 import { buildManifest, manifestCreateUrl, slackClient, verifySlackSignature } from "./slack.js";
 import { createStore } from "./store.js";
 import { readTimeline } from "./task-events.js";
 import { TaskRepo } from "./tasks.js";
-import { TeamSchema } from "./team.js";
+import { SKILL_NAME_RE, TeamSchema } from "./team.js";
 import { rememberConsoleUrl } from "./ticket-sync.js";
 import { checkAnthropic, checkGithub, checkSlack } from "./validate.js";
 import { UsageRepo } from "./usage.js";
@@ -155,7 +157,23 @@ export interface AppOverrides {
   slack?: SlackDeps["slack"];
   /** The Agent SDK's query for HR reviews (see hr.ts). */
   hrQuery?: QueryFn;
+  /** The skills library's GitHub reads and the Skills Scout's query. */
+  skills?: { fetch?: FetchLike; scoutQuery?: QueryFn };
 }
+
+/** A skill's assignment: every agent, or the listed agent ids. */
+const SKILL_ASSIGNMENT = z.union(
+  [z.literal("all"), z.array(z.string().max(40)).max(30, "A team has at most 30 agents.").transform((ids) => [...new Set(ids)])],
+  { error: 'Assign a skill to "all" or to a list of agent ids.' },
+);
+/** A skill to preview or install: a GitHub folder or a pasted SKILL.md. */
+const SKILL_INPUT = z
+  .object({
+    url: z.string().trim().max(500, "That address is too long.").optional(),
+    skillMd: z.string().max(SKILL_LIMITS.maxPastedBytes, `A pasted SKILL.md may be at most ${SKILL_LIMITS.maxPastedBytes / 1024} KB.`).optional(),
+    assignedTo: SKILL_ASSIGNMENT.optional(),
+  })
+  .refine((x) => Boolean(x.url) !== Boolean(x.skillMd?.trim()), "Give the GitHub address of a skill's folder, or paste a SKILL.md.");
 
 export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides: AppOverrides = {}) {
   const store = createStore(env);
@@ -167,9 +185,13 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
   const attachments = new AttachmentRepo(store, masterKey);
   const screenshots = new ScreenshotRepo(store, masterKey);
 
+  // The skills library; Pointer's chat loads it as a plugin built in this service's temp dir.
+  const skills = new SkillLibrary(store, masterKey, { configRepo, ...(overrides.skills?.fetch ? { fetch: overrides.skills.fetch } : {}) });
+  const skillsPlugin = new SkillsPluginCache(skills);
+
   let maxParallel = (await configRepo.load()).limits.maxParallel;
   const runner = overrides.runner ?? createRunner(() => maxParallel, env);
-  const brain = overrides.brain ?? createPointerBrain({ configRepo, memory, notes, attachments });
+  const brain = overrides.brain ?? createPointerBrain({ configRepo, memory, notes, attachments }, { skills: () => skillsPlugin.current() });
   const usage = new UsageRepo(store, tasks);
   const slackFactory = overrides.slack ?? slackClient;
   // Spending caps for every start path (Slack, console, GitHub reviews) and chat; alerts in Slack.
@@ -348,6 +370,8 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
   app.use("/api/team", express.json({ limit: "1mb" }));
   // A repo setup can hold 100 variables of up to 10 000 characters each.
   app.use("/api/repo-setup", express.json({ limit: "2mb" }));
+  // A pasted SKILL.md can be up to 256 KB.
+  app.use("/api/skills", express.json({ limit: "600kb" }));
   app.use("/api", express.json({ limit: "100kb" }));
 
   const body = <T extends z.ZodType>(schema: T, req: Request, res: Response): z.infer<T> | undefined => {
@@ -855,6 +879,8 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
     spending,
     config: () => configRepo.load(true),
     updateConfig: (mutate) => configRepo.update(mutate),
+    // The installed skills, from the library's own index (not guessed from store keys).
+    skills: async () => (await skills.list()).map((s) => ({ name: s.name, description: s.description })),
     queryFn: overrides.hrQuery,
   });
   const HR_PROPOSAL_PARAMS = z.object({
@@ -934,6 +960,90 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
     if (!input) return;
     const saved = await notes.put(input.repo.trim(), input.text);
     if (!saved.ok) return void res.status(400).json({ error: saved.error });
+    res.json({ ok: true });
+  });
+
+  // ---------- Skills library and the Skills Scout ----------
+  const skillName = (req: Request, res: Response): string | undefined => {
+    const name = String(req.params.name ?? "");
+    if (SKILL_NAME_RE.test(name)) return name;
+    res.status(400).json({ error: "Skill names use lowercase letters, digits and dashes." });
+    return undefined;
+  };
+  const skillInput = (input: z.infer<typeof SKILL_INPUT>) => (input.url ? { url: input.url } : { skillMd: input.skillMd ?? "" });
+
+  app.get("/api/skills", requireAdmin, async (_req, res) => {
+    const [list, config] = await Promise.all([skills.list(true), configRepo.load()]);
+    res.json({ skills: list.map((s) => skillView(s, config.team)), limits: SKILL_LIMITS });
+  });
+
+  // What an install would add (files, frontmatter, scripts, licence, problems); installs nothing.
+  app.post("/api/skills/preview", requireAdmin, async (req, res) => {
+    const input = body(SKILL_INPUT, req, res);
+    if (!input) return;
+    const result = await skills.preview(skillInput(input), await configRepo.load(true));
+    if (!result.ok) return void res.status(400).json({ error: result.error });
+    res.json({ preview: result.preview });
+  });
+
+  app.post("/api/skills/install", requireAdmin, async (req, res) => {
+    const input = body(SKILL_INPUT, req, res);
+    if (!input) return;
+    const result = await skills.install(skillInput(input), await configRepo.load(true), input.assignedTo);
+    if (!result.ok) return void res.status(400).json({ error: result.error });
+    res.json({ ok: true, skill: skillView(result.skill, (await configRepo.load(true)).team) });
+  });
+
+  // Search the web for skills that fit a need (one Claude query, read-only tools, the monthly cap applies).
+  app.post("/api/skills/find", requireAdmin, async (req, res) => {
+    const input = body(
+      z.object({
+        need: z
+          .string()
+          .trim()
+          .min(3, "Describe what the team needs a skill for.")
+          .max(SCOUT_NEED_MAX_CHARS, `Describe the need in at most ${SCOUT_NEED_MAX_CHARS} characters.`),
+      }),
+      req,
+      res,
+    );
+    if (!input) return;
+    const [config, installed] = await Promise.all([configRepo.load(true), skills.list()]);
+    const result = await findSkills(input.need, {
+      config,
+      spending,
+      usage,
+      installed: installed.map((s) => s.name),
+      ...(overrides.skills?.scoutQuery ? { queryFn: overrides.skills.scoutQuery } : {}),
+    });
+    if (!result.ok) return void res.status(result.status).json({ error: result.error });
+    res.json({ candidates: result.candidates, ...(result.costUsd !== undefined ? { costUsd: result.costUsd } : {}) });
+  });
+
+  app.get("/api/skills/:name", requireAdmin, async (req, res) => {
+    const name = skillName(req, res);
+    if (!name) return;
+    const meta = await skills.get(name);
+    const text = meta && (await skills.skillMd(name));
+    if (!meta || text === undefined) return void res.status(404).json({ error: `No skill named ${name} is installed.` });
+    res.json({ skill: skillView(meta, (await configRepo.load()).team), skillMd: text });
+  });
+
+  app.post("/api/skills/:name/assign", requireAdmin, async (req, res) => {
+    const name = skillName(req, res);
+    if (!name) return;
+    const input = body(z.object({ assignedTo: SKILL_ASSIGNMENT }), req, res);
+    if (!input) return;
+    if (!(await skills.get(name))) return void res.status(404).json({ error: `No skill named ${name} is installed.` });
+    const result = await skills.assign(name, input.assignedTo);
+    if (!result.ok) return void res.status(400).json({ error: result.error });
+    res.json({ ok: true, skill: skillView(result.skill, (await configRepo.load(true)).team) });
+  });
+
+  app.post("/api/skills/:name/delete", requireAdmin, async (req, res) => {
+    const name = skillName(req, res);
+    if (!name) return;
+    if (!(await skills.remove(name))) return void res.status(404).json({ error: `No skill named ${name} is installed.` });
     res.json({ ok: true });
   });
 

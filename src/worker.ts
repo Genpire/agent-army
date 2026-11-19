@@ -29,11 +29,12 @@ import { type PlanItem, ProgressTracker, formatProgress } from "./progress.js";
 import { findRepoSetup, repoSetupContext, runSetupCommand, setupEnv } from "./repo-setup.js";
 import { ScreenshotRepo } from "./screenshots.js";
 import { HISTORY_SCAN, routeRepoTask } from "./sizing.js";
+import { SkillLibrary, materializeSkills } from "./skills.js";
 import { slackClient, slackErrorCode, toMrkdwn, truncate, uploadThreadFiles } from "./slack.js";
 import { createStore } from "./store.js";
 import { TimelineRecorder, checkItems, plainLine } from "./task-events.js";
 import { type Task, type TaskPhase, type TaskReport, TaskRepo, type ThreadState, decodeTaskPayload, isWebTask } from "./tasks.js";
-import { type RepoAgentOptions, type Team, agentLabel, buildRepoAgents, repoAllowedTools } from "./team.js";
+import { type RepoAgentOptions, type Team, type TeamSkills, agentLabel, buildRepoAgents, repoAllowedTools, skillQueryOptions } from "./team.js";
 import { ticketFinished, ticketPrOpened, ticketStarted, ticketStopped, ticketSyncDeps } from "./ticket-sync.js";
 import { UsageRepo } from "./usage.js";
 
@@ -49,19 +50,24 @@ export function subagentLabel(team: Team, subagentType: string | undefined): str
  * The parts of the query that come from the configured team: Pointer's prompt, the subagents and what they may use.
  * With shared files (context.attachments) and the folder they were written to, that folder is opened to the team too,
  * and so is the screenshots folder when the team has a browser (`opts.browser`, `context.browser`).
+ * With installed skills (`opts.skills`), the library's plugin is loaded, each agent gets its assigned skills
+ * preloaded, the Skill tool is allowed and the plugin folder is opened to the team (skills' scripts and references).
  */
 export function teamQueryOptions(
   config: Config,
   context: OrchestratorContext = {},
   attachmentsDir?: string,
   opts: RepoAgentOptions = {},
-): Required<Pick<Options, "systemPrompt" | "agents" | "allowedTools" | "effort">> & Pick<Options, "additionalDirectories"> {
-  // Both sit next to the checkout, not in it, so nothing in them is ever committed.
+): Required<Pick<Options, "systemPrompt" | "agents" | "allowedTools" | "effort">> & Pick<Options, "additionalDirectories" | "plugins" | "skills"> {
+  const skills = skillQueryOptions(opts.skills);
+  // All sit next to the checkout, not in it, so nothing in them is ever committed.
   const directories = [
     ...(attachmentsDir && context.attachments?.length ? [attachmentsDir] : []),
     ...(opts.browser && context.browser ? [context.browser.shotsDir] : []),
+    ...(skills && opts.skills ? [opts.skills.pluginDir] : []),
   ];
   return {
+    ...(skills ?? {}),
     systemPrompt: { type: "preset", preset: "claude_code", append: orchestratorPrompt(config, context) },
     // Each agent carries its own effort (its setting, or this one).
     effort: config.team.pointer.taskEffort,
@@ -185,6 +191,31 @@ export async function materializeAttachments(
     if (failed) console.error(`[worker] skipped ${failed} file(s) in shared zip ${info.id} that could not be written`);
   }
   return out;
+}
+
+/**
+ * The installed skills written into `dir` (outside the checkout) as the plugin
+ * the team loads, or undefined when none is installed. Never throws: a library
+ * that cannot be read is logged (redacted) and the team runs without skills.
+ */
+export async function prepareSkills(
+  library: Pick<SkillLibrary, "list" | "readFiles">,
+  dir: string,
+  redact: (text: string) => string = (t) => t,
+): Promise<TeamSkills | undefined> {
+  try {
+    return await materializeSkills(library, dir);
+  } catch (err) {
+    console.error(`[worker] could not load the skills library: ${redact(errorText(err)).slice(0, 300)}`);
+    return undefined;
+  }
+}
+
+/** The timeline's line about the skills the team has. */
+export function skillsNote(skills: TeamSkills): string {
+  const names = skills.skills.map((s) => s.name);
+  const shown = names.slice(0, 8).join(", ") + (names.length > 8 ? ` and ${names.length - 8} more` : "");
+  return `The team has ${names.length} skill${names.length === 1 ? "" : "s"} from the library: ${shown}`;
 }
 
 export function branchName(instruction: string, taskId: string): string {
@@ -666,6 +697,8 @@ async function main(): Promise<void> {
   const attachmentsDir = join(workRoot, "attachments");
   // Screenshots from the browser checks: next to the checkout too, posted in the thread after the task.
   const shotsDir = join(workRoot, "screenshots");
+  // The skills library as a local plugin: next to the checkout as well, so no skill file is ever committed.
+  const skillsDir = join(workRoot, "skills-plugin");
   const git = async (args: string[], opts: { auth?: boolean; cwd?: string } = {}) => {
     const full = opts.auth ? ["-c", `http.https://github.com/.extraheader=${authHeader}`, ...args] : args;
     try {
@@ -787,6 +820,10 @@ async function main(): Promise<void> {
     // Agents that can run commands get a headless browser when this worker has one.
     await mkdir(shotsDir, { recursive: true });
     const browser = browserAvailable() ? browserServer(shotsDir) : undefined;
+
+    // Skills from the team's library; a library that cannot be read leaves the team without skills, never fails the task.
+    const skills = await prepareSkills(new SkillLibrary(store, masterKey), skillsDir, redact);
+    if (skills) timeline.add({ kind: "note", text: skillsNote(skills) });
 
     // Reviews and comments on the pull request since the last run, by people with write access.
     // Feedback written from now on is new to the next run (see lastRunAt below).
@@ -941,7 +978,7 @@ async function main(): Promise<void> {
           options: {
             cwd: repoDir,
             abortController: opts.abort,
-            ...teamQueryOptions(runConfig, opts.context, attachmentsDir, { browser }),
+            ...teamQueryOptions(runConfig, opts.context, attachmentsDir, { browser, skills }),
             // Headless: nothing can prompt, so anything not in allowedTools is denied.
             permissionMode: "dontAsk",
             settingSources: ["project"], // loads the project's own CLAUDE.md

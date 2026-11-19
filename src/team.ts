@@ -37,6 +37,40 @@ export const RESERVED_AGENT_IDS = [
 /** A skill's name, as Claude skills name them: lowercase letters, digits and dashes (see skills.ts). */
 export const SKILL_NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
+/** The local plugin the skills library is written as (skills.ts); its skills are named `team-skills:<name>`. */
+export const SKILLS_PLUGIN = "team-skills";
+
+/** A library skill's name as the Agent SDK knows it once the plugin is loaded. */
+export const pluginSkillName = (name: string) => `${SKILLS_PLUGIN}:${name}`;
+
+/** The installed skills library, written out as a local plugin for one run (see skills.ts). */
+export interface TeamSkills {
+  /** The plugin directory: outside any repository checkout. */
+  pluginDir: string;
+  /** Every installed skill. */
+  skills: { name: string; description: string }[];
+  /** Names of the skills assigned to every agent. */
+  everyone: string[];
+}
+
+/** The library skills an agent has preloaded, by their plugin names: those for everyone, then its own; installed ones only. */
+export function agentSkills(a: Pick<AgentSpec, "skills">, skills: TeamSkills | undefined): string[] {
+  if (!skills) return [];
+  const installed = new Set(skills.skills.map((s) => s.name));
+  return [...new Set([...skills.everyone, ...a.skills])].filter((n) => installed.has(n)).map(pluginSkillName);
+}
+
+/** Skill and agent options shared by a repo task and the chat: the plugin, the main session's skills, and the Skill tool. */
+export function skillQueryOptions(skills: TeamSkills | undefined): { plugins: { type: "local"; path: string; skipMcpDiscovery: true }[]; skills: string[] } | undefined {
+  if (!skills?.skills.length) return undefined;
+  return {
+    // The plugin's own MCP servers are never read: the platform decides which servers an agent has.
+    plugins: [{ type: "local", path: skills.pluginDir, skipMcpDiscovery: true }],
+    // The main session lists the library only (not the CLI's bundled skills or a checkout's own).
+    skills: skills.skills.map((s) => pluginSkillName(s.name)),
+  };
+}
+
 export const AgentSpecSchema = z.object({
   id: z
     .string()
@@ -316,7 +350,18 @@ function describeForSdk(a: AgentSpec): string {
 export interface RepoAgentOptions {
   /** The browser MCP server (see browser.ts), given to agents that can run commands. Absent = no browser. */
   browser?: BrowserServerConfig;
+  /** The installed skills library for this run. Absent = no skills (nothing installed, or it could not be read). */
+  skills?: TeamSkills;
 }
+
+/** The Skill tool loads a library skill; allowed only when one is installed. */
+export const SKILL_TOOL = "Skill";
+
+/** Each agent's assigned skills, preloaded into its context. */
+const skillsFor = (a: AgentSpec, skills: TeamSkills | undefined) => {
+  const names = agentSkills(a, skills);
+  return names.length ? { skills: names } : {};
+};
 
 /** Agents that can run commands can also start the app and drive the browser; "looks only" agents cannot. */
 const usesBrowser = (a: AgentSpec, opts: RepoAgentOptions) => Boolean(opts.browser) && a.access !== "read";
@@ -335,6 +380,7 @@ export function buildRepoAgents(team: Team, opts: RepoAgentOptions = {}): Record
         background: false,
         // Each agent that browses starts its own browser server, scoped to that agent.
         ...(usesBrowser(a, opts) ? { mcpServers: [{ [BROWSER_SERVER]: opts.browser! }] } : {}),
+        ...skillsFor(a, opts.skills),
       } satisfies AgentDefinition,
     ]),
   );
@@ -348,12 +394,13 @@ export function repoAllowedTools(team: Team, opts: RepoAgentOptions = {}): strin
       ...ORCHESTRATOR_REPO_TOOLS,
       ...agents.flatMap((a) => repoToolsFor(a.access)),
       ...(agents.some((a) => usesBrowser(a, opts)) ? BROWSER_TOOLS : []),
+      ...(opts.skills?.skills.length ? [SKILL_TOOL] : []),
     ]),
   ];
 }
 
-/** Subagents for a Slack conversation (web service). Every agent gets the same safe tool list. */
-export function buildChatAgents(team: Team, chatTools: string[]): Record<string, AgentDefinition> {
+/** Subagents for a Slack conversation (web service). Every agent gets the same safe tool list, and its assigned skills. */
+export function buildChatAgents(team: Team, chatTools: string[], skills?: TeamSkills): Record<string, AgentDefinition> {
   return Object.fromEntries(
     enabledAgents(team).map((a) => [
       a.id,
@@ -364,6 +411,7 @@ export function buildChatAgents(team: Team, chatTools: string[]): Record<string,
         ...(a.model ? { model: a.model } : {}),
         effort: a.effort || team.pointer.effort,
         background: false,
+        ...skillsFor(a, skills),
       } satisfies AgentDefinition,
     ]),
   );
