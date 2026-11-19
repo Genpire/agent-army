@@ -401,7 +401,9 @@ Requires Node.js 22 or newer (`nvm use`).
 
 ```bash
 npm install
+npm run build:web  # the admin page, into public/
 npm run dev        # server with reload on :8080
+npm run dev:web    # admin page with live reload on :5173 (optional)
 npm test           # unit, Slack flow and API tests
 npm run typecheck
 ```
@@ -429,7 +431,7 @@ Layout:
 - `src/guard.ts`: shell guard.
 - `src/config.ts` + `src/store.ts`: encrypted config, storage.
 - `src/smoke.ts`: smoke test.
-- `public/index.html`: admin page.
+- `web/`: the admin page, a React app on [Astryx](https://github.com/meta/astryx) (Meta's design system on StyleX), built into `public/` with `npm run build:web`. Pages in `web/src/pages/`, the API client and the server's types in `web/src/lib/`.
 
 ## Contributing
 

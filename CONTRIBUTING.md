@@ -17,8 +17,11 @@ You need Node.js 22 or newer (`nvm use` reads `.nvmrc`) and git.
 git clone https://github.com/<you>/agent-army.git
 cd agent-army
 npm install
-npm run dev          # admin page on http://localhost:8080, reloads on change
+npm run build:web    # builds the admin page (web/) into public/
+npm run dev          # server and admin page on http://localhost:8080, reloads on change
 ```
+
+Working on the admin page itself? Run `npm run dev:web` next to `npm run dev`: it serves the page on http://localhost:5173 with live reload and passes `/api` to the server.
 
 The first start prints a one-time setup token in the terminal (`[setup] Open the app and use this one-time setup token: …`). Without `MASTER_KEY`, a development key is generated under `./data`, which is also where config, memory and task records are stored. Delete `./data` to start over.
 
@@ -35,9 +38,9 @@ To try it in Slack, use a test workspace and a tunnel so Slack can reach your ma
 Every pull request must pass the same checks CI runs on Node 22 and 24:
 
 ```bash
-npm run typecheck
+npm run typecheck    # server and admin page
 npm test
-npm run build
+npm run build        # server and admin page
 ```
 
 Tests use [Vitest](https://vitest.dev) and live in `test/`. They never call Claude, Slack, GitHub or monday.com: those clients are faked. Add or update tests for any behaviour you change.
@@ -47,7 +50,7 @@ Tests use [Vitest](https://vitest.dev) and live in `test/`. They never call Clau
 - **TypeScript, strictly.** Avoid `any`; validate every input from users, Slack and the admin API with [zod](https://zod.dev).
 - **Never log secrets or content.** Tokens, keys, message text and file contents stay out of logs. Pass error text through the redactor (`makeRedactor`) before logging or posting it.
 - **Keep the security model.** Agents only open pull requests; conversation tools stay read-only unless there is a clear reason, and new tools must respect the GitHub allow lists. Read [Security model](README.md#security-model) before touching `pointer-tools.ts`, `guard.ts` or `worker.ts`.
-- **Keep the admin page dependency-free.** `public/index.html` is a single file with no build step; reuse its helpers (`field`, cards, tables) rather than adding a framework.
+- **Build the admin page with Astryx.** `web/` is a React app on [Astryx](https://github.com/meta/astryx), Meta's design system on StyleX. Follow `AGENTS.md`: start pages from an Astryx template, use its components (no raw `div`s, inline styles or hex values), and run `npx astryx doctor --built web` before opening a pull request. API shapes come from the server's own types (`web/src/lib/types.ts`), so never redefine them.
 - **Document what you change.** New settings, API routes or Slack commands go in the README (the [Admin API](README.md#admin-api) table lists every route).
 - **Match the surrounding code** in naming, comments and structure. Prefer small, focused files.
 

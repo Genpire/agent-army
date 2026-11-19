@@ -5,6 +5,8 @@ COPY package.json package-lock.json ./
 RUN npm ci
 COPY tsconfig.json ./
 COPY src ./src
+# The admin page (web/, React + Astryx) is built into public/; it imports the server's types.
+COPY web ./web
 RUN npm run build && npm prune --omit=dev
 
 FROM node:22-bookworm-slim
@@ -27,7 +29,7 @@ RUN node node_modules/playwright/cli.js install --with-deps chromium \
     && chmod -R a+rX /ms-playwright
 COPY --from=build /app/dist ./dist
 COPY package.json ./
-COPY public ./public
+COPY --from=build /app/public ./public
 ENV NODE_ENV=production PORT=8080 DATA_DIR=/data HOME=/home/node
 USER node
 VOLUME /data
