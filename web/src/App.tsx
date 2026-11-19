@@ -19,6 +19,8 @@ import {
   PuzzlePieceIcon,
   Squares2X2Icon,
   UserGroupIcon,
+  BuildingOffice2Icon,
+  AcademicCapIcon,
 } from "@heroicons/react/24/outline";
 import type { ComponentType } from "react";
 import { api } from "./lib/api";
@@ -30,12 +32,16 @@ import { LoginScreen, SetupScreen } from "./pages/auth";
 import ChatPage from "./pages/chat";
 import IntegrationsPage from "./pages/integrations";
 import MemoryPage from "./pages/memory";
+import OfficePage from "./pages/office";
 import OverviewPage from "./pages/overview";
 import ProjectsPage from "./pages/projects";
 import SettingsPage from "./pages/settings";
+import SkillsPage from "./pages/skills";
 import TeamPage from "./pages/team";
 
 const PAGE_COMPONENTS: Record<Page, ComponentType> = {
+  office: OfficePage,
+  skills: SkillsPage,
   overview: OverviewPage,
   chat: ChatPage,
   team: TeamPage,
@@ -48,8 +54,10 @@ const PAGE_COMPONENTS: Record<Page, ComponentType> = {
 
 const NAV: { page: Page; label: string; icon: typeof Squares2X2Icon }[] = [
   { page: "overview", label: "Overview", icon: Squares2X2Icon },
+  { page: "office", label: "Office", icon: BuildingOffice2Icon },
   { page: "chat", label: "Chat", icon: ChatBubbleLeftRightIcon },
   { page: "team", label: "Team", icon: UserGroupIcon },
+  { page: "skills", label: "Skills", icon: AcademicCapIcon },
   { page: "integrations", label: "Integrations", icon: PuzzlePieceIcon },
   { page: "projects", label: "Projects", icon: FolderIcon },
   { page: "activity", label: "Activity", icon: ChartBarSquareIcon },

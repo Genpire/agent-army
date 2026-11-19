@@ -159,7 +159,7 @@ describe("teamQueryOptions", () => {
     config.team.agents.find((a) => a.id === "writer")!.enabled = false;
     config.team.agents.push(designer);
     const opts = teamQueryOptions(config);
-    expect(Object.keys(opts.agents)).toEqual(["coder", "reviewer", "qa", "researcher", "designer"]);
+    expect(Object.keys(opts.agents)).toEqual(["coder", "reviewer", "qa", "researcher", "hr", "scout", "designer"]);
     expect(opts.agents.designer!.tools).toEqual(["Read", "Glob", "Grep", "WebSearch", "WebFetch"]);
     expect(opts.allowedTools).toEqual(
       expect.arrayContaining(["Read", "Glob", "Grep", "Bash", "Agent", "Task", "Edit", "Write", "WebSearch", "WebFetch"]),

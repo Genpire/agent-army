@@ -24,7 +24,7 @@ import {
 const tmpStore = async () => new FsStore(await mkdtemp(join(tmpdir(), "army-team-")));
 
 describe("team model", () => {
-  it("seeds Pointer and five agents on a fresh config", async () => {
+  it("seeds Pointer and seven agents on a fresh config", async () => {
     const repo = new ConfigRepo(await tmpStore(), deriveKey("k"), 0);
     const c = await repo.load();
     expect(c.team.pointer).toEqual({
@@ -42,9 +42,9 @@ describe("team model", () => {
         large: { model: "", effort: "high" },
       },
     });
-    expect(c.team.agents.map((a) => a.id)).toEqual(["coder", "reviewer", "qa", "researcher", "writer"]);
+    expect(c.team.agents.map((a) => a.id)).toEqual(["coder", "reviewer", "qa", "researcher", "writer", "hr", "scout"]);
     expect(c.slack.pointerChannels).toEqual([]);
-    expect(publicView(c).team.agents).toHaveLength(5);
+    expect(publicView(c).team.agents).toHaveLength(7);
   });
 
   it("keeps an edited team across reloads, without re-seeding", async () => {
@@ -55,7 +55,7 @@ describe("team model", () => {
       c.team.agents[0]!.name = "Sara";
     });
     const c = await repo.load(true);
-    expect(c.team.agents.map((a) => a.id)).toEqual(["coder", "reviewer", "researcher", "writer"]);
+    expect(c.team.agents.map((a) => a.id)).toEqual(["coder", "reviewer", "researcher", "writer", "hr", "scout"]);
     expect(c.team.agents[0]!.name).toBe("Sara");
   });
 
@@ -82,7 +82,7 @@ describe("team model", () => {
     team.agents.find((a) => a.id === "writer")!.enabled = false;
     team.agents.find((a) => a.id === "researcher")!.model = "claude-sonnet-5-5";
     const agents = buildRepoAgents(team);
-    expect(Object.keys(agents)).toEqual(["coder", "reviewer", "qa", "researcher"]);
+    expect(Object.keys(agents)).toEqual(["coder", "reviewer", "qa", "researcher", "hr", "scout"]);
     expect(agents.coder!.tools).toContain("Edit");
     expect(agents.reviewer!.tools).not.toContain("Edit");
     expect(agents.coder!.prompt.endsWith(REPO_RULES)).toBe(true);
