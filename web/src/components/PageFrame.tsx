@@ -22,6 +22,8 @@ export function PageFrame({ title, description, actions, nav, children }: PageFr
     <Layout
       height="fill"
       contentWidth={1080}
+      // One inset for the header and the content, so their edges line up at every width.
+      padding={6}
       header={
         <LayoutHeader hasDivider={!nav} label={title} paddingBlockEnd={nav ? 0 : undefined}>
           <VStack gap={3}>
@@ -45,7 +47,7 @@ export function PageFrame({ title, description, actions, nav, children }: PageFr
         </LayoutHeader>
       }
       content={
-        <LayoutContent padding={6} isScrollable>
+        <LayoutContent isScrollable>
           {children}
         </LayoutContent>
       }

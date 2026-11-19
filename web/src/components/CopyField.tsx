@@ -16,7 +16,7 @@ export function CopyField({ label, value, description }: CopyFieldProps) {
   const showToast = useToast();
   return (
     <HStack gap={2} vAlign="end">
-      <TextInput label={label} value={value} description={description} isReadOnly />
+      <TextInput label={label} value={value} description={description} isReadOnly width="100%" />
       <IconButton
         label={`Copy ${label.toLowerCase()}`}
         tooltip="Copy"
