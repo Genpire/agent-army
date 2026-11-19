@@ -26,7 +26,11 @@ export type CodeHostClients = Partial<Record<OtherCodeHost, (config: Config) => 
 
 const DEFAULT_CLIENTS: Record<OtherCodeHost, (config: Config) => CodeHostReader> = {
   gitlab: (c) => new GitLab({ token: c.gitlab.token ?? "", baseUrl: c.gitlab.baseUrl }),
-  bitbucket: (c) => new Bitbucket({ token: c.bitbucket.token ?? "", email: c.bitbucket.email }),
+  // As code-host-factory.ts: a blank email means an access token (Bearer).
+  bitbucket: (c) => {
+    const email = c.bitbucket.email?.trim();
+    return new Bitbucket({ token: c.bitbucket.token ?? "", ...(email ? { email } : {}) });
+  },
 };
 
 /** Each host's arguments, as the model sees them. A group or workspace is valid when a repository id can live in it. */
