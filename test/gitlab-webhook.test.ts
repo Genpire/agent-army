@@ -292,7 +292,7 @@ describe("handleGitlabDelivery", () => {
     await t.seedMr();
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     await handleGitlabDelivery(GITLAB_MR_EVENT, closedPayload("merge"), t.deps);
-    expect(log.mock.calls.map((c) => String(c[0]))).toContain("[github] gitlab merge_request gitlab:acme/web#7: ignored: no monday.com ticket");
+    expect(log.mock.calls.map((c) => String(c[0]))).toContain("[github] gitlab merge_request gitlab:acme/web#7: ignored: no ticket");
     expect(t.memberLookups).toEqual([]);
     expect(t.posts).toEqual([]);
   });
