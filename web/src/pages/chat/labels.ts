@@ -80,15 +80,16 @@ export function formatMs(ms: number | undefined): string {
 export const between = (from: string | undefined, to: string | undefined): number | undefined =>
   from && to ? Date.parse(to) - Date.parse(from) : undefined;
 
+/** What kind of step it is, as people say it (shown before the step's own label). */
 const KIND_NAME: Record<ActivityKind, string> = {
-  web: "web",
-  github: "github",
-  memory: "memory",
-  notes: "notes",
-  monday: "monday",
-  task: "task",
-  agent: "agent",
-  other: "tool",
+  web: "Web",
+  github: "GitHub",
+  memory: "Memory",
+  notes: "Project notes",
+  monday: "monday.com",
+  task: "Repo task",
+  agent: "Team",
+  other: "Tool",
 };
 
 /** One of Pointer's steps as a ChatToolCalls row. */
