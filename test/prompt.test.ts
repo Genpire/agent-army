@@ -132,3 +132,25 @@ describe("repo setup in the orchestrator prompt", () => {
     expect(prompt).toContain("Start command: `` echo `date` && npm start ``");
   });
 });
+
+describe("the code host in the orchestrator prompt", () => {
+  const setup: RepoSetupContext = { startCommand: "", appUrl: "", envKeys: ["API_KEY"] };
+
+  it("says pull request on GitHub, the same with or without the host", () => {
+    const prompt = orchestratorPrompt(baseConfig(), { repoSetup: setup });
+    expect(prompt).toBe(orchestratorPrompt(baseConfig(), { repoSetup: setup, host: "github" }));
+    expect(prompt).toContain("pushes the branch and opens the pull request for a human to review and merge.");
+    expect(prompt).toContain("becomes the pull request description");
+    expect(prompt).toContain("test fixtures or the pull request,");
+  });
+
+  it("says merge request on GitLab, and pull request on Bitbucket", () => {
+    const gitlab = orchestratorPrompt(baseConfig(), { repoSetup: setup, host: "gitlab" });
+    expect(gitlab).toContain("pushes the branch and opens the merge request for a human to review and merge.");
+    expect(gitlab).toContain("becomes the merge request description");
+    expect(gitlab).toContain("test fixtures or the merge request,");
+    // Only the ground rules (shared by every host) still name pull requests.
+    expect(gitlab.replace(REPO_RULES, "")).not.toContain("pull request");
+    expect(orchestratorPrompt(baseConfig(), { host: "bitbucket" })).toContain("opens the pull request for a human");
+  });
+});

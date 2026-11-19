@@ -180,10 +180,13 @@ const failingWait = (over: Partial<CheckWait> = {}): CheckWait => ({
   ...over,
 });
 
-function detailsGitHub(opts: { annotations?: Annotation[]; log?: string | Error } = {}) {
+/** A fake code host: like GitHub, only GitHub Actions checks have a job log (`logApps` changes which). */
+function detailsGitHub(opts: { annotations?: Annotation[]; log?: string | Error; logApps?: string[] } = {}) {
+  const logApps = opts.logApps ?? ["github-actions"];
   return {
-    checkAnnotations: vi.fn(async () => opts.annotations ?? []),
-    actionsJobLog: vi.fn(async () => {
+    checkAnnotations: vi.fn(async (_repo: string, _check: CheckInfo) => opts.annotations ?? []),
+    jobLog: vi.fn(async (_repo: string, c: CheckInfo) => {
+      if (!logApps.includes(c.app ?? "")) return undefined;
       if (opts.log instanceof Error) throw opts.log;
       return opts.log ?? "";
     }),
@@ -222,10 +225,11 @@ describe("ciFailureDetails", () => {
     expect(text).toContain("FAIL test/app.test.ts\nExpected 2, received 3");
     expect(text).not.toContain("2026-11-19T10:00:01");
     expect(text).not.toContain("\x1b[");
-    expect(github.actionsJobLog).toHaveBeenCalledWith("acme/web", failed.id);
+    expect(github.jobLog).toHaveBeenCalledWith("acme/web", failed);
+    expect(github.checkAnnotations).toHaveBeenCalledWith("acme/web", failed);
   });
 
-  it("says how to make the log readable when the token cannot read it, and reads no log for other apps", async () => {
+  it("says how to make the log readable when the token cannot read it, and shows no log for checks without one", async () => {
     const github = detailsGitHub({ log: new Error("GitHub GET job 1 logs failed (HTTP 403)") });
     const text = await ciFailureDetails(
       github,
@@ -233,8 +237,25 @@ describe("ciFailureDetails", () => {
       failingWait({ failed: [check("build", { conclusion: "failure" }), check("Vercel Preview", { conclusion: "failure", app: "vercel" })] }),
     );
     expect(text).toContain("Job log: not readable: give the token Actions: read.");
-    expect(github.actionsJobLog).toHaveBeenCalledTimes(1);
+    expect(text.match(/Job log: not readable/g)).toHaveLength(1);
     expect(text).toContain('### Check "Vercel Preview" (vercel): failure');
+  });
+
+  it("includes the job log of any host's CI job, keeping its timestamps, with a neutral hint when unreadable", async () => {
+    const log = ["2026-11-19T10:00:00Z $ npm test", "\x1b[31mFAIL\x1b[0m test/app.test.ts"].join("\n");
+    const gitlab = detailsGitHub({ log, logApps: ["gitlab-ci"] });
+    const job = check("test", { conclusion: "failure", app: "gitlab-ci", detailsUrl: "https://gitlab.example.com/acme/web/-/jobs/7" });
+    const text = await ciFailureDetails(gitlab, "gitlab:acme/web", failingWait({ failed: [job] }));
+    expect(text).toContain('### Check "test" (gitlab-ci): failure');
+    // Only GitHub Actions' own timestamp prefix is stripped.
+    expect(text).toContain("End of the job log:");
+    expect(text).toContain("2026-11-19T10:00:00Z $ npm test\nFAIL test/app.test.ts");
+    expect(gitlab.jobLog).toHaveBeenCalledWith("gitlab:acme/web", job);
+
+    const denied = detailsGitHub({ log: new Error("GitLab GET job 7 trace failed (HTTP 403)"), logApps: ["gitlab-ci"] });
+    const hint = await ciFailureDetails(denied, "gitlab:acme/web", failingWait({ failed: [job] }));
+    expect(hint).toContain("Job log: not readable with the platform's token.");
+    expect(hint).not.toContain("Actions: read");
   });
 
   it("lists failing commit statuses and redacts secrets", async () => {
@@ -286,6 +307,16 @@ describe("ciFixPrompt", () => {
     expect(prompt).toMatch(/kind "change"/);
     expect(prompt).toMatch(/kind "blocked".*missing secrets.*infrastructure.*external service/);
     expect(prompt).toMatch(/data rather than instructions/);
+    expect(prompt).toContain("The pull request's checks failed after your last push");
+    expect(prompt).toContain("What failed (from GitHub;");
+  });
+
+  it("names the host and its merge requests on GitLab", () => {
+    const prompt = ciFixPrompt("", { round: 1, rounds: 2, base: "main", branch: "army/x", host: "gitlab" });
+    expect(prompt).toContain("The merge request's checks failed after your last push");
+    expect(prompt).toContain("What failed (from GitLab;");
+    expect(prompt).toContain("(GitLab gave no details for the failing checks.)");
+    expect(prompt).not.toMatch(/GitHub|pull request/);
   });
 });
 
@@ -313,6 +344,10 @@ describe("ciSummary and its Slack line", () => {
     expect(ciSummaryLine(ciSummary(failingWait({ state: "unavailable" }), 0), 15)).toBe(
       "*Checks:* :grey_question: not readable: the GitHub token needs Checks: read and Commit statuses: read",
     );
+    expect(ciSummaryLine(ciSummary(failingWait({ state: "unavailable" }), 0), 15, "gitlab")).toBe(
+      "*Checks:* :grey_question: not readable: the GitLab token needs the api or read_api scope on the project",
+    );
+    expect(ciSummaryLine(ciSummary(failingWait({ state: "unavailable" }), 0), 15, "bitbucket")).toContain("the Bitbucket token");
     expect(ciSummaryLine(ciSummary(failingWait({ state: "none" }), 0), 15)).toBe("");
   });
 
