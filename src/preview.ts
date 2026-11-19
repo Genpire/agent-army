@@ -5,6 +5,9 @@ import type { Report } from "./agents.js";
 import type { DeploymentInfo, DeploymentStatusInfo, GitHub, IssueComment } from "./github.js";
 import type { PreviewResult } from "./tasks.js";
 
+/** Why there was nothing to check when the repository has no preview deployments at all. */
+export const NO_PREVIEW_NOTE = "No preview deployment was found for this commit.";
+
 export type { PreviewResult };
 
 /**
@@ -287,7 +290,7 @@ export async function findPreview(github: PreviewGitHub, repo: string, sha: stri
   if (last === "failed") return { ok: false, note: `The preview deployment failed${failedEnv ? ` (${failedEnv})` : ""}.` };
   if (last === "pending") return { ok: false, note: `The preview deployment was still building after ${minutes(now() - start)}.` };
   if (!answered) return { ok: false, note: "The deployments could not be read: GitHub did not answer." };
-  return { ok: false, note: "No preview deployment was found for this commit." };
+  return { ok: false, note: NO_PREVIEW_NOTE };
 }
 
 // ---------- Vercel's protection bypass, without the secret in the prompt ----------
@@ -503,6 +506,8 @@ export function previewSlackLine(result: PreviewResult): string {
     case "problems":
       return `*Preview:* :warning: Problems found on ${preview}: ${note || DEFAULT_NOTE.problems} Nothing was changed for them; reply here to have the team fix them.`;
     case "unavailable":
+      // A repository without preview deployments gets no Preview line in Slack; the console still shows why.
+      if (result.note === NO_PREVIEW_NOTE) return "";
       return `*Preview:* :grey_question: ${note || "Not checked."}`;
     case "skipped":
       return "";

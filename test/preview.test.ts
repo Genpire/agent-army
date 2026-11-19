@@ -438,8 +438,10 @@ describe("reporting the preview", () => {
     expect(previewSlackLine({ state: "checked", url: URL_, note: "Looks right." })).toBe(`*Preview:* :white_check_mark: Checked <${URL_}|the preview>: Looks right.`);
     expect(previewSlackLine({ state: "problems", url: URL_, note: "A <b> tag shows." })).toContain(":warning: Problems found on");
     expect(previewSlackLine({ state: "problems", url: URL_, note: "A <b> tag shows." })).toContain("A &lt;b&gt; tag shows.");
-    expect(previewSlackLine({ state: "unavailable", note: "No preview deployment was found for this commit." })).toBe(
-      "*Preview:* :grey_question: No preview deployment was found for this commit.",
+    // A repository without preview deployments gets no line in Slack.
+    expect(previewSlackLine({ state: "unavailable", note: "No preview deployment was found for this commit." })).toBe("");
+    expect(previewSlackLine({ state: "unavailable", note: "The token cannot read deployments." })).toBe(
+      "*Preview:* :grey_question: The token cannot read deployments.",
     );
     expect(previewSlackLine({ state: "skipped", note: "Preview checks are turned off." })).toBe("");
     expect(previewEventText({ state: "problems", note: "Overlap." })).toBe("Problems on the preview: Overlap.");
