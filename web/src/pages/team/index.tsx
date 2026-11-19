@@ -16,6 +16,7 @@ import { useConfig } from "../../lib/state";
 import type { AgentSpec, PointerSpec } from "../../lib/types";
 import { AgentDrawer, type AgentTarget } from "./AgentDrawer";
 import { AgentsTable } from "./AgentsTable";
+import { HrSection } from "./HrSection";
 import { PointerSettings, SettingsRow } from "./PointerSettings";
 import { MAX_AGENTS } from "./team";
 import { useTeamSave } from "./useTeamSave";
@@ -109,6 +110,8 @@ export default function TeamPage() {
             </Card>
           )}
         </VStack>
+
+        <HrSection />
 
         <Divider />
 

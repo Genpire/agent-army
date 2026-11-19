@@ -22,6 +22,7 @@ import { hashPassword, randomToken, safeEqual, sessionKey, signSession, verifyPa
 import { connectionForRepo, describeAllowed, hasGitHub } from "./github-access.js";
 import { CONVERSATION_ID_RE, ConversationService, MESSAGE_MAX_CHARS, type WebThreads } from "./conversations.js";
 import { handleSlackEvent, withBrainSlot } from "./dispatch.js";
+import { HrService, PROPOSAL_ID_RE, REVIEW_ID_RE } from "./hr.js";
 import { RecentSet } from "./listen.js";
 import { MEMORY_MAX_FACTS, MemoryRepo } from "./memory.js";
 import { MondayClient, MondayError, checkMonday, statusColumns } from "./monday.js";
@@ -36,7 +37,7 @@ import {
   webhookIds,
 } from "./monday-automation.js";
 import { NOTES_MAX_CHARS, NotesRepo } from "./notes.js";
-import { createPointerBrain } from "./pointer.js";
+import { type QueryFn, createPointerBrain } from "./pointer.js";
 import type { PointerBrain, SlackDeps, SlackMessageEvent } from "./pointer-types.js";
 import { type Runner, createRunner } from "./runner.js";
 import { SCREENSHOT_NAME_RE, ScreenshotRepo, TASK_ID_RE, screenshotType } from "./screenshots.js";
@@ -152,6 +153,8 @@ export interface AppOverrides {
   brain?: PointerBrain;
   runner?: Runner;
   slack?: SlackDeps["slack"];
+  /** The Agent SDK's query for HR reviews (see hr.ts). */
+  hrQuery?: QueryFn;
 }
 
 export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides: AppOverrides = {}) {
@@ -842,6 +845,63 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
       c.team = parsed.data;
     });
     res.json({ ok: true });
+  });
+
+  // ---------- HR: reviews of the team, with proposals the owner applies or dismisses (see hr.ts) ----------
+  const hr = new HrService({
+    store,
+    tasks,
+    usage,
+    spending,
+    config: () => configRepo.load(true),
+    updateConfig: (mutate) => configRepo.update(mutate),
+    queryFn: overrides.hrQuery,
+  });
+  const HR_PROPOSAL_PARAMS = z.object({
+    id: z.string().regex(REVIEW_ID_RE, "Review not found."),
+    pid: z.string().regex(PROPOSAL_ID_RE, "Proposal not found."),
+  });
+  const proposalParams = (req: Request, res: Response) => {
+    const parsed = HR_PROPOSAL_PARAMS.safeParse(req.params);
+    if (parsed.success) return parsed.data;
+    res.status(404).json({ error: parsed.error.issues[0]?.message ?? "Not found." });
+    return undefined;
+  };
+
+  // One model call (about a minute); refused when the monthly cap is used up. The cost is counted with chat.
+  app.post("/api/hr/review", requireAdmin, async (_req, res) => {
+    const result = await hr.review();
+    if (!result.ok) {
+      return void res.status(result.status).json({ error: result.error, ...(result.costUsd !== undefined ? { costUsd: result.costUsd } : {}) });
+    }
+    res.json({ review: result.review });
+  });
+
+  app.get("/api/hr/reviews", requireAdmin, async (_req, res) => {
+    res.json({ reviews: await hr.list() });
+  });
+
+  app.post("/api/hr/reviews/:id/proposals/:pid/apply", requireAdmin, async (req, res) => {
+    const params = proposalParams(req, res);
+    if (!params) return;
+    const result = await hr.apply(params.id, params.pid);
+    if (!result.ok) return void res.status(result.status).json({ error: result.error });
+    res.json(result);
+  });
+
+  app.post("/api/hr/reviews/:id/proposals/:pid/dismiss", requireAdmin, async (req, res) => {
+    const params = proposalParams(req, res);
+    if (!params) return;
+    const result = await hr.dismiss(params.id, params.pid);
+    if (!result.ok) return void res.status(result.status).json({ error: result.error });
+    res.json(result);
+  });
+
+  // The Team page's "Add HR to the team": the default team's HR agent.
+  app.post("/api/hr/agent", requireAdmin, async (_req, res) => {
+    const result = await hr.addHr();
+    if (!result.ok) return void res.status(result.status).json({ error: result.error });
+    res.json(result);
   });
 
   app.get("/api/memory", requireAdmin, async (_req, res) => {
