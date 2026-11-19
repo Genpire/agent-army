@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Report } from "../src/agents.js";
-import { type DeploymentInfo, type DeploymentStatusInfo, GitHub, type IssueComment } from "../src/github.js";
+import { type CheckInfo, type DeploymentInfo, type DeploymentStatusInfo, GitHub, type IssueComment, type StatusInfo } from "../src/github.js";
 import {
   BYPASS_COOKIE_PARAM,
   BYPASS_PARAM,
@@ -8,6 +8,7 @@ import {
   PREVIEW_RUN_MAX_MS,
   PREVIEW_WAIT_MAX_MS,
   type PreviewCheckDeps,
+  type PreviewHost,
   bypassUrl,
   checkPreview,
   deploymentState,
@@ -15,6 +16,7 @@ import {
   firstSentences,
   isProductionDeployment,
   isVisibleFile,
+  netlifyPreviewFromComment,
   parsePreviewReport,
   previewBudgetUsd,
   previewComment,
@@ -24,6 +26,7 @@ import {
   previewRunMs,
   previewSlackLine,
   previewWaitMs,
+  previewsFromStatuses,
   startBypassRedirect,
   touchesVisible,
   vercelPreviewFromComment,
@@ -235,6 +238,138 @@ describe("the Vercel bot's comment", () => {
     const building = "| web | ![Building](https://vercel.com/static/status/building.svg) [Building](https://vercel.com/acme/web/x) | [Preview](https://web-git-x-acme.vercel.app) | Nov 19 |";
     expect(vercelPreviewFromComment(building)).toBeUndefined();
     expect(vercelPreviewFromComment("Your Vercel team is not permitted to deploy from this git repository.")).toBeUndefined();
+  });
+});
+
+/** Netlify's deploy preview comment (format as Netlify posts it; not checked against a live account). */
+const NETLIFY_READY_COMMENT = [
+  '### <span aria-hidden="true">✅</span> Deploy Preview for *acme-web* ready!',
+  "",
+  "|  Name | Link |",
+  "|:-:|------------------------|",
+  '|<span aria-hidden="true">🔨</span> Latest commit | 8a4674f |',
+  '|<span aria-hidden="true">🔍</span> Latest deploy log | https://app.netlify.com/sites/acme-web/deploys/6740 |',
+  '|<span aria-hidden="true">😎</span> Deploy Preview | [https://deploy-preview-12--acme-web.netlify.app](https://deploy-preview-12--acme-web.netlify.app) |',
+].join("\n");
+const NETLIFY_URL = "https://deploy-preview-12--acme-web.netlify.app/";
+
+const commitStatus = (context: string, targetUrl: string | null, state: StatusInfo["state"] = "success"): StatusInfo => ({
+  context,
+  state,
+  description: null,
+  targetUrl,
+});
+const ciCheck = (name: string, detailsUrl: string | null, over: Partial<CheckInfo> = {}): CheckInfo => ({
+  id: 1,
+  name,
+  status: "completed",
+  conclusion: "success",
+  detailsUrl,
+  title: null,
+  summary: null,
+  text: null,
+  app: null,
+  ...over,
+});
+
+/** A code host without deployments (as Bitbucket), its commit's statuses and checks and the request's comments given. */
+function hostWithout(o: { kind?: "github" | "gitlab" | "bitbucket"; statuses?: StatusInfo[]; checks?: CheckInfo[]; comments?: IssueComment[]; denied?: boolean }) {
+  return {
+    ...(o.kind ? { kind: o.kind } : {}),
+    deploymentsFor: vi.fn(async (): Promise<DeploymentInfo[]> => {
+      if (o.denied) throw new Error("GitLab GET /projects/acme%2Fweb/deployments failed (HTTP 403): Forbidden");
+      return [];
+    }),
+    deploymentStatuses: vi.fn(async (): Promise<DeploymentStatusInfo[]> => []),
+    issueComments: vi.fn(async () => o.comments ?? []),
+    checksFor: vi.fn(async () => ({ checks: o.checks ?? [], statuses: o.statuses ?? [] })),
+  } satisfies PreviewHost;
+}
+const findOn = (host: PreviewHost, repo = "gitlab:acme/web") => findPreview(host, repo, SHA, { prNumber: 12, waitMs: PREVIEW_WAIT_MAX_MS, graceMs: 0 });
+
+describe("finding the preview on any code host", () => {
+  it("uses a successful commit status or check that links a preview platform, where the host has no deployments", async () => {
+    const host = hostWithout({
+      kind: "bitbucket",
+      statuses: [
+        commitStatus("ci/build", "https://ci.example.com/builds/1"),
+        commitStatus("Vercel", "https://vercel.com/acme/web/AbCd"),
+        commitStatus("pages", "https://9f1c.web-x.pages.dev", "pending"),
+        commitStatus("netlify/acme-web/deploy-preview", "https://deploy-preview-12--acme-web.netlify.app"),
+      ],
+      checks: [ciCheck("Cloudflare Pages", "https://3f2a.docs-x.pages.dev"), ciCheck("Vercel – web", "https://web-x.vercel.app", { conclusion: "failure" })],
+    });
+    expect(await findOn(host, "bitbucket:acme/web")).toEqual({
+      ok: true,
+      found: { url: NETLIFY_URL, source: "status", vercel: false, others: ["https://3f2a.docs-x.pages.dev/"] },
+    });
+    expect(host.issueComments).not.toHaveBeenCalled();
+  });
+
+  it("lets a status's Vercel preview have the bypass: setting statuses takes write access", async () => {
+    const host = hostWithout({ kind: "gitlab", statuses: [commitStatus("Vercel", "https://web-git-army-x-acme.vercel.app")] });
+    const found = await findOn(host);
+    expect(found.ok && found.found).toMatchObject({ url: "https://web-git-army-x-acme.vercel.app/", source: "status", vercel: true });
+  });
+
+  it("reads statuses only as links on the preview platforms, successful, without credentials", () => {
+    expect(
+      previewsFromStatuses({
+        checks: [ciCheck("deploy", "https://user:pw@web-x.vercel.app"), ciCheck("pending", "https://a.pages.dev", { status: "in_progress", conclusion: null })],
+        statuses: [
+          commitStatus("a", "https://evil.example.com/?next=web.vercel.app"),
+          commitStatus("b", "javascript:alert(1)"),
+          commitStatus("c", "https://web.vercel.app.evil.example.com"),
+          commitStatus("d", "https://x.netlify.app", "failure"),
+          commitStatus("e", null),
+        ],
+      }),
+    ).toEqual([]);
+  });
+
+  it("on GitLab and Bitbucket, reads Vercel's and Netlify's comments by any author, on their preview domains only", async () => {
+    const byPerson = { author: "octo-dev", bot: false };
+    const vercel = await findOn(hostWithout({ kind: "gitlab", comments: [vercelComment(READY_TABLE, undefined, byPerson)] }));
+    // The integrations comment through the account that connected them: a person's comment never gets the bypass.
+    expect(vercel).toEqual({ ok: true, found: { url: "https://web-git-army-sidebar-acme.vercel.app/", source: "comment", vercel: false, others: [] } });
+
+    const byBot = await findOn(hostWithout({ kind: "gitlab", comments: [vercelComment(READY_TABLE, undefined, { author: "project_12_bot", bot: true })] }));
+    expect(byBot.ok && byBot.found.vercel).toBe(true);
+
+    const elsewhere = vercelComment(vcMeta("preview.evil.example.com", "DEPLOYED"), undefined, byPerson);
+    expect(await findOn(hostWithout({ kind: "gitlab", comments: [elsewhere] }))).toEqual({ ok: false, note: "No preview deployment was found for this commit." });
+
+    const netlify = await findOn(hostWithout({ kind: "bitbucket", comments: [vercelComment(NETLIFY_READY_COMMENT, undefined, byPerson)] }), "bitbucket:acme/web");
+    expect(netlify).toEqual({ ok: true, found: { url: NETLIFY_URL, source: "comment", vercel: false, others: [] } });
+  });
+
+  it("on GitHub, reads the Netlify bot's comment, never a person's", async () => {
+    const bot = await findOn(hostWithout({ comments: [vercelComment(NETLIFY_READY_COMMENT, undefined, { author: "netlify[bot]" })] }), "acme/web");
+    expect(bot).toEqual({ ok: true, found: { url: NETLIFY_URL, source: "comment", vercel: false, others: [] } });
+    const person = await findOn(hostWithout({ comments: [vercelComment(NETLIFY_READY_COMMENT, undefined, { author: "mallory", bot: false })] }), "acme/web");
+    expect(person.ok).toBe(false);
+  });
+
+  it("names the host in its notes", async () => {
+    expect(await findOn(hostWithout({ kind: "gitlab", denied: true }))).toEqual({
+      ok: false,
+      note: "GitLab refused to list the deployments: the token needs read access to the project's environments to find the preview.",
+    });
+    const silent = { ...hostWithout({ kind: "bitbucket" }), deploymentsFor: vi.fn(async (): Promise<DeploymentInfo[]> => {
+      throw new Error("Bitbucket GET … failed (HTTP 502): Bad Gateway");
+    }) };
+    let t = 0;
+    const note = await findPreview(silent, "bitbucket:acme/web", SHA, { prNumber: 12, waitMs: 60_000, now: () => t, sleep: async (ms) => void (t += ms) });
+    expect(note).toEqual({ ok: false, note: "The deployments could not be read: Bitbucket did not answer." });
+  });
+});
+
+describe("Netlify's comment", () => {
+  it("reads the deploy preview once it is ready, never the deploy log", () => {
+    expect(netlifyPreviewFromComment(NETLIFY_READY_COMMENT)).toBe(NETLIFY_URL);
+    const building = NETLIFY_READY_COMMENT.replace("✅</span> Deploy Preview for *acme-web* ready!", "👷</span> Deploy Preview for *acme-web* processing.");
+    expect(netlifyPreviewFromComment(building)).toBeUndefined();
+    expect(netlifyPreviewFromComment("Deploy Preview for *x* ready!\n| Deploy Preview | https://evil.example.com |")).toBeUndefined();
   });
 });
 
@@ -461,7 +596,7 @@ describe("checkPreview", () => {
       browser: true,
       budget: { maxUsd: 15, spentUsd: 4 },
       deadline: undefined,
-      github: f.github,
+      host: f.github,
       repo: "acme/web",
       sha: SHA,
       prNumber: 12,
@@ -525,6 +660,16 @@ describe("checkPreview", () => {
     expect([repo, number]).toEqual(["acme/web", 12]);
     expect(body).toContain(`**Checked the preview at ${URL_}:** The sidebar collapses at 390 wide.`);
     expect(body).toContain("2 screenshots from the preview are in the Slack thread.");
+  });
+
+  it("words the stage and the prompt for the host: a merge request on GitLab", async () => {
+    const f = fake({ deployments: [[deployment(7, "Preview – web")]], statuses: { 7: [[status("success", URL_)]] } });
+    const { d, stages, prompts } = deps({ host: { ...f.github, kind: "gitlab" }, repo: "gitlab:acme/web" }, f);
+    expect((await checkPreview(d)).state).toBe("checked");
+    expect(stages[0]).toBe("Looking for the merge request's preview deployment");
+    expect(prompts[0]).toContain("The merge request is open and its checks have finished.");
+    expect(prompts[0]).not.toContain("pull request");
+    expect(f.github.commentOnPr.mock.calls[0]![0]).toBe("gitlab:acme/web");
   });
 
   it("reports problems plainly and starts no fix", async () => {

@@ -92,9 +92,11 @@ export async function startThreadTask(deps: ThreadTaskDeps, input: ThreadTaskInp
 
 /**
  * The repository a new task works on, with the same checks for Slack and the
- * console: the named repo (owner/repo), else the thread's, else the channel's
- * default; GitHub connected; a connection allowed to work on it (the worker
- * picks the same one). Errors are written for Pointer and the person.
+ * console: the named repo (owner/repo, gitlab:group/project or
+ * bitbucket:workspace/repo), else the thread's, else the channel's default;
+ * its code host connected and allowed to work on it (repoAccessError, the same
+ * rule the worker's codeHostFor applies). Errors are written for Pointer and
+ * the person.
  */
 export function resolveTaskRepo(
   config: Config,

@@ -19,7 +19,8 @@ import {
   verifySlackSignature,
 } from "../src/slack.js";
 import { FsStore } from "../src/store.js";
-import { decodeTaskPayload, encodeTaskPayload, newTaskId } from "../src/tasks.js";
+import { type Conversation, pendingMilestones, taskResultMarkdown } from "../src/conversations.js";
+import { type Task, decodeTaskPayload, encodeTaskPayload, newTaskId } from "../src/tasks.js";
 import { GITHUB_REPO_RE, REPO_FORMAT_HINT, REPO_RE } from "../src/repo-id.js";
 import { helpText, isRepoAllowed, messageText, parseCommand, repoFromToken, resolveRepo } from "../src/targeting.js";
 import { branchName, makeRedactor } from "../src/worker.js";
@@ -537,5 +538,59 @@ describe("worker helpers", () => {
   it("parses the team's report with a fallback", () => {
     expect(parseReport({ kind: "change", title: "t", summary: "s", verification: "v", risks: "" }, "x").kind).toBe("change");
     expect(parseReport(undefined, "plain answer")).toMatchObject({ kind: "answer", summary: "plain answer" });
+  });
+});
+
+describe("console milestones on any code host", () => {
+  const task = (repo: string, prUrl: string, over: Partial<Task> = {}): Task => ({
+    id: "t-0001",
+    createdAt: "2026-11-19T10:00:00Z",
+    updatedAt: "2026-11-19T10:30:00Z",
+    status: "done",
+    repo,
+    channel: "web",
+    threadTs: "c-1",
+    userId: "admin",
+    instruction: "Collapse the sidebar",
+    kind: "change",
+    prUrl,
+    report: { title: "Collapse the sidebar", summary: "Done.", verification: "", risks: "" },
+    ...over,
+  });
+  const conversation = (t: Task): Conversation => ({
+    id: "c-1",
+    title: "Sidebar",
+    createdAt: t.createdAt,
+    updatedAt: t.updatedAt,
+    pending: false,
+    messages: [],
+    taskIds: [t.id],
+  });
+
+  it("links GitHub pull requests as before", () => {
+    const t = task("acme/web", "https://github.com/acme/web/pull/3");
+    expect(taskResultMarkdown(t)).toContain("— [review the pull request](https://github.com/acme/web/pull/3)");
+    const running = task("acme/web", "https://github.com/acme/web/pull/3", { status: "running", fixRound: { round: 1, rounds: 2, failing: ["test"], at: t.updatedAt } });
+    const texts = pendingMilestones(conversation(running), [running]).map((m) => m.text);
+    expect(texts).toEqual([
+      "Opened [pull request #3](https://github.com/acme/web/pull/3): **Collapse the sidebar**. Waiting for its checks…",
+      "The pull request's checks failed: test. The team is fixing them (round 1 of 2)…",
+    ]);
+  });
+
+  it("calls GitLab's a merge request with its !number, and reads Bitbucket's number", () => {
+    const mr = "https://gitlab.example.com/acme/web/-/merge_requests/12";
+    expect(taskResultMarkdown(task("gitlab:acme/web", mr))).toContain(`— [review the merge request](${mr})`);
+    const stopped = task("gitlab:acme/web", mr, { status: "failed", error: "Timed out.", prDraft: true });
+    expect(taskResultMarkdown(stopped)).toContain(`saved in a draft merge request: [!12](${mr})`);
+    const running = task("gitlab:acme/web", mr, { status: "running", fixRound: { round: 1, rounds: 2, failing: ["test"], at: "2026-11-19T10:30:00Z" } });
+    expect(pendingMilestones(conversation(running), [running]).map((m) => m.text)).toEqual([
+      `Opened [merge request !12](${mr}): **Collapse the sidebar**. Waiting for its checks…`,
+      "The merge request's checks failed: test. The team is fixing them (round 1 of 2)…",
+    ]);
+
+    const pr = "https://bitbucket.org/acme/web/pull-requests/5";
+    const bb = task("bitbucket:acme/web", pr, { status: "running" });
+    expect(pendingMilestones(conversation(bb), [bb])[0]!.text).toContain(`Opened [pull request #5](${pr})`);
   });
 });
