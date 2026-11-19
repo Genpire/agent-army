@@ -1080,7 +1080,7 @@ async function main(): Promise<void> {
     if (resumed && prior?.prNumber) {
       try {
         const items = (await host.prFeedback(task.repo, prior.prNumber)).filter((f) => isHumanFeedback(f, prior.lastRunAt));
-        feedback = redact(formatFeedback(items, { prNumber: prior.prNumber, prUrl: prior.prUrl }));
+        feedback = redact(formatFeedback(items, { prNumber: prior.prNumber, prUrl: prior.prUrl, repo: task.repo }));
       } catch (err) {
         console.error(`[worker] could not read the pull request's feedback: ${redact(errorText(err))}`);
       }
