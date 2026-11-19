@@ -25,6 +25,7 @@ import { createApp } from "../src/server.js";
 import { FsStore } from "../src/store.js";
 import { TimelineRecorder } from "../src/task-events.js";
 import { type Task, TaskRepo, WEB_CHANNEL, newTaskId } from "../src/tasks.js";
+import { type Team, agentLabel, defaultTeam } from "../src/team.js";
 
 export const DEMO_PASSWORD = "agent-army-demo";
 
@@ -51,9 +52,16 @@ const conversations = new ConversationRepo(store);
 const shots = new ScreenshotRepo(store, key);
 const asset = (name: string) => readFile(new URL(`./assets/${name}`, import.meta.url));
 
-const CODER = ":hammer_and_wrench: Coder";
-const REVIEWER = ":mag: Reviewer";
-const QA = ":test_tube: QA";
+/** The demo team: the default agents, with the names a small company would give them (the Office shows them at their desks). */
+const DEMO_NAMES: Record<string, string> = { coder: "Sara", reviewer: "Omar", qa: "Lina", researcher: "Kenji", writer: "Maya", hr: "Noor", scout: "Diego" };
+const TEAM: Team = defaultTeam();
+for (const a of TEAM.agents) a.name = DEMO_NAMES[a.id] ?? a.name;
+/** How the worker labels an agent's work, e.g. ":hammer_and_wrench: Sara (Coder)". */
+const label = (id: string) => agentLabel(TEAM.agents.find((a) => a.id === id)!);
+const CODER = label("coder");
+const REVIEWER = label("reviewer");
+const QA = label("qa");
+const RESEARCHER = label("researcher");
 
 /** Writes a task with its own timestamps (TaskRepo.save would stamp "now"). */
 async function putTask(task: Task): Promise<void> {
@@ -67,6 +75,7 @@ function snapshot(startedAt: number, now: number, text: string, plan: PlanItem[]
 async function seedConfig(): Promise<void> {
   await configRepo.update((c) => {
     c.orgName = "Acme";
+    c.team = structuredClone(TEAM);
     c.adminPasswordHash = hashPassword(DEMO_PASSWORD);
     c.anthropic = { apiKey: "sk-ant-demo-not-a-real-key-000000", model: "" };
     c.slack = {
@@ -517,7 +526,7 @@ function simulatedRunner(): Runner {
   };
 }
 
-async function simulate(taskId: string): Promise<void> {
+async function simulate(taskId: string, pace = 1): Promise<void> {
   const task = await tasks.get(taskId);
   if (!task) return;
   const rec = new TimelineRecorder(store, taskId, { everyMs: 500 });
@@ -537,7 +546,7 @@ async function simulate(taskId: string): Promise<void> {
     task.progress = snapshot(startedAt, Date.now(), text, plan.map((p) => ({ ...p })), [...files], agents.map((a) => ({ ...a })));
     await tasks.save(task);
   };
-  const step = async (ms: number) => sleep(ms);
+  const step = async (ms: number) => sleep(ms * pace);
 
   rec.enter("clone", `Cloning ${task.repo}`);
   await save("clone", `Cloning ${task.repo}`);
@@ -680,6 +689,96 @@ const demoBrain: PointerBrain = {
   },
 };
 
+/**
+ * A research question for one agent: the Researcher works alone at their desk
+ * for a few minutes (no meeting), then answers.
+ */
+async function simulateResearch(taskId: string): Promise<void> {
+  const task = await tasks.get(taskId);
+  if (!task) return;
+  const rec = new TimelineRecorder(store, taskId, { everyMs: 500 });
+  const startedAt = Date.now();
+  const plan: PlanItem[] = [{ content: "Compare the options and their trade-offs", status: "in_progress" }];
+  const agent: ProgressSnapshot["agents"][number] = { label: RESEARCHER, description: "Compare search providers for the store", state: "working", minutes: 0, toolUses: 3 };
+  const save = async (text: string) => {
+    task.status = "running";
+    task.stage = { phase: "plan", text, at: new Date().toISOString() };
+    task.progress = snapshot(startedAt, Date.now(), text, plan.map((p) => ({ ...p })), [], [{ ...agent }]);
+    await tasks.save(task);
+  };
+  rec.enter("clone", `Cloning ${task.repo}`);
+  rec.enter("plan", `Pointer is reading ${task.repo} and planning`);
+  rec.tracker({ kind: "agent-start", label: RESEARCHER, description: agent.description });
+  await save(`${RESEARCHER} — ${agent.description}`);
+  for (let minute = 1; minute <= 4; minute++) {
+    await sleep(45_000);
+    agent.minutes = minute;
+    agent.toolUses += 6;
+    await save(`${RESEARCHER} — ${agent.description}`);
+  }
+  const outcome = "Algolia fits best: hosted, typo-tolerant, about $40 a month at our volume.";
+  rec.tracker({ kind: "agent-done", label: RESEARCHER, ms: Date.now() - startedAt, outcome, isError: false, toolUses: agent.toolUses });
+  plan[0]!.status = "completed";
+  task.status = "done";
+  task.kind = "answer";
+  task.summary = outcome;
+  task.report = { title: "Search providers for the store", summary: outcome, verification: "Compared pricing pages and docs of Algolia, Meilisearch Cloud and Typesense Cloud.", risks: "" };
+  task.costUsd = 0.38;
+  await rec.close(true, "Answered: Search providers for the store");
+  await tasks.save(task);
+}
+
+/** Work the team is already doing when the demo opens, so the Office looks like a working day: a team task (a meeting) and a research question. */
+async function seedWorkInProgress(now: number): Promise<{ team: string; research: string }> {
+  const start = async (minutesAgo: number, title: string, instruction: string, reply: string) => {
+    const at = now - minutesAgo * MIN;
+    const taskId = newTaskId(at);
+    const conversationId = `c-${newTaskId(at - 1000)}`;
+    await putTask({
+      id: taskId,
+      createdAt: iso(at),
+      updatedAt: iso(at),
+      status: "queued",
+      repo: "acme/web",
+      channel: WEB_CHANNEL,
+      threadTs: conversationId,
+      userId: "admin",
+      instruction,
+      trigger: "web",
+    });
+    await conversations.save(
+      {
+        id: conversationId,
+        title,
+        createdAt: iso(at - 1000),
+        updatedAt: iso(at),
+        pending: false,
+        taskIds: [taskId],
+        messages: [
+          { id: "m-1", role: "user", text: instruction, at: iso(at - 1000) },
+          { id: "m-2", role: "pointer", text: reply, at: iso(at - 500), tasks: [taskId] },
+        ],
+      },
+      new Date(at),
+    );
+    return taskId;
+  };
+  return {
+    team: await start(
+      1,
+      "Add a dark mode toggle to the header",
+      "Add a dark mode toggle to the header of acme/web, remembered per browser.",
+      "On it. Sara builds the toggle, Omar reviews the diff and Lina checks it in the browser in both themes.",
+    ),
+    research: await start(
+      2,
+      "Which search provider should the store use?",
+      "Which hosted search provider should the acme/web store use? Compare price, typo tolerance and setup.",
+      "Kenji is comparing the providers; I will post his recommendation here.",
+    ),
+  };
+}
+
 await seedConfig();
 const now = Date.now();
 await seedKnowledge();
@@ -687,6 +786,10 @@ await seedSlackTasks(now);
 await seedFinishedWebTask(now);
 await seedMondayTask(now);
 await seedQuestion(now);
+const inProgress = await seedWorkInProgress(now);
+// The team task runs at a third of the usual pace (about five minutes), so the Office shows a meeting for a while.
+void simulate(inProgress.team, 3).catch((err: unknown) => console.error("[demo] simulated task failed:", err));
+void simulateResearch(inProgress.research).catch((err: unknown) => console.error("[demo] simulated research failed:", err));
 
 const port = Number(process.env.PORT ?? 8080);
 const { app } = await createApp(env, { brain: demoBrain, runner: simulatedRunner() });

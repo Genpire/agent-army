@@ -37,6 +37,7 @@ import {
   webhookIds,
 } from "./monday-automation.js";
 import { NOTES_MAX_CHARS, NotesRepo } from "./notes.js";
+import { loadOffice } from "./office.js";
 import { type QueryFn, createPointerBrain } from "./pointer.js";
 import type { PointerBrain, SlackDeps, SlackMessageEvent } from "./pointer-types.js";
 import { type Runner, createRunner } from "./runner.js";
@@ -698,6 +699,15 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
 
   app.get("/api/tasks", requireAdmin, async (_req, res) => {
     res.json({ tasks: await tasks.recent(30) });
+  });
+
+  // The virtual office: everyone on the team, free or busy, and what they are doing now (see office.ts).
+  // `tz` is the browser's Date#getTimezoneOffset(), so "today" starts at the owner's midnight.
+  app.get("/api/office", requireAdmin, async (req, res) => {
+    const tz = Number(req.query.tz ?? 0);
+    const tzOffsetMin = Number.isInteger(tz) && Math.abs(tz) <= 14 * 60 ? tz : 0;
+    const config = await configRepo.load();
+    res.json(await loadOffice({ store, tasks, conversations, team: config.team }, { tzOffsetMin }));
   });
 
   // ---------- Chat: conversations with Pointer from the console ----------
