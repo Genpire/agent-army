@@ -50,4 +50,36 @@ describe("project notes", () => {
     expect((await notes.append("acme/api", "  ")).ok).toBe(false);
     expect(await notes.get("not a repo")).toBeNull();
   });
+
+  it("stores GitLab and Bitbucket notes in flat files of their own, next to GitHub's", async () => {
+    const { store, notes } = await setup();
+    await notes.put("acme/web", "GitHub web");
+    await notes.put("gitlab:Acme/Platform/web", "GitLab web");
+    await notes.put("gitlab:acme/web", "GitLab top-level web");
+    await notes.append("bitbucket:acme/web", "Bitbucket web");
+
+    // GitHub keeps its key; the other hosts' keys hold no "/" or ":", so they never leave notes/.
+    expect((await store.list("notes/")).sort()).toEqual([
+      "notes/acme__web.enc",
+      "notes/bitbucket~acme~web.enc",
+      "notes/gitlab~acme~platform~web.enc",
+      "notes/gitlab~acme~web.enc",
+    ]);
+    expect(await notes.get("acme/web")).toMatchObject({ repo: "acme/web", text: "GitHub web" });
+    expect(await notes.get("GITLAB:acme/platform/WEB")).toBeNull();
+    expect(await notes.get("gitlab:acme/platform/WEB")).toMatchObject({ repo: "gitlab:Acme/Platform/web", text: "GitLab web" });
+    expect(await notes.get("gitlab:acme/web")).toMatchObject({ text: "GitLab top-level web" });
+    expect(await notes.get("bitbucket:ACME/web")).toMatchObject({ repo: "bitbucket:acme/web", text: "- Bitbucket web" });
+
+    expect((await notes.list()).map((n) => n.repo).sort()).toEqual(["acme/web", "bitbucket:acme/web", "gitlab:Acme/Platform/web", "gitlab:acme/web"]);
+  });
+
+  it("refuses ids that could leave the notes folder or are not repositories", async () => {
+    const { store, notes } = await setup();
+    for (const repo of ["gitlab:../secrets", "gitlab:acme/../../x", "bitbucket:acme/web/extra", "gitlab:acme", "../acme/web", "gitlab:acme/~web", "x/".repeat(200) + "y"]) {
+      expect(await notes.put(repo, "x")).toEqual({ ok: false, error: "Repositories look like owner/repo (GitHub), gitlab:group/project or bitbucket:workspace/repo." });
+      expect(await notes.get(repo)).toBeNull();
+    }
+    expect(await store.list("notes/")).toEqual([]);
+  });
 });

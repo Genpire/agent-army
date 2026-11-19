@@ -13,7 +13,7 @@ import { api, errorMessage } from "../../lib/api";
 import { timeAgo } from "../../lib/format";
 import type { NotesList, ProjectNotes } from "../../lib/types";
 import { useAction } from "../../lib/useAction";
-import { REPO_ERROR, REPO_RE, findRepo } from "./validation";
+import { REPO_ERROR, REPO_PLACEHOLDER, REPO_RE, findRepo } from "./validation";
 
 export interface NoteDrawerProps {
   isOpen: boolean;
@@ -28,7 +28,8 @@ export interface NoteDrawerProps {
   onSaved: () => void | Promise<void>;
 }
 
-const notePath = (repo: string) => `/api/notes/${repo.split("/").map(encodeURIComponent).join("/")}`;
+/** Any repository id, GitLab's nested ones included, goes in the query. */
+const notePath = (repo: string) => `/api/notes/repo?repo=${encodeURIComponent(repo)}`;
 
 /** Reads and edits one repository's notes. Saving empty notes deletes them, after a second click. */
 export function NoteDrawer({ isOpen, repo, notes, max, onOpenChange, onOpenRepo, onSaved }: NoteDrawerProps) {
@@ -130,7 +131,7 @@ export function NoteDrawer({ isOpen, repo, notes, max, onOpenChange, onOpenRepo,
                     setRepoInput(v);
                     setErrors((e) => ({ ...e, repo: undefined }));
                   }}
-                  placeholder="owner/repo"
+                  placeholder={REPO_PLACEHOLDER}
                   isRequired
                   hasAutoFocus
                   autoCapitalize="off"

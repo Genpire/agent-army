@@ -20,6 +20,7 @@ import {
 } from "./config.js";
 import { hashPassword, randomToken, safeEqual, sessionKey, signSession, verifyPassword, verifySession } from "./crypto.js";
 import { repoAccessError } from "./code-host-access.js";
+import { GITHUB_REPO_RE, REPO_FORMAT_HINT, REPO_ID_MAX, isRepoId } from "./repo-id.js";
 import { CONVERSATION_ID_RE, ConversationService, MESSAGE_MAX_CHARS, type WebThreads } from "./conversations.js";
 import { handleSlackEvent, withBrainSlot } from "./dispatch.js";
 import { HrService, PROPOSAL_ID_RE, REVIEW_ID_RE } from "./hr.js";
@@ -65,7 +66,7 @@ const SESSION_COOKIE = "army_session";
 const SESSION_TTL_MS = 1000 * 60 * 60 * 12;
 const BOARD_ID = z.string().max(20).regex(/^\d+$/, "Board ids are numbers, like 1234567890.");
 
-/** A GitHub allow list: owners ("your-org") or exact repos ("someone/some-repo"), deduplicated. */
+/** A GitHub allow list: owners ("your-org") or exact GitHub repos ("someone/some-repo"), deduplicated. */
 const OWNER_RE = /^[A-Za-z0-9-]+$/;
 const ALLOW_LIST = z
   .array(
@@ -73,7 +74,7 @@ const ALLOW_LIST = z
       .string()
       .trim()
       .max(200)
-      .refine((s) => OWNER_RE.test(s) || REPO_RE.test(s), "Allowed entries are owners (your-org) or exact repos (owner/repo)."),
+      .refine((s) => OWNER_RE.test(s) || GITHUB_REPO_RE.test(s), "Allowed entries are owners (your-org) or exact repos (owner/repo)."),
   )
   .max(50, "Allow at most 50 owners or repos.")
   .transform((xs) => [...new Set(xs)]);
@@ -98,7 +99,8 @@ const WEBHOOK_SECRET = z.union([
     .max(200, "Use a secret of at most 200 characters.")
     .regex(/^[\x21-\x7e]+$/, "Use printable characters without spaces in the secret."),
 ]);
-const REPO_INPUT = z.string().trim().max(200).regex(REPO_RE, "Repos look like owner/repo.");
+/** A repository on any code host: owner/repo (GitHub), gitlab:group/project or bitbucket:workspace/repo. */
+const REPO_INPUT = z.string().trim().max(REPO_ID_MAX, REPO_FORMAT_HINT).regex(REPO_RE, REPO_FORMAT_HINT);
 /** A board's ticket automation as the admin page sends it; labels left out get the defaults (MondayBoardAutomationSchema). */
 const LABEL_INPUT = (what: string) => z.string().trim().max(100, `The ${what} label is at most 100 characters.`).optional();
 const BOARD_AUTOMATION_INPUT = z.object({
@@ -668,7 +670,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
         orgName: z.string().max(60).optional(),
         allowedUserIds: z.array(z.string().regex(/^[UW][A-Z0-9]+$/, "Slack user IDs look like U012ABCDEF")).max(200).optional(),
         allowedOwners: ALLOW_LIST.optional(),
-        bindings: z.record(z.string().regex(CHANNEL_RE, "Channel IDs look like C012ABCDEF"), z.string().regex(REPO_RE, "Repos look like owner/repo")).optional(),
+        bindings: z.record(z.string().regex(CHANNEL_RE, "Channel IDs look like C012ABCDEF"), REPO_INPUT).optional(),
         pointerChannels: z.array(z.string().regex(CHANNEL_RE, "Channel IDs look like C012ABCDEF")).max(100).optional(),
         limits: z
           .object({
@@ -860,7 +862,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
       perRepoUsd = {};
       const seen = new Set<string>();
       for (const [repo, cap] of Object.entries(input.perRepoUsd)) {
-        if (repo.length > 200 || !REPO_RE.test(repo)) return void res.status(400).json({ error: "Repos look like owner/repo." });
+        if (!isRepoId(repo)) return void res.status(400).json({ error: REPO_FORMAT_HINT });
         const key = repo.toLowerCase();
         if (seen.has(key)) return void res.status(400).json({ error: `${repo} is listed twice.` });
         seen.add(key);
@@ -962,17 +964,28 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
     res.json({ notes: await notes.list(), max: NOTES_MAX_CHARS });
   });
 
-  app.get("/api/notes/:owner/:repo", requireAdmin, async (req, res) => {
-    const repo = `${req.params.owner}/${req.params.repo}`;
-    if (!REPO_RE.test(repo)) return void res.status(400).json({ error: "Repos look like owner/repo." });
+  const sendNotes = async (repo: string, res: Response) => {
+    if (!isRepoId(repo)) return void res.status(400).json({ error: REPO_FORMAT_HINT });
     const found = await notes.get(repo);
     if (!found) return void res.status(404).json({ error: `No notes for ${repo} yet.` });
     res.json({ repo: found.repo, text: found.text, updatedAt: found.updatedAt });
+  };
+
+  // Any repository id, in the query: /api/notes/repo?repo=gitlab:group/sub/project.
+  // One path segment, so it never meets /:owner/:repo below.
+  app.get("/api/notes/repo", requireAdmin, async (req, res) => {
+    const repo = z.string().trim().max(REPO_ID_MAX).safeParse(req.query.repo);
+    await sendNotes(repo.success ? repo.data : "", res);
+  });
+
+  // GitHub's owner/repo in the path, as before.
+  app.get("/api/notes/:owner/:repo", requireAdmin, async (req, res) => {
+    await sendNotes(`${req.params.owner}/${req.params.repo}`, res);
   });
 
   // Empty text deletes the notes. NotesRepo checks the repo and the length.
   app.post("/api/notes", requireAdmin, async (req, res) => {
-    const input = body(z.object({ repo: z.string().max(200), text: z.string() }), req, res);
+    const input = body(z.object({ repo: z.string().max(REPO_ID_MAX), text: z.string() }), req, res);
     if (!input) return;
     const saved = await notes.put(input.repo.trim(), input.text);
     if (!saved.ok) return void res.status(400).json({ error: saved.error });

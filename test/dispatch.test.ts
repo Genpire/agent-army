@@ -334,6 +334,31 @@ describe("handleSlackEvent: commands", () => {
     expect(t.requests).toHaveLength(0);
   });
 
+  it("binds a channel to GitLab and Bitbucket repositories, by id or link, within each host's allow list", async () => {
+    const t = await setup((c) => {
+      c.gitlab = { token: "glpat-secret-token", baseUrl: "https://git.acme.test", allowed: ["acme"] };
+      c.bitbucket = { token: "ATATT-secret-token", allowed: ["acme-ws/api"] };
+    });
+    await t.mention("C9", "1.1", "bind gitlab:acme/platform/web");
+    expect((await t.configRepo.load(true)).bindings["C9"]).toBe("gitlab:acme/platform/web");
+    // A self-managed GitLab's link, as Slack wraps it.
+    await t.mention("C9", "1.2", "bind <https://git.acme.test/acme/web/-/tree/main|git.acme.test/acme/web>");
+    expect((await t.configRepo.load(true)).bindings["C9"]).toBe("gitlab:acme/web");
+    await t.mention("C9", "1.3", "bind <https://bitbucket.org/acme-ws/api|bitbucket.org/acme-ws/api>");
+    expect((await t.configRepo.load(true)).bindings["C9"]).toBe("bitbucket:acme-ws/api");
+    expect(t.posts.at(-1)!.text).toBe("This channel now defaults to `bitbucket:acme-ws/api`.");
+
+    await t.mention("C9", "1.4", "bind gitlab:other/web");
+    expect((await t.configRepo.load(true)).bindings["C9"]).toBe("bitbucket:acme-ws/api");
+    expect(t.posts.at(-1)!.text).toBe("`gitlab:other/web`: Not allowed to work on gitlab:other/web. Allowed on GitLab: acme.");
+    expect(t.requests).toHaveLength(0);
+
+    const none = await setup();
+    await none.mention("C9", "2.1", "bind bitbucket:acme-ws/api");
+    expect((await none.configRepo.load(true)).bindings["C9"]).toBeUndefined();
+    expect(none.posts.at(-1)!.text).toContain("Bitbucket is not connected");
+  });
+
   it("reports status", async () => {
     const t = await setup();
     await t.mention("C1", "1.1", "status");

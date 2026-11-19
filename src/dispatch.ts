@@ -163,7 +163,7 @@ async function handleMessage(ctx: Ctx, decision: RespondDecision): Promise<void>
   await react(slack, e.channel, e.ts, "eyes");
   let isError = false;
   try {
-    const command: Command | null = hasText ? parseCommand(raw) : files.length ? null : { kind: "help" };
+    const command: Command | null = hasText ? parseCommand(raw, ctx.config.gitlab.baseUrl) : files.length ? null : { kind: "help" };
     const reply = command
       ? { text: await runCommand(ctx, command), isError: false }
       : await askPointer(ctx, messageText(raw, ctx.config.slack.botUserId) || filesOnlyText(files), history);

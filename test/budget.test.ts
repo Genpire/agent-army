@@ -532,7 +532,7 @@ describe("POST /api/budget and GET /api/usage", () => {
       [{ alertPercent: 5 }, "The alert level is a whole percent from 10 to 100."],
       [{ alertPercent: 80.5 }, "The alert level is a whole percent from 10 to 100."],
       [{ alertChannel: "general" }, "Channel IDs look like C012ABCDEF."],
-      [{ perRepoUsd: { "not a repo": 5 } }, "Repos look like owner/repo."],
+      [{ perRepoUsd: { "not a repo": 5 } }, "Repositories look like owner/repo (GitHub), gitlab:group/project or bitbucket:workspace/repo."],
       [{ perRepoUsd: { "acme/web": 5, "ACME/web": 6 } }, "ACME/web is listed twice."],
     ];
     for (const [body, error] of bad) {

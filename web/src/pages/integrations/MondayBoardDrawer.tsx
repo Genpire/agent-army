@@ -18,10 +18,9 @@ import { api, errorMessage } from "../../lib/api";
 import { useConfig } from "../../lib/state";
 import type { MondayBoardSummary, PublicConfig } from "../../lib/types";
 import { useAction } from "../../lib/useAction";
+import { REPO_ERROR, REPO_PLACEHOLDER, REPO_RE, allowListRepos } from "../projects/validation";
 import { type BoardAutomation, type BoardItem, type ColumnsResponse, boardDescription, boardSource } from "./mondayBoards";
 
-// Mirrors REPO_RE in src/config.ts.
-const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 /** The Selector value for "leave the status alone" (an empty label on the server). */
 const KEEP = "__keep__";
 
@@ -32,7 +31,7 @@ type Labels = Record<"startLabel" | Step, string>;
 const STEPS: { key: Step; label: string; description: string; fallback: string }[] = [
   { key: "workingLabel", label: "When the team starts", description: "Set as soon as the task starts.", fallback: "Working on it" },
   { key: "reviewLabel", label: "When the pull request opens", description: "Set with the pull request's link, for a person to review.", fallback: "In review" },
-  { key: "doneLabel", label: "When the pull request is merged", description: "Needs the GitHub webhook with Pull requests ticked.", fallback: "Done" },
+  { key: "doneLabel", label: "When the pull request is merged", description: "Needs the code host's webhook (on GitHub, with Pull requests ticked).", fallback: "Done" },
   { key: "stuckLabel", label: "When the team stops or is blocked", description: "Set with the reason, and the draft pull request if there is one.", fallback: "Stuck" },
 ];
 
@@ -41,10 +40,14 @@ const EMPTY_LABELS: Labels = { startLabel: "", workingLabel: "Working on it", re
 type RepoItem = SearchableItem<undefined>;
 const repoItem = (repo: string): RepoItem => ({ id: repo, label: repo });
 
-/** Repositories the console already knows: channel bindings, repo setups, exact repos in the GitHub allow lists, other automated boards. */
+/** Repositories the console already knows: channel bindings, repo setups, exact repos in the code hosts' allow lists, other automated boards. */
 function knownRepos(config: PublicConfig): string[] {
-  const exact = [...config.github.allowedOwners, ...config.github.extra.flatMap((x) => x.allowed)].filter((x) => REPO_RE.test(x));
-  const repos = [...Object.values(config.bindings), ...Object.keys(config.repoSetup), ...exact, ...Object.values(config.monday.automation.boards).map((b) => b.repo)];
+  const repos = [
+    ...Object.values(config.bindings),
+    ...Object.keys(config.repoSetup),
+    ...allowListRepos(config),
+    ...Object.values(config.monday.automation.boards).map((b) => b.repo),
+  ];
   return [...new Map(repos.map((r) => [r.toLowerCase(), r])).values()].sort((a, b) => a.localeCompare(b));
 }
 
@@ -164,7 +167,7 @@ export function MondayBoardDrawer({ isOpen, boardId, known, onOpenChange }: Mond
     const sameAsStart = STEPS.find((s) => labels[s.key].trim() && labels[s.key].trim().toLowerCase() === start.toLowerCase());
     const found: FieldErrors = {
       board: target ? undefined : "Choose the board.",
-      repo: repo && REPO_RE.test(repo.id) ? undefined : "Choose the repository, as owner/repo.",
+      repo: !repo ? "Choose the repository." : REPO_RE.test(repo.id) ? undefined : REPO_ERROR,
       column: columnId.trim() ? undefined : "Choose the status column to watch.",
       start: !start ? "Choose the status that starts a task." : sameAsStart ? `The team also sets "${start}" (${sameAsStart.label.toLowerCase()}): pick different labels, or tickets would start again.` : undefined,
     };
@@ -237,14 +240,14 @@ export function MondayBoardDrawer({ isOpen, boardId, known, onOpenChange }: Mond
                   setRepo(item);
                   clear("repo");
                 }}
-                placeholder="owner/repo"
+                placeholder={REPO_PLACEHOLDER}
                 hasEntriesOnFocus
                 minQueryLength={1}
                 debounceMs={0}
-                description={`Where the team works on this board's tickets. It must be allowed by a GitHub connection.`}
+                description="Where the team works on this board's tickets. Its code host (GitHub, GitLab or Bitbucket) must be connected and allow it."
                 status={errors.repo ? { type: "error", message: errors.repo } : undefined}
                 statusVariant="detached"
-                emptySearchText="Type the repository as owner/repo."
+                emptySearchText="Type the repository as owner/repo, gitlab:group/project or bitbucket:workspace/repo."
                 isRequired
               />
               <Divider />
