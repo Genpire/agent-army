@@ -1,5 +1,6 @@
 import type { AgentDefinition } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
+import { BROWSER_SERVER, BROWSER_TOOLS, type BrowserServerConfig } from "./browser.js";
 
 /**
  * The team Pointer orchestrates. Stored in the encrypted config and edited on
@@ -227,26 +228,43 @@ function describeForSdk(a: AgentSpec): string {
   return `${a.name} (${a.role}): ${a.description}`;
 }
 
+export interface RepoAgentOptions {
+  /** The browser MCP server (see browser.ts), given to agents that can run commands. Absent = no browser. */
+  browser?: BrowserServerConfig;
+}
+
+/** Agents that can run commands can also start the app and drive the browser; "looks only" agents cannot. */
+const usesBrowser = (a: AgentSpec, opts: RepoAgentOptions) => Boolean(opts.browser) && a.access !== "read";
+
 /** Subagents for a repo task (worker). Only enabled agents; platform rules appended. */
-export function buildRepoAgents(team: Team): Record<string, AgentDefinition> {
+export function buildRepoAgents(team: Team, opts: RepoAgentOptions = {}): Record<string, AgentDefinition> {
   return Object.fromEntries(
     enabledAgents(team).map((a) => [
       a.id,
       {
         description: describeForSdk(a),
-        tools: repoToolsFor(a.access),
+        tools: [...repoToolsFor(a.access), ...(usesBrowser(a, opts) ? BROWSER_TOOLS : [])],
         prompt: `${a.instructions}\n${REPO_RULES}`,
         ...(a.model ? { model: a.model } : {}),
         effort: a.effort || team.pointer.taskEffort,
         background: false,
+        // Each agent that browses starts its own browser server, scoped to that agent.
+        ...(usesBrowser(a, opts) ? { mcpServers: [{ [BROWSER_SERVER]: opts.browser! }] } : {}),
       } satisfies AgentDefinition,
     ]),
   );
 }
 
 /** Everything a repo task may use under permissionMode "dontAsk": the orchestrator's tools plus every enabled agent's. */
-export function repoAllowedTools(team: Team): string[] {
-  return [...new Set([...ORCHESTRATOR_REPO_TOOLS, ...enabledAgents(team).flatMap((a) => repoToolsFor(a.access))])];
+export function repoAllowedTools(team: Team, opts: RepoAgentOptions = {}): string[] {
+  const agents = enabledAgents(team);
+  return [
+    ...new Set([
+      ...ORCHESTRATOR_REPO_TOOLS,
+      ...agents.flatMap((a) => repoToolsFor(a.access)),
+      ...(agents.some((a) => usesBrowser(a, opts)) ? BROWSER_TOOLS : []),
+    ]),
+  ];
 }
 
 /** Subagents for a Slack conversation (web service). Every agent gets the same safe tool list. */

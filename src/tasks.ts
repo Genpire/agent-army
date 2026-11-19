@@ -26,6 +26,24 @@ export interface Task {
   error?: string;
   /** Live progress while the team works, saved by the worker; Pointer reads it for status questions. */
   progress?: ProgressSnapshot;
+  /** What started the task: a Slack request (default) or feedback on its pull request. */
+  trigger?: "slack" | "review";
+  /** The pull request's checks after the last push (see ci.ts), when the task waited for them. */
+  ci?: CiSummary;
+  /** Screenshots from browser checks posted in the thread. */
+  screenshots?: number;
+}
+
+/** Outcome of waiting for a pull request's checks. */
+export interface CiSummary {
+  /** passed: every check succeeded; failed: at least one failed; pending: still running when the wait ended; none: the repo has no checks. */
+  state: "passed" | "failed" | "pending" | "none";
+  /** Fix rounds the team ran for failing checks. */
+  fixRounds: number;
+  /** Names of the checks that failed (state failed) or were still running (state pending). */
+  names: string[];
+  /** Number of checks seen on the last commit. */
+  total: number;
 }
 
 export interface ThreadState {
@@ -33,7 +51,21 @@ export interface ThreadState {
   branch: string;
   prUrl?: string;
   prNumber?: number;
+  /** Slack user who started the thread's first task; follow-ups from GitHub mention them. */
+  requester?: string;
+  /** When the thread's last task ended (ISO): review feedback after it is new to the team. */
+  lastRunAt?: string;
+  /** Set when the last task stopped before finishing (timeout, budget, turns); its work is on the branch in a draft PR. */
+  stopped?: { reason: string; at: string };
 }
+
+/** Which Slack thread a pull request opened by a task belongs to. */
+export interface PrThread {
+  channel: string;
+  threadTs: string;
+}
+
+const prKey = (repo: string, number: number) => `prs/${repo.toLowerCase().replace("/", "__")}-${number}.json`;
 
 /** Sortable by creation time, so listing newest-first is a string sort. */
 export function newTaskId(now = Date.now()): string {
@@ -93,6 +125,25 @@ export class TaskRepo {
 
   async saveThread(channel: string, threadTs: string, state: ThreadState): Promise<void> {
     await this.store.put(threadKey(channel, threadTs), JSON.stringify(state));
+  }
+
+  /** Remembers the Slack thread of a pull request a task opened, so GitHub feedback on it can be routed back. */
+  async savePrThread(repo: string, number: number, ref: PrThread): Promise<void> {
+    await this.store.put(prKey(repo, number), JSON.stringify(ref));
+  }
+
+  async getPrThread(repo: string, number: number): Promise<PrThread | null> {
+    const blob = await this.store.get(prKey(repo, number));
+    if (!blob) return null;
+    const ref = JSON.parse(blob.toString("utf8")) as Partial<PrThread>;
+    return typeof ref.channel === "string" && typeof ref.threadTs === "string" ? { channel: ref.channel, threadTs: ref.threadTs } : null;
+  }
+
+  /** Queued or running tasks of one Slack thread, newest first (looks at the most recent `scan` tasks). */
+  async activeInThread(channel: string, threadTs: string, scan = 50): Promise<Task[]> {
+    return (await this.recent(scan)).filter(
+      (t) => t.channel === channel && t.threadTs === threadTs && (t.status === "queued" || t.status === "running"),
+    );
   }
 }
 

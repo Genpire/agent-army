@@ -51,7 +51,96 @@ export interface CodeHit {
   url: string;
 }
 
+/** A pull request as the worker needs it. */
+export interface PrRef {
+  number: number;
+  html_url: string;
+  /** GraphQL id, for marking a draft ready for review. */
+  node_id: string;
+  draft: boolean;
+}
+
+export interface PullDetail {
+  number: number;
+  state: string;
+  draft: boolean;
+  merged: boolean;
+  nodeId: string;
+  headRef: string;
+  headSha: string;
+  url: string;
+}
+
+/** A check run on a commit (GitHub Actions jobs, apps such as Vercel). */
+export interface CheckInfo {
+  id: number;
+  name: string;
+  /** queued, in_progress, completed (also waiting, requested, pending). */
+  status: string;
+  /** When completed: success, failure, neutral, cancelled, skipped, timed_out, action_required, stale. */
+  conclusion: string | null;
+  detailsUrl: string | null;
+  title: string | null;
+  summary: string | null;
+  text: string | null;
+  /** Slug of the app that created it, e.g. "github-actions" or "vercel". */
+  app: string | null;
+}
+
+/** A commit status (the older API some services use, e.g. Vercel deployments). */
+export interface StatusInfo {
+  context: string;
+  state: "error" | "failure" | "pending" | "success";
+  description: string | null;
+  targetUrl: string | null;
+}
+
+export interface Annotation {
+  path: string;
+  startLine: number;
+  level: string;
+  title: string | null;
+  message: string;
+}
+
+/** One piece of feedback on a pull request: a review, an inline review comment, or a conversation comment. */
+export interface PrFeedback {
+  kind: "review" | "inline" | "comment";
+  id: number;
+  author: string;
+  /** GitHub's author_association: OWNER, MEMBER, COLLABORATOR, CONTRIBUTOR, NONE… */
+  association: string;
+  bot: boolean;
+  /** Reviews only: APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED, PENDING. */
+  state?: string;
+  body: string;
+  path?: string;
+  line?: number;
+  createdAt: string;
+  url: string;
+}
+
+/** Appended to everything the platform posts on GitHub, so its own comments never count as feedback. */
+export const BOT_MARKER = "<!-- agent-army -->";
+
+/** Who may steer the team from a pull request: people with write access to the repository. */
+export const WRITE_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+
+/**
+ * Feedback a human with write access gave, after `since` (ISO) when set.
+ * Approvals without a comment and pending (unsubmitted) reviews are not feedback.
+ */
+export function isHumanFeedback(f: PrFeedback, since?: string): boolean {
+  if (f.bot || !WRITE_ASSOCIATIONS.has(f.association) || f.body.includes(BOT_MARKER)) return false;
+  if (since && f.createdAt <= since) return false;
+  if (f.kind === "review" && (f.state === "PENDING" || f.state === "DISMISSED")) return false;
+  if (f.kind === "review" && !f.body.trim() && f.state !== "CHANGES_REQUESTED") return false;
+  return true;
+}
+
 export const FILE_MAX_CHARS = 20_000;
+/** Tail of a CI job log kept for the team. */
+export const LOG_MAX_CHARS = 20_000;
 const MAX_ITEMS = 20;
 
 const clampLimit = (limit: number | undefined, fallback = 10) =>
@@ -98,21 +187,193 @@ export class GitHub {
     return data.default_branch;
   }
 
-  async findOpenPr(repo: string, branch: string): Promise<{ number: number; html_url: string } | null> {
+  async findOpenPr(repo: string, branch: string): Promise<PrRef | null> {
     const owner = repo.split("/")[0]!;
-    const prs = await this.call<{ number: number; html_url: string }[]>(
+    const prs = await this.call<{ number: number; html_url: string; node_id: string; draft?: boolean }[]>(
       "GET",
       `/repos/${repo}/pulls?state=open&head=${encodeURIComponent(`${owner}:${branch}`)}`,
     );
-    return prs[0] ?? null;
+    const pr = prs[0];
+    return pr ? { number: pr.number, html_url: pr.html_url, node_id: pr.node_id, draft: Boolean(pr.draft) } : null;
   }
 
-  async createPr(repo: string, opts: { title: string; body: string; head: string; base: string }) {
-    return this.call<{ number: number; html_url: string }>("POST", `/repos/${repo}/pulls`, opts);
+  /** Opens a pull request; `draft` opens it as a draft (unfinished work). */
+  async createPr(repo: string, opts: { title: string; body: string; head: string; base: string; draft?: boolean }): Promise<PrRef> {
+    const pr = await this.call<{ number: number; html_url: string; node_id: string; draft?: boolean }>(
+      "POST",
+      `/repos/${repo}/pulls`,
+      opts,
+    );
+    return { number: pr.number, html_url: pr.html_url, node_id: pr.node_id, draft: Boolean(pr.draft) };
   }
 
+  /** Comments on the pull request's conversation. The platform's marker is appended so the comment is never read back as feedback. */
   async commentOnPr(repo: string, number: number, body: string): Promise<void> {
-    await this.call("POST", `/repos/${repo}/issues/${number}/comments`, { body });
+    await this.call("POST", `/repos/${repo}/issues/${number}/comments`, { body: `${body}\n\n${BOT_MARKER}` });
+  }
+
+  async getPull(repo: string, number: number): Promise<PullDetail> {
+    const p = await this.call<{
+      number: number;
+      state: string;
+      draft?: boolean;
+      merged?: boolean;
+      node_id: string;
+      head: { ref: string; sha: string };
+      html_url: string;
+    }>("GET", `/repos/${repo}/pulls/${number}`);
+    return {
+      number: p.number,
+      state: p.state,
+      draft: Boolean(p.draft),
+      merged: Boolean(p.merged),
+      nodeId: p.node_id,
+      headRef: p.head.ref,
+      headSha: p.head.sha,
+      url: p.html_url,
+    };
+  }
+
+  /** Turns a draft pull request into one ready for review (GraphQL only; REST cannot). */
+  async markReadyForReview(nodeId: string): Promise<void> {
+    const data = await this.call<{ errors?: { message?: string }[] }>("POST", "/graphql", {
+      query: "mutation($id: ID!) { markPullRequestReadyForReview(input: { pullRequestId: $id }) { pullRequest { isDraft } } }",
+      variables: { id: nodeId },
+    });
+    if (data.errors?.length) throw new Error(`GitHub GraphQL failed: ${data.errors.map((e) => e.message ?? "error").join("; ")}`);
+  }
+
+  // ---------- Checks on a commit (CI loop) ----------
+
+  /** The latest check runs and commit statuses of a commit. Needs Checks: read and Commit statuses: read on fine-grained tokens. */
+  async checksFor(repo: string, sha: string): Promise<{ checks: CheckInfo[]; statuses: StatusInfo[] }> {
+    const ref = encodeURIComponent(sha);
+    const [runs, combined] = await Promise.all([
+      this.call<{
+        check_runs: {
+          id: number;
+          name: string;
+          status: string;
+          conclusion: string | null;
+          details_url: string | null;
+          output?: { title?: string | null; summary?: string | null; text?: string | null } | null;
+          app?: { slug?: string } | null;
+        }[];
+      }>("GET", `/repos/${repo}/commits/${ref}/check-runs?per_page=100&filter=latest`),
+      this.call<{ statuses: { context: string; state: StatusInfo["state"]; description: string | null; target_url: string | null }[] }>(
+        "GET",
+        `/repos/${repo}/commits/${ref}/status?per_page=100`,
+      ),
+    ]);
+    return {
+      checks: runs.check_runs.map((r) => ({
+        id: r.id,
+        name: r.name,
+        status: r.status,
+        conclusion: r.conclusion,
+        detailsUrl: r.details_url,
+        title: r.output?.title ?? null,
+        summary: r.output?.summary ?? null,
+        text: r.output?.text ?? null,
+        app: r.app?.slug ?? null,
+      })),
+      statuses: combined.statuses.map((s) => ({
+        context: s.context,
+        state: s.state,
+        description: s.description,
+        targetUrl: s.target_url,
+      })),
+    };
+  }
+
+  /** A check run's annotations (file, line, message), at most 50. */
+  async checkAnnotations(repo: string, checkRunId: number): Promise<Annotation[]> {
+    const data = await this.call<
+      { path: string; start_line: number; annotation_level: string; title: string | null; message: string }[]
+    >("GET", `/repos/${repo}/check-runs/${checkRunId}/annotations?per_page=50`);
+    return data.map((a) => ({ path: a.path, startLine: a.start_line, level: a.annotation_level, title: a.title, message: a.message }));
+  }
+
+  /**
+   * The end of a GitHub Actions job's log (its check run id is the job id), at most LOG_MAX_CHARS.
+   * Needs Actions: read on fine-grained tokens. GitHub redirects to a signed URL; fetch drops our
+   * Authorization header on that cross-origin redirect.
+   */
+  async actionsJobLog(repo: string, jobId: number): Promise<string> {
+    const res = await fetch(`https://api.github.com/repos/${repo}/actions/jobs/${jobId}/logs`, {
+      headers: {
+        authorization: `Bearer ${this.token}`,
+        accept: "application/vnd.github+json",
+        "x-github-api-version": "2022-11-28",
+        "user-agent": "agent-army",
+      },
+    });
+    if (!res.ok) throw new Error(`GitHub GET job ${jobId} logs failed (HTTP ${res.status})`);
+    const text = await res.text();
+    return text.length > LOG_MAX_CHARS ? text.slice(-LOG_MAX_CHARS) : text;
+  }
+
+  // ---------- Feedback on a pull request (reviews and comments) ----------
+
+  /** Reviews, inline review comments and conversation comments, oldest first (up to 100 of each). */
+  async prFeedback(repo: string, number: number): Promise<PrFeedback[]> {
+    type User = { login?: string; type?: string } | null | undefined;
+    const who = (u: User) => ({ author: u?.login ?? "unknown", bot: u?.type === "Bot" });
+    const [reviews, inline, comments] = await Promise.all([
+      this.call<
+        { id: number; user: User; body: string | null; state: string; submitted_at?: string | null; author_association: string; html_url: string }[]
+      >("GET", `/repos/${repo}/pulls/${number}/reviews?per_page=100`),
+      this.call<
+        {
+          id: number;
+          user: User;
+          body: string;
+          path: string;
+          line?: number | null;
+          original_line?: number | null;
+          created_at: string;
+          author_association: string;
+          html_url: string;
+        }[]
+      >("GET", `/repos/${repo}/pulls/${number}/comments?per_page=100`),
+      this.call<{ id: number; user: User; body: string | null; created_at: string; author_association: string; html_url: string }[]>(
+        "GET",
+        `/repos/${repo}/issues/${number}/comments?per_page=100`,
+      ),
+    ]);
+    const all: PrFeedback[] = [
+      ...reviews.map((r) => ({
+        kind: "review" as const,
+        id: r.id,
+        ...who(r.user),
+        association: r.author_association,
+        state: r.state,
+        body: r.body ?? "",
+        createdAt: r.submitted_at ?? "",
+        url: r.html_url,
+      })),
+      ...inline.map((c) => ({
+        kind: "inline" as const,
+        id: c.id,
+        ...who(c.user),
+        association: c.author_association,
+        body: c.body,
+        path: c.path,
+        ...((c.line ?? c.original_line) ? { line: (c.line ?? c.original_line) as number } : {}),
+        createdAt: c.created_at,
+        url: c.html_url,
+      })),
+      ...comments.map((c) => ({
+        kind: "comment" as const,
+        id: c.id,
+        ...who(c.user),
+        association: c.author_association,
+        body: c.body ?? "",
+        createdAt: c.created_at,
+        url: c.html_url,
+      })),
+    ];
+    return all.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
 
   // ---------- Read-only lookups (Pointer's chat tools) ----------

@@ -17,6 +17,34 @@ export interface OrchestratorContext {
   projectNotes?: string;
   /** Files shared in the conversation that started the task (see materializeAttachments). */
   attachments?: SharedFile[];
+  /**
+   * The headless browser, when this worker has one (see browser.ts): agents that can run commands
+   * get the browser tools. Screenshots saved with a relative file name land in `shotsDir`, outside
+   * the checkout, and are posted in the Slack thread after the task.
+   */
+  browser?: { shotsDir: string };
+  /** The owner's setup for this repository (Repo setup card), when there is one. */
+  repoSetup?: RepoSetupContext;
+}
+
+/** What the team is told about the owner's setup for the repository (see repo-setup.ts). */
+export interface RepoSetupContext {
+  /** How to start the app, e.g. "npm run dev". Empty = not configured. */
+  startCommand: string;
+  /** Where the started app answers, e.g. "http://localhost:3000". Empty = not configured. */
+  appUrl: string;
+  /** Names (never values) of the environment variables the owner gave the agents' shell. */
+  envKeys: string[];
+  /** The setup command the worker ran after the checkout, and how it went. Absent = none configured. */
+  setup?: SetupResult;
+}
+
+export interface SetupResult {
+  command: string;
+  ok: boolean;
+  seconds: number;
+  /** The last lines of its output, with secrets redacted. */
+  outputTail: string;
 }
 
 /** How the team curates project notes; shared by the prompt and the report schema. */

@@ -6,6 +6,48 @@ import { TeamSchema, defaultTeam } from "./team.js";
 /** owner/repo; "." and ".." are rejected as either part so a repo can never traverse API paths. */
 export const REPO_RE = /^(?!\.{1,2}\/)[A-Za-z0-9_.-]+\/(?!\.{1,2}$)[A-Za-z0-9_.-]+$/;
 export const CHANNEL_RE = /^[CGD][A-Z0-9]+$/;
+/** An environment variable name the agents' shell can receive. */
+export const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+/** Names the platform sets or guards itself; a repo setup cannot override them. */
+export const RESERVED_ENV_KEYS = new Set([
+  "PATH",
+  "HOME",
+  "LANG",
+  "CI",
+  "ANTHROPIC_API_KEY",
+  "MASTER_KEY",
+  "SETUP_TOKEN",
+  "TASK_B64",
+  "CLAUDE_AGENT_SDK_CLIENT_APP",
+  "PLAYWRIGHT_BROWSERS_PATH",
+]);
+export const REPO_SETUP_MAX_ENV = 100;
+
+/**
+ * How the team prepares and runs one repository in repo tasks: a setup
+ * command run once after the checkout, how to start the app (for browser
+ * checks), and environment variables given to the agents' shell (stored
+ * encrypted with the config; values are never sent to the browser).
+ */
+export const RepoSetupSchema = z.object({
+  setupCommand: z.string().max(2000).default(""),
+  startCommand: z.string().max(500).default(""),
+  /** Where the started app answers, e.g. http://localhost:3000. Empty = unknown. */
+  appUrl: z
+    .string()
+    .max(300)
+    .refine((u) => u === "" || /^https?:\/\/[^\s]+$/.test(u), "The app URL must start with http:// or https://")
+    .default(""),
+  env: z
+    .record(
+      z.string().regex(ENV_KEY_RE, "Variable names use letters, digits and _, and do not start with a digit"),
+      z.string().max(10_000),
+    )
+    .refine((env) => Object.keys(env).length <= REPO_SETUP_MAX_ENV, `At most ${REPO_SETUP_MAX_ENV} variables per repository`)
+    .refine((env) => Object.keys(env).every((k) => !RESERVED_ENV_KEYS.has(k)), "That variable name is reserved by the platform")
+    .default({}),
+});
+export type RepoSetup = z.infer<typeof RepoSetupSchema>;
 
 export const ConfigSchema = z.object({
   orgName: z.string().default(""),
@@ -46,6 +88,8 @@ export const ConfigSchema = z.object({
           }),
         )
         .default([]),
+      /** Shared secret of the GitHub webhook that reports pull request reviews and comments (POST /github/webhook). */
+      webhookSecret: z.string().min(20).max(200).optional(),
     })
     .default({ allowedOwners: [], extra: [] }),
   /** Optional: monday.com, so Pointer can open and update tickets. */
@@ -70,8 +114,14 @@ export const ConfigSchema = z.object({
       maxParallel: z.number().int().min(1).max(50).default(3),
       /** Minutes between progress updates posted in a repo task's thread; 0 = only the live progress message. */
       progressEveryMin: z.number().int().min(0).max(60).default(5),
+      /** Minutes a repo task waits for the pull request's checks (CI, Vercel…) after pushing; 0 = do not wait. */
+      ciWaitMin: z.number().int().min(0).max(60).default(15),
+      /** How many times the team tries to fix failing checks, within the task's budget; 0 = only report them. */
+      ciFixRounds: z.number().int().min(0).max(5).default(2),
     })
-    .default({ maxTurns: 200, maxBudgetUsd: 15, maxParallel: 3, progressEveryMin: 5 }),
+    .default({ maxTurns: 200, maxBudgetUsd: 15, maxParallel: 3, progressEveryMin: 5, ciWaitMin: 15, ciFixRounds: 2 }),
+  /** "owner/repo" -> how repo tasks set up and run that repository. */
+  repoSetup: z.record(z.string().regex(REPO_RE), RepoSetupSchema).default({}),
   /** Pointer and the agents it orchestrates (seeded with defaults on first load). */
   team: TeamSchema.default(defaultTeam),
 });
@@ -160,7 +210,15 @@ export function publicView(c: Config) {
       allowedOwners: c.github.allowedOwners,
       /** Extra connections, without their tokens. */
       extra: c.github.extra.map((x) => ({ id: x.id, login: x.login ?? null, allowed: x.allowed, key: mask(x.token) })),
+      webhook: { configured: Boolean(c.github.webhookSecret) },
     },
+    /** Per-repo setup without the variables' values: only their names. */
+    repoSetup: Object.fromEntries(
+      Object.entries(c.repoSetup).map(([repo, s]) => [
+        repo,
+        { setupCommand: s.setupCommand, startCommand: s.startCommand, appUrl: s.appUrl, envKeys: Object.keys(s.env).sort() },
+      ]),
+    ),
     monday: {
       connected: Boolean(c.monday.token),
       userName: c.monday.userName ?? null,

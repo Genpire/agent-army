@@ -165,6 +165,7 @@ describe("slack", () => {
       "users:read",
       "reactions:write",
       "files:read",
+      "files:write",
     ]);
     expect(m.features.app_home).toEqual({
       home_tab_enabled: false,

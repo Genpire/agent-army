@@ -211,16 +211,16 @@ describe("admin API and Slack events", () => {
   describe("settings", () => {
     it("merges partial limits field by field", async () => {
       expect((await post("/api/settings", { limits: { maxParallel: 5 } })).status).toBe(200);
-      expect((await state()).config.limits).toEqual({ maxTurns: 200, maxBudgetUsd: 15, maxParallel: 5, progressEveryMin: 5 });
+      expect((await state()).config.limits).toEqual({ maxTurns: 200, maxBudgetUsd: 15, maxParallel: 5, progressEveryMin: 5, ciWaitMin: 15, ciFixRounds: 2 });
 
       expect((await post("/api/settings", { limits: { maxBudgetUsd: 20, progressEveryMin: 0 } })).status).toBe(200);
-      expect((await state()).config.limits).toEqual({ maxTurns: 200, maxBudgetUsd: 20, maxParallel: 5, progressEveryMin: 0 });
+      expect((await state()).config.limits).toEqual({ maxTurns: 200, maxBudgetUsd: 20, maxParallel: 5, progressEveryMin: 0, ciWaitMin: 15, ciFixRounds: 2 });
 
       expect((await post("/api/settings", { limits: { maxParallel: 0 } })).status).toBe(400);
       expect((await post("/api/settings", { limits: { maxTurns: "lots" } })).status).toBe(400);
       expect((await post("/api/settings", { limits: { progressEveryMin: 61 } })).status).toBe(400);
       expect((await post("/api/settings", { limits: { progressEveryMin: 2.5 } })).status).toBe(400);
-      expect((await state()).config.limits).toEqual({ maxTurns: 200, maxBudgetUsd: 20, maxParallel: 5, progressEveryMin: 0 });
+      expect((await state()).config.limits).toEqual({ maxTurns: 200, maxBudgetUsd: 20, maxParallel: 5, progressEveryMin: 0, ciWaitMin: 15, ciFixRounds: 2 });
     });
 
     it("saves Pointer channels and validates them", async () => {

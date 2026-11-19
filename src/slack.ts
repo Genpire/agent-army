@@ -48,6 +48,7 @@ export function buildManifest(baseUrl: string, botName: string) {
           "users:read",
           "reactions:write",
           "files:read",
+          "files:write",
         ],
       },
     },
