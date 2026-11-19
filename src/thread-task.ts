@@ -3,7 +3,7 @@ import type { Config } from "./config.js";
 import { connectionForRepo, describeAllowed, hasGitHub } from "./github-access.js";
 import type { Runner } from "./runner.js";
 import { repoFromToken, resolveRepo } from "./targeting.js";
-import { type Task, type TaskRepo, WEB_CHANNEL, newTaskId } from "./tasks.js";
+import { type Task, type TaskRepo, type TaskTicket, WEB_CHANNEL, newTaskId } from "./tasks.js";
 
 export interface ThreadTaskDeps {
   tasks: TaskRepo;
@@ -26,6 +26,8 @@ export interface ThreadTaskInput {
   ackText: string;
   /** What started the task; "slack" when omitted. */
   trigger?: Task["trigger"];
+  /** The monday.com ticket the task works on; its status follows the task (see ticket-sync.ts). */
+  ticket?: TaskTicket;
 }
 
 export type ThreadTaskResult = { ok: true; taskId: string } | { ok: false; error: string };
@@ -60,6 +62,7 @@ export async function startThreadTask(deps: ThreadTaskDeps, input: ThreadTaskInp
       userId: input.userId,
       instruction: input.instruction.trim(),
       trigger: input.trigger ?? "slack",
+      ...(input.ticket ? { ticket: input.ticket } : {}),
     };
     await deps.tasks.save(task);
   } catch (err) {

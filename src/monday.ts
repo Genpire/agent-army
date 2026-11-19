@@ -240,6 +240,35 @@ export interface MondayItemDetails {
 /** Updates read per item (monday.com's default page size; the maximum is 100). */
 export const ITEM_UPDATES_LIMIT = 25;
 
+/** A board webhook (https://developer.monday.com/api-reference/reference/webhooks). */
+export interface MondayWebhook {
+  id: string;
+  boardId: string;
+  event?: string;
+  /** The webhook's config, e.g. {"columnId": "status"} (a JSON string in some responses). */
+  config?: unknown;
+}
+
+/** The webhook events Agent Army creates: a change of one column (the status column it watches). */
+export type MondayWebhookEvent = "change_specific_column_value" | "change_status_column_value" | "change_column_value";
+
+/** A status column and its labels, for pickers and checks. */
+export interface MondayStatusColumn {
+  id: string;
+  title: string;
+  labels: string[];
+}
+
+/** Status columns are `status` (since API 2023-10) or `color` (older boards and webhook payloads). */
+const STATUS_COLUMN_TYPES = new Set(["status", "color"]);
+
+/** The board's status columns with their active labels. */
+export function statusColumns(board: Pick<MondayBoard, "columns">): MondayStatusColumn[] {
+  return board.columns
+    .filter((c) => STATUS_COLUMN_TYPES.has(c.type))
+    .map((c) => ({ id: c.id, title: c.title, labels: c.labels ?? [] }));
+}
+
 const ASSET_FIELDS = "id name file_extension file_size public_url url";
 
 type RawAsset = {
@@ -569,6 +598,73 @@ export class MondayClient {
     );
     if (!data.change_multiple_column_values) throw this.fail(`monday.com did not update item ${input.itemId}.`);
     return { id: String(data.change_multiple_column_values.id) };
+  }
+
+  /**
+   * Sets a status column to one of its labels, by the label's text
+   * (`{"<column>": {"label": "Done"}}`). The label must exist: monday.com
+   * rejects unknown labels unless asked to create them, which this never does.
+   */
+  setStatusLabel(input: { boardId: string; itemId: string; columnId: string; label: string }): Promise<{ id: string }> {
+    return this.changeColumnValues({ boardId: input.boardId, itemId: input.itemId, columnValues: { [input.columnId]: { label: input.label } } });
+  }
+
+  /**
+   * Creates a board webhook (scope webhooks:write). monday.com first POSTs
+   * `{"challenge": "…"}` to the URL and expects it echoed, so the URL must
+   * already answer. The URL is limited to 255 characters.
+   */
+  async createWebhook(input: {
+    boardId: string;
+    url: string;
+    event: MondayWebhookEvent;
+    config?: Record<string, unknown>;
+  }): Promise<{ id: string; boardId: string }> {
+    const data = await this.request<{ create_webhook: { id?: string | number | null; board_id?: string | number | null } | null }>(
+      `mutation ($boardId: ID!, $url: String!, $event: WebhookEventType!, $config: JSON) {
+  create_webhook(board_id: $boardId, url: $url, event: $event, config: $config) { id board_id }
+}`,
+      {
+        boardId: input.boardId,
+        url: input.url,
+        event: input.event,
+        // The JSON scalar takes a JSON-encoded string, as column values do.
+        ...(input.config ? { config: JSON.stringify(input.config) } : {}),
+      },
+    );
+    const id = data.create_webhook?.id;
+    if (id === undefined || id === null) throw this.fail(`monday.com did not create the webhook on board ${input.boardId}.`);
+    return { id: String(id), boardId: String(data.create_webhook?.board_id ?? input.boardId) };
+  }
+
+  /** Deletes a webhook (scope webhooks:write); events stop being sent to its URL. */
+  async deleteWebhook(id: string): Promise<{ id: string }> {
+    const data = await this.request<{ delete_webhook: { id?: string | number | null } | null }>(
+      `mutation ($id: ID!) {
+  delete_webhook(id: $id) { id board_id }
+}`,
+      { id },
+    );
+    return { id: String(data.delete_webhook?.id ?? id) };
+  }
+
+  /** The board's webhooks (scope webhooks:read). monday.com does not return their URLs. */
+  async listWebhooks(boardId: string): Promise<MondayWebhook[]> {
+    type Raw = { id: string | number; event?: string | null; board_id?: string | number | null; config?: unknown };
+    const data = await this.request<{ webhooks: (Raw | null)[] | null }>(
+      `query ($boardId: ID!) {
+  webhooks(board_id: $boardId) { id event board_id config }
+}`,
+      { boardId },
+    );
+    return (data.webhooks ?? [])
+      .filter((w): w is Raw => Boolean(w))
+      .map((w) => ({
+        id: String(w.id),
+        boardId: String(w.board_id ?? boardId),
+        ...(w.event ? { event: w.event } : {}),
+        ...(w.config !== undefined && w.config !== null ? { config: w.config } : {}),
+      }));
   }
 
   /** Posts an update (comment) on an item. `body` is plain text; it is HTML-escaped with line breaks kept. */

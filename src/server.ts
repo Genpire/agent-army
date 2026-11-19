@@ -7,6 +7,8 @@ import {
   CHANNEL_RE,
   ConfigRepo,
   ENV_KEY_RE,
+  type MondayBoardAutomation,
+  MondayBoardAutomationSchema,
   REPO_RE,
   RESERVED_ENV_KEYS,
   type RepoSetup,
@@ -16,11 +18,22 @@ import {
   resolveMasterKey,
 } from "./config.js";
 import { hashPassword, randomToken, safeEqual, sessionKey, signSession, verifyPassword, verifySession } from "./crypto.js";
+import { connectionForRepo, describeAllowed, hasGitHub } from "./github-access.js";
 import { CONVERSATION_ID_RE, ConversationService, MESSAGE_MAX_CHARS, type WebThreads } from "./conversations.js";
 import { handleSlackEvent, withBrainSlot } from "./dispatch.js";
 import { RecentSet } from "./listen.js";
 import { MEMORY_MAX_FACTS, MemoryRepo } from "./memory.js";
-import { MondayClient, MondayError, checkMonday } from "./monday.js";
+import { MondayClient, MondayError, checkMonday, statusColumns } from "./monday.js";
+import {
+  TicketAutomation,
+  checkBoardAutomation,
+  connectWebhooks,
+  labelConflict,
+  manualWebhookSteps,
+  removeWebhook,
+  webhookChallenge,
+  webhookIds,
+} from "./monday-automation.js";
 import { NOTES_MAX_CHARS, NotesRepo } from "./notes.js";
 import { createPointerBrain } from "./pointer.js";
 import type { PointerBrain, SlackDeps, SlackMessageEvent } from "./pointer-types.js";
@@ -31,9 +44,11 @@ import { createStore } from "./store.js";
 import { readTimeline } from "./task-events.js";
 import { TaskRepo } from "./tasks.js";
 import { TeamSchema } from "./team.js";
+import { rememberConsoleUrl } from "./ticket-sync.js";
 import { checkAnthropic, checkGithub, checkSlack } from "./validate.js";
 import { UsageRepo } from "./usage.js";
 import { handleGithubWebhook, parseGithubPayload, verifyGithubSignature } from "./webhook.js";
+import { configSecrets, makeRedactor } from "./worker.js";
 
 const SESSION_COOKIE = "army_session";
 const SESSION_TTL_MS = 1000 * 60 * 60 * 12;
@@ -67,6 +82,18 @@ const WEBHOOK_SECRET = z.union([
     .regex(/^[\x21-\x7e]+$/, "Use printable characters without spaces in the secret."),
 ]);
 const REPO_INPUT = z.string().trim().max(200).regex(REPO_RE, "Repos look like owner/repo.");
+/** A board's ticket automation as the admin page sends it; labels left out get the defaults (MondayBoardAutomationSchema). */
+const LABEL_INPUT = (what: string) => z.string().trim().max(100, `The ${what} label is at most 100 characters.`).optional();
+const BOARD_AUTOMATION_INPUT = z.object({
+  repo: REPO_INPUT,
+  statusColumnId: z.string().trim().min(1, "Choose the status column to watch.").max(100, "Column ids are at most 100 characters."),
+  startLabel: z.string().trim().min(1, "Choose the status that starts a task.").max(100, "The start label is at most 100 characters."),
+  workingLabel: LABEL_INPUT("working"),
+  reviewLabel: LABEL_INPUT("in review"),
+  doneLabel: LABEL_INPUT("done"),
+  stuckLabel: LABEL_INPUT("stuck"),
+});
+const MAX_AUTOMATED_BOARDS = 50;
 const ENV_VALUE_MAX = 10_000;
 /** Variables to set (a string) or delete (null); names left out are kept. */
 const ENV_CHANGES = z
@@ -271,7 +298,34 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
     if (event.data === "ping") return void res.status(200).json({ ok: true });
     // Answer first (GitHub gives up after 10 seconds); the follow-up starts after this.
     res.status(202).json({ ok: true });
-    void handleGithubWebhook(event.data, payload, slackDeps).catch(() => console.error(`[github] ${event.data} failed`));
+    void handleGithubWebhook(event.data, payload, { ...slackDeps, store }).catch(() => console.error(`[github] ${event.data} failed`));
+  });
+
+  // ---------- monday.com webhook: tickets that start repo tasks ----------
+  // monday.com does not sign webhooks created with an API token: the secret in the
+  // URL is the check. The payload only names the board and item; both are read again.
+  const automation = new TicketAutomation({
+    configRepo,
+    tasks,
+    startTask: (repo, instruction, opts) => conversations.startDirectTask(repo, instruction, opts),
+  });
+  app.post("/monday/webhook/:secret", express.raw({ type: "*/*", limit: "1mb" }), async (req, res) => {
+    const auto = (await configRepo.load()).monday.automation;
+    const given = String(req.params.secret ?? "");
+    if (!auto.enabled || !auto.webhookSecret || !safeEqual(given, auto.webhookSecret)) return void res.status(404).json({ error: "Not found." });
+    let payload: unknown;
+    try {
+      payload = JSON.parse(Buffer.isBuffer(req.body) ? req.body.toString("utf8") : "");
+    } catch {
+      return void res.status(400).json({ error: "Invalid JSON." });
+    }
+    // Sent once when the webhook is created; monday.com expects it back.
+    const challenge = webhookChallenge(payload);
+    if (challenge !== undefined) return void res.json({ challenge });
+    // Answer first (monday.com retries slow deliveries); the item is read and the task started after this.
+    res.status(200).json({ ok: true });
+    const ids = webhookIds(payload);
+    if (ids) void automation.handle(ids.boardId, ids.itemId);
   });
 
   // ---------- Admin API ----------
@@ -832,6 +886,122 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
     }
   });
 
+  // ---------- monday.com ticket automation (admin) ----------
+  // Boards whose tickets start repo tasks. `null` removes a board (and its webhook).
+  app.post("/api/monday/automation", requireAdmin, async (req, res) => {
+    const parsed = z
+      .object({ enabled: z.boolean().optional(), boards: z.record(z.string(), z.union([BOARD_AUTOMATION_INPUT, z.null()])).optional() })
+      .safeParse(req.body);
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      const [section, boardId] = issue?.path ?? [];
+      const where = section === "boards" && typeof boardId === "string" ? `Board ${boardId.slice(0, 20)}: ` : "";
+      return void res.status(400).json({ error: `${where}${issue?.message ?? "Invalid input."}` });
+    }
+    const input = parsed.data;
+    const changes = Object.entries(input.boards ?? {});
+    const badId = changes.find(([id]) => !BOARD_ID.safeParse(id).success);
+    if (badId) return void res.status(400).json({ error: `"${badId[0].slice(0, 20)}" is not a board id. Board ids are numbers, like 1234567890.` });
+
+    const config = await configRepo.load(true);
+    const name = config.team.pointer.name;
+    const token = config.monday.token;
+    const adding = changes.filter((e): e is [string, z.infer<typeof BOARD_AUTOMATION_INPUT>] => e[1] !== null);
+    if ((input.enabled || adding.length > 0) && !token) {
+      return void res.status(400).json({ error: "Connect monday.com with an API token first." });
+    }
+    const total = new Set([...Object.keys(config.monday.automation.boards), ...adding.map(([id]) => id)]).size;
+    if (total > MAX_AUTOMATED_BOARDS) return void res.status(400).json({ error: `Automate at most ${MAX_AUTOMATED_BOARDS} boards.` });
+
+    const allowedBoards = config.monday.allowedBoardIds;
+    const checked: Record<string, MondayBoardAutomation> = {};
+    const client = token ? new MondayClient(token) : undefined;
+    for (const [id, value] of adding) {
+      const fail = (error: string) => void res.status(400).json({ error });
+      if (allowedBoards.length > 0 && !allowedBoards.includes(id)) {
+        return fail(`Board ${id} is not one of the boards ${name} may use. Add it under Boards first.`);
+      }
+      const auto = MondayBoardAutomationSchema.parse(value);
+      if (!hasGitHub(config)) return fail("Connect GitHub first: tickets become repo tasks that open pull requests.");
+      if (!connectionForRepo(config, auto.repo)) {
+        return fail(`No GitHub connection may work on ${auto.repo}. Allowed owners and repositories: ${describeAllowed(config)}.`);
+      }
+      const conflict = labelConflict(auto);
+      if (conflict) return fail(`Board ${id}: ${conflict}`);
+      if (process.env.SKIP_VALIDATION === "1" || !client) {
+        checked[id] = auto;
+        continue;
+      }
+      let board;
+      try {
+        board = await client.getBoard(id);
+      } catch (err) {
+        return fail(`Couldn't read board ${id} from monday.com: ${err instanceof MondayError ? err.message : "the request failed."}`);
+      }
+      const result = checkBoardAutomation(board, auto);
+      if (!result.ok) return fail(result.error);
+      checked[id] = result.automation;
+    }
+
+    const updated = await configRepo.update((c) => {
+      for (const [id, value] of changes) {
+        if (value === null) delete c.monday.automation.boards[id];
+        else c.monday.automation.boards[id] = checked[id]!;
+      }
+      if (input.enabled !== undefined) c.monday.automation.enabled = input.enabled;
+    });
+    for (const [id] of changes.filter(([, value]) => value === null)) await removeWebhook({ store, client }, id);
+    await rememberConsoleUrl(store, baseUrl(req));
+    res.json({ ok: true, automation: publicView(updated).monday.automation });
+  });
+
+  // Creates the webhook on every automated board (the secret is made on first use).
+  app.post("/api/monday/automation/webhook", requireAdmin, async (req, res) => {
+    let config = await configRepo.load(true);
+    const token = config.monday.token;
+    if (!token) return void res.status(400).json({ error: "Connect monday.com with an API token first." });
+    if (!config.monday.automation.enabled) {
+      return void res.status(400).json({
+        error: "Turn the automation on first: monday.com checks the webhook's address when it is created, and the address answers only while the automation is on.",
+      });
+    }
+    if (Object.keys(config.monday.automation.boards).length === 0) return void res.status(400).json({ error: "Add a board first." });
+    if (!config.monday.automation.webhookSecret) {
+      config = await configRepo.update((c) => {
+        c.monday.automation.webhookSecret ??= randomToken(32);
+      });
+    }
+    const secret = config.monday.automation.webhookSecret!;
+    const base = baseUrl(req);
+    const url = `${base}/monday/webhook/${secret}`;
+    await rememberConsoleUrl(store, base);
+    if (url.length > 255) {
+      return void res.status(400).json({ error: "The webhook address is longer than the 255 characters monday.com accepts. Set PUBLIC_URL to a shorter address." });
+    }
+    const redact = makeRedactor([...configSecrets(config), secret]);
+    const result = await connectWebhooks({ store, client: new MondayClient(token), redact }, config.monday.automation.boards, url);
+    res.json({ ok: result.failed.length === 0, url, ...result, ...(result.failed.length ? { manualSteps: manualWebhookSteps(url) } : {}) });
+  });
+
+  // A board's status columns and their labels, for the automation's pickers.
+  app.get("/api/monday/columns", requireAdmin, async (req, res) => {
+    const config = await configRepo.load(true);
+    const token = config.monday.token;
+    if (!token) return void res.status(400).json({ error: "monday.com is not connected." });
+    const id = BOARD_ID.safeParse(typeof req.query.boardId === "string" ? req.query.boardId.trim() : "");
+    if (!id.success) return void res.status(400).json({ error: "Board ids are numbers, like 1234567890." });
+    const allowedBoards = config.monday.allowedBoardIds;
+    if (allowedBoards.length > 0 && !allowedBoards.includes(id.data)) {
+      return void res.status(400).json({ error: `Board ${id.data} is not one of the boards ${config.team.pointer.name} may use.` });
+    }
+    try {
+      const board = await new MondayClient(token).getBoard(id.data);
+      res.json({ board: { id: board.id, name: board.name }, columns: statusColumns(board) });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof MondayError ? err.message : "monday.com request failed." });
+    }
+  });
+
   // ---------- UI ----------
   app.use(express.static(fileURLToPath(new URL("../public", import.meta.url)), { index: "index.html" }));
 
@@ -840,7 +1010,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
     res.status(500).json({ error: "Something went wrong on the server." });
   });
 
-  return { app, runner, store, conversations };
+  return { app, runner, store, conversations, automation };
 }
 
 /** The stored key of a repo's setup: repo names are compared without letter case. */

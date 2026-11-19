@@ -75,8 +75,8 @@ export function GitHubWebhook() {
             <Strong>Secret</Strong>: generate one below, copy it into GitHub, then save it here.
           </>,
           <>
-            <Strong>Which events</Strong>: choose <Strong>Let me select individual events</Strong>, tick <Strong>Pull request reviews</Strong> and{" "}
-            <Strong>Issue comments</Strong>, and untick <Strong>Pushes</Strong>.
+            <Strong>Which events</Strong>: choose <Strong>Let me select individual events</Strong>, tick <Strong>Pull request reviews</Strong>,{" "}
+            <Strong>Issue comments</Strong> and <Strong>Pull requests</Strong> (so merges move monday.com tickets to done), and untick <Strong>Pushes</Strong>.
           </>,
           <>
             Keep <Strong>Active</Strong> ticked and choose <Strong>Add webhook</Strong>. Its <Strong>Recent Deliveries</Strong> tab shows each delivery.

@@ -31,6 +31,7 @@ import { createStore } from "./store.js";
 import { TimelineRecorder, checkItems, plainLine } from "./task-events.js";
 import { type Task, type TaskPhase, type TaskReport, TaskRepo, type ThreadState, decodeTaskPayload, isWebTask } from "./tasks.js";
 import { type RepoAgentOptions, type Team, agentLabel, buildRepoAgents, repoAllowedTools } from "./team.js";
+import { ticketFinished, ticketPrOpened, ticketStarted, ticketStopped, ticketSyncDeps } from "./ticket-sync.js";
 
 const exec = promisify(execFile);
 
@@ -273,7 +274,7 @@ export function configSecrets(c: Config): (string | undefined)[] {
   const repoEnv = Object.values(c.repoSetup)
     .flatMap((setup) => Object.values(setup.env))
     .filter((value) => !/^(?:[A-Za-z]+|\d+)$/.test(value.trim()));
-  return [c.anthropic.apiKey, c.slack.botToken, c.slack.signingSecret, c.monday.token, c.github.webhookSecret, ...github, ...repoEnv];
+  return [c.anthropic.apiKey, c.slack.botToken, c.slack.signingSecret, c.monday.token, c.monday.automation.webhookSecret, c.github.webhookSecret, ...github, ...repoEnv];
 }
 
 /**
@@ -597,6 +598,8 @@ async function main(): Promise<void> {
   // The fuller timeline the admin console shows (Slack and console tasks alike).
   const timeline = new TimelineRecorder(store, task.id, { redact });
   const screenshotStore = new ScreenshotRepo(store, masterKey);
+  // The monday.com ticket the task works on, if any: its status and updates follow the task (each call is a no-op without one).
+  const ticket = await ticketSyncDeps({ store, config, task, redact, record: (e) => timeline.add(e, true) });
   /** Moves the timeline to a step and keeps where the task is on its record. Never throws. */
   const stage = async (phase: TaskPhase, text: string) => {
     timeline.enter(phase, text);
@@ -641,6 +644,7 @@ async function main(): Promise<void> {
     task.status = "failed";
     task.error = access.error;
     await tasks.save(task);
+    await ticketStopped(ticket, task, { reason: access.error });
     await timeline.close(false, access.error);
     await progress(`:x: <@${task.userId}> ${access.error}`, true);
     process.exitCode = 1;
@@ -673,6 +677,7 @@ async function main(): Promise<void> {
 
   task.status = "running";
   await tasks.save(task);
+  await ticketStarted(ticket, task);
 
   // The first run of the team (with the checkout and setup before it) stops at TASK_TIMEOUT_MIN, or earlier at the deadline.
   const abort = new AbortController();
@@ -1182,6 +1187,7 @@ async function main(): Promise<void> {
         await finish([`:x: <@${task.userId}> ${reason}${partial}${cost()}`, ...resultNotes].join("\n\n"), ":x: Stopped");
       }
       task.notes = [...(task.notes ?? []), ...resultNotes];
+      await ticketStopped(ticket, task, { reason, ...(saved ? { prUrl: saved.html_url, draft: Boolean(saved.draft) } : {}) });
       await timeline.close(false, saved ? `Stopped: ${reason} The work so far is in pull request #${saved.number}.` : `Stopped: ${reason}`, stoppedIn);
     } else {
       const publish = ahead > 0 && report.kind !== "blocked";
@@ -1225,6 +1231,7 @@ async function main(): Promise<void> {
         task.prUrl = pr.html_url;
         task.prDraft = false;
         await tasks.save(task).catch((err: unknown) => console.error("[worker] task not saved:", redact(String(err))));
+        await ticketPrOpened(ticket, task, { url: pr.html_url, number: pr.number, title: redact(report.title), updated: Boolean(existing) });
 
         if (config.limits.ciWaitMin <= 0) timeline.skip("checks", "Waiting for checks is turned off");
         if (config.limits.ciWaitMin > 0) {
@@ -1258,6 +1265,7 @@ async function main(): Promise<void> {
           : publish
             ? `Done: ${report.title}${ci ? CHECKS_OUTCOME[ci.outcome.state] : ""}`
             : `Answered: ${report.title}`;
+      await ticketFinished(ticket, task);
       await timeline.close(report.kind !== "blocked", endText);
       const head =
         report.kind === "blocked"
@@ -1287,6 +1295,7 @@ async function main(): Promise<void> {
     task.status = "failed";
     task.error = messageText;
     await tasks.save(task);
+    await ticketStopped(ticket, task, { reason: messageText, ...(task.prUrl ? { prUrl: task.prUrl, draft: Boolean(task.prDraft) } : {}) });
     await timeline.close(false, `The task failed: ${messageText}`);
     await finish(`:x: <@${task.userId}> The task failed: ${truncate(messageText, 600)}`, ":x: Failed");
     process.exitCode = 1;
