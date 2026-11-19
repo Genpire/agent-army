@@ -13,7 +13,7 @@ Pointer, a self-hosted assistant for Slack and the web, leads a team of Claude a
 
 [Run it in 5 minutes](#run-it-in-5-minutes) · [Try the demo](#try-the-demo) · [Screenshots](#screenshots) · [Deploy to Cloud Run](#google-cloud-run) · [Contributing](CONTRIBUTING.md)
 
-<img src="docs/screenshots/chat-task-live.png" alt="The console's Chat page: Pointer has put the team on acme/web, and the task card shows the current step, the plan, and the files the Coder is editing" width="100%">
+<img src="docs/screenshots/office-meeting.png" alt="The virtual office: every agent at their desk with a face and a name; Pointer, Sara and Omar meet around the table on a task while Kenji researches, and a card shows the task's step and what Omar is doing" width="100%">
 
 </div>
 
@@ -21,6 +21,8 @@ Pointer, a self-hosted assistant for Slack and the web, leads a team of Claude a
 
 - **Ask where you already work.** In Slack (DMs, channels, threads) or in the console's Chat page. Pointer answers questions, researches the web, reads GitHub and the files you share, remembers what you tell it, and opens monday.com tickets.
 - **A team, not a single bot.** Pointer plans; a Coder builds; a Reviewer and QA check the work. Rename them, edit their instructions, add your own roles and pick a model and effort for each.
+- **A virtual office.** See every agent at their desk with a face and a name: who is free, who is busy and on what, and who is in a meeting with Pointer. Click anyone to see their work or ask Pointer for more.
+- **HR and a skills library.** HR reviews how the team works and recommends hires, changes and skills; the Skills Scout finds Claude skills, you install them in the team's library and assign them to agents.
 - **Watch it work.** Every repo task shows its step (clone, setup, plan, build, verify, publish, checks), the plan as a checklist, what each agent did and for how long, the files and commands, and the result.
 - **It checks its own work.** Agents start your app and click through UI changes in a headless browser with screenshots, wait for CI and fix failing checks, open the pull request's real preview deployment (Vercel, Netlify…), and pick up review comments on the pull request.
 - **Works from your tickets.** Move a monday.com ticket to "Ready for dev" and the team starts on it; the ticket follows along: Working on it, In review with the pull request, Done when it is merged.
@@ -64,8 +66,10 @@ Open http://localhost:8080 and sign in with `agent-army-demo`. The demo seeds a 
 | **Overview:** spend, what is running now, readiness and recent tasks. | **Team:** who does what, their access and models, and how work flows. |
 | <img src="docs/screenshots/integrations.png" alt="Integrations: Claude, Slack, GitHub and monday.com with their status and setup steps"> | <img src="docs/screenshots/activity-dark.png" alt="Activity in dark mode: a finished task with its plan, team, checks and screenshots"> |
 | **Integrations:** every connection, who it is connected as, and how to set it up. | **Activity:** every task's full story: plan, team, files, checks, screenshots. |
-| <img src="docs/screenshots/chat-dark.png" alt="Chat in dark mode: a finished task with its pull request, passing checks and the result message"> | <img src="docs/screenshots/chat-task-live.png" alt="Chat: a task in progress with its live details"> |
-| **Chat:** results arrive as messages, with the pull request and checks. | **Live details:** the step, the plan and each agent's work as it happens. |
+| <img src="docs/screenshots/office-dark.png" alt="The virtual office in dark mode, with a meeting in progress"> | <img src="docs/screenshots/chat-task-live.png" alt="Chat: a task in progress with its live details"> |
+| **Office:** who is free, who is busy and on what, and who is meeting with Pointer. | **Chat:** ask Pointer anything; tasks show every step live. |
+| <img src="docs/screenshots/chat-dark.png" alt="Chat in dark mode: a finished task with its pull request, passing checks and the result message"> | <img src="docs/screenshots/office-person.png" alt="An agent's card in the office: what they do, their access, model and skills, what they are working on now and their recent tasks"> |
+| **Chat:** results arrive as messages, with the pull request and checks. | **Each agent:** what they do, their access and skills, and what they are on right now. |
 
 ## How it works
 
@@ -329,6 +333,25 @@ Set it up:
 6. Keep **Active** ticked and click **Add webhook**. The webhook's *Recent Deliveries* tab on GitHub shows each delivery and the response.
 
 Each delivery is checked against the secret (HMAC-SHA256, GitHub's `X-Hub-Signature-256` header) before anything else. **Remove** there deletes the secret, after which deliveries are refused.
+
+## The Office
+
+The **Office** page (`#/office`) shows your team as people at their desks: Pointer at the front, one desk for every enabled agent, HR in the HR corner, a meeting table, a kitchen and the skills library shelf (it opens the Skills page). It is re-read every 3 seconds while the tab is visible.
+
+Each person has a face (a DiceBear "Notionists" portrait, CC0 art, drawn from a seed), a name tag and a ring in the colour of what they are doing:
+
+| Ring | State | When |
+| --- | --- | --- |
+| Green, check | Free | Nothing running for them. |
+| Blue, bolt | Working | They work on a repo task now. A speech bubble says what ("Editing src/components/Header.tsx", "Running npm test", "Checking the preview in the browser") and which task; their monitor lights up. |
+| Purple, speech | Thinking | Pointer is answering you in Chat. |
+| Orange, people | In a meeting | A repo task with two or more agents is a meeting: Pointer and everyone who took part sit at the meeting table, and a card shows the task (`acme/web · Dark mode toggle · step 3 of 5`), the plan's progress and what the one working is doing. A second meeting at the same time uses the kitchen table. |
+
+Click someone to open their card: what they do and when Pointer uses them, access, model and effort, skills, today's tasks and minutes, the task they work on now (the same card as in Chat, with its live timeline), their last five tasks, **Ask Pointer for work** (starts a conversation, prefilled "Ask Sara to …"), **Edit on the Team page** and **Change face** (pick another seed; saved with the team). `#/office/<agent id>` opens a card directly.
+
+The composer under the office starts a conversation with Pointer, like Chat. On a phone, or when you pick **List**, the office is a list of the same people and meetings.
+
+An agent's face seed is the `avatar` field of its team entry (empty: its id). Motion (monitors, steam, people walking to the table) stops when the system asks for reduced motion.
 
 ## The team
 
@@ -650,6 +673,7 @@ Besides the admin API, the service takes `POST /slack/events` from Slack and `PO
 | `POST /api/skills/:name/assign` | `{ assignedTo }` | `"all"` (every agent, agents added later too; the name leaves the agents' own lists) or agent ids (exactly those agents have it in their `skills`). Returns `{ ok, skill }`; `400` for an unknown agent id, `404` when not installed. |
 | `POST /api/skills/:name/delete` | | Removes the skill from the library and from every agent's `skills`; its stored files are blanked. `404` when not installed. |
 | `POST /api/skills/find` | `{ need }` | The Skills Scout: one Claude query (web search and fetch only, at most $0.50) for a need of 3 to 1 000 characters. Returns `{ candidates: [{ name, description, url, license?, runsScripts?, why, forAgents? }], costUsd? }`, at most five, each `url` a GitHub folder, `forAgents` existing agent ids. `400` when Claude is not connected, `409` when the monthly spending cap is used up (nothing runs), `502` when the search fails. The cost counts with chat. |
+| `GET /api/office` | `?tz=` (the browser's `Date#getTimezoneOffset()`, minutes; "today" starts at that midnight) | `{ people, meetings, updatedAt }`. `people`: Pointer (`kind: "lead"`, id `pointer`) then every enabled agent, each `{ id, name, role, emoji, avatar, kind, state, doing?, task?, conversation?, since?, today: { tasks, minutes } }`; `state` is `free`, `working`, `thinking` or `meeting`; `task` is `{ id, repo, title, channel, conversationId? }`; `conversation` (`{ id, title }`) is the console conversation Pointer is answering. `meetings`: `[{ taskId, title, repo, channel, conversationId?, step, plan: { done, total }, people, since }]`, one per running task with two or more agents (`people`: Pointer first). Read from the 30 most recent tasks, the active tasks' timelines and the conversation index; a task not saved for 3 hours and an answer pending for 15 minutes are left out. |
 
 ## Development
 
