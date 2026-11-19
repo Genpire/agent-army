@@ -162,6 +162,8 @@ describe("ConversationService", () => {
     const t = await setup();
     const service = new ConversationService({ ...t, runner: { kind: "local", launch: async () => undefined }, brain: { reply: async () => ({ text: "ok", isError: false }) }, now: () => new Date((clock += 1000)) });
     const a = await created(service, "alpha");
+    // Newest activity first: let alpha's reply land before beta starts, so beta is the newest.
+    await service.idle();
     const b = await created(service, "beta");
     await service.idle();
     expect((await service.list()).map((s) => s.title)).toEqual(["beta", "alpha"]);
