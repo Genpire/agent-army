@@ -9,6 +9,7 @@ import type { MemoryRepo } from "./memory.js";
 import { MONDAY_READ_TOOL_NAMES, type MondayToolOptions, mondayTools } from "./monday.js";
 import type { NotesRepo } from "./notes.js";
 import type { AddAttachment, StartRepoTask } from "./pointer-types.js";
+import { prRef } from "./pr-feedback.js";
 import {
   type CodeHostKind,
   GITHUB_REPO_RE,
@@ -169,15 +170,13 @@ const HOST_TOOL_TERMS: Record<
     owner: string;
     /** Whether an owner can hold others (GitLab's nested groups). */
     nestedOwners: boolean;
-    /** How a pull or merge request number is written: #7 on GitHub, !7 on GitLab. */
-    prRef: string;
     /** The repository id's form, for messages. */
     form: string;
   }
 > = {
-  github: { owner: "owner", nestedOwners: false, prRef: "#", form: "owner/repo" },
-  gitlab: { owner: "group", nestedOwners: true, prRef: "!", form: "gitlab:group/project" },
-  bitbucket: { owner: "workspace", nestedOwners: false, prRef: "#", form: "bitbucket:workspace/repo" },
+  github: { owner: "owner", nestedOwners: false, form: "owner/repo" },
+  gitlab: { owner: "group", nestedOwners: true, form: "gitlab:group/project" },
+  bitbucket: { owner: "workspace", nestedOwners: false, form: "bitbucket:workspace/repo" },
 };
 
 /** Whether an allow list covers a repository id: GitHub's owner or exact entries, the other hosts' path prefixes. */
@@ -312,12 +311,11 @@ export function codeListPulls(h: CodeToolHost, args: { repo: string; state?: Ite
     const state = args.state ?? "open";
     const prs = await client.listPulls(repo, { state, limit: args.limit });
     if (prs.length === 0) return ok(`No ${state === "all" ? "" : `${state} `}${HOST_TERMS[h.kind].pr}s on ${repo}.`);
-    const ref = HOST_TOOL_TERMS[h.kind].prRef;
     return ok(
       prs
         .map((p) => {
           const status = p.mergedAt ? "merged" : p.draft ? `${p.state}, draft` : p.state;
-          return `- ${ref}${p.number} [${status}] ${p.title} — by ${p.author} · ${p.head} → ${p.base} · updated ${day(p.updatedAt)} · ${p.url}`;
+          return `- ${prRef(h.kind, p.number)} [${status}] ${p.title} — by ${p.author} · ${p.head} → ${p.base} · updated ${day(p.updatedAt)} · ${p.url}`;
         })
         .join("\n"),
     );
