@@ -1,7 +1,8 @@
 import type { WebClient } from "@slack/web-api";
 import type { TaskBudgetCheck } from "./budget.js";
 import type { Config } from "./config.js";
-import { connectionForRepo, describeAllowed, hasGitHub } from "./github-access.js";
+import { repoAccessError } from "./code-host-access.js";
+import { REPO_FORMAT_HINT } from "./repo-id.js";
 import type { Runner } from "./runner.js";
 import { repoFromToken, resolveRepo } from "./targeting.js";
 import { type Task, type TaskRepo, type TaskTicket, WEB_CHANNEL, newTaskId } from "./tasks.js";
@@ -100,15 +101,11 @@ export function resolveTaskRepo(
   opts: { repo?: string; threadRepo?: string; channelRepo?: string },
 ): { ok: true; repo: string } | { ok: false; error: string } {
   const named = opts.repo?.trim() ? repoFromToken(opts.repo.trim()) : undefined;
-  if (named === null) return { ok: false, error: `"${opts.repo}" is not a repository. Use owner/repo.` };
+  if (named === null) return { ok: false, error: `"${opts.repo}" is not a repository. ${REPO_FORMAT_HINT}` };
   const target = resolveRepo({ override: named, threadRepo: opts.threadRepo, channelRepo: opts.channelRepo });
-  if (!target) return { ok: false, error: "No repository: ask the user which owner/repo to use." };
-  if (!hasGitHub(config)) {
-    return { ok: false, error: "GitHub is not connected. Ask the owner to connect it on the admin page." };
-  }
-  if (!connectionForRepo(config, target)) {
-    return { ok: false, error: `Not allowed to work on ${target}. Allowed owners and repositories: ${describeAllowed(config)}.` };
-  }
+  if (!target) return { ok: false, error: "No repository: ask the user which repository to use (owner/repo, gitlab:group/project or bitbucket:workspace/repo)." };
+  const denied = repoAccessError(config, target);
+  if (denied) return { ok: false, error: denied };
   return { ok: true, repo: target };
 }
 

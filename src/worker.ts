@@ -69,7 +69,12 @@ export function teamQueryOptions(
   ];
   return {
     ...(skills ?? {}),
-    systemPrompt: { type: "preset", preset: "claude_code", append: orchestratorPrompt(config, context) },
+    systemPrompt: {
+      type: "preset",
+      preset: "claude_code",
+      // The apps rule says which agent may use which app (apps.ts).
+      append: opts.apps?.promptRule ? `${orchestratorPrompt(config, context)}\n${opts.apps.promptRule}` : orchestratorPrompt(config, context),
+    },
     // Each agent carries its own effort (its setting, or this one).
     effort: config.team.pointer.taskEffort,
     agents: buildRepoAgents(config.team, opts),

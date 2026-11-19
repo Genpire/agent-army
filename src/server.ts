@@ -19,7 +19,7 @@ import {
   resolveMasterKey,
 } from "./config.js";
 import { hashPassword, randomToken, safeEqual, sessionKey, signSession, verifyPassword, verifySession } from "./crypto.js";
-import { connectionForRepo, describeAllowed, hasGitHub } from "./github-access.js";
+import { repoAccessError } from "./code-host-access.js";
 import { CONVERSATION_ID_RE, ConversationService, MESSAGE_MAX_CHARS, type WebThreads } from "./conversations.js";
 import { handleSlackEvent, withBrainSlot } from "./dispatch.js";
 import { HrService, PROPOSAL_ID_RE, REVIEW_ID_RE } from "./hr.js";
@@ -1164,9 +1164,9 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
         return fail(`Board ${id} is not one of the boards ${name} may use. Add it under Boards first.`);
       }
       const auto = MondayBoardAutomationSchema.parse(value);
-      if (!hasGitHub(config)) return fail("Connect GitHub first: tickets become repo tasks that open pull requests.");
-      if (!connectionForRepo(config, auto.repo)) {
-        return fail(`No GitHub connection may work on ${auto.repo}. Allowed owners and repositories: ${describeAllowed(config)}.`);
+      {
+        const denied = repoAccessError(config, auto.repo);
+        if (denied) return fail(denied);
       }
       const conflict = labelConflict(auto);
       if (conflict) return fail(`Board ${id}: ${conflict}`);

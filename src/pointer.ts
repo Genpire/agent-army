@@ -14,7 +14,7 @@ import { type AttachmentInfo, type AttachmentRepo, type ThreadRef, toContentBloc
 import { type ChatIntegration, chatIntegrations, subagentIntegrationTools } from "./chat-integrations.js";
 import type { Config } from "./config.js";
 import { GitHub } from "./github.js";
-import { isRepoAllowedAnywhere } from "./github-access.js";
+import { isRepoAllowedOnHost } from "./code-host-access.js";
 import type { MemoryFact } from "./memory.js";
 import { MondayClient } from "./monday.js";
 import type { NotesRepo } from "./notes.js";
@@ -220,7 +220,7 @@ async function loadProjectNotes(
   config: Config,
   redact: (text: string) => string,
 ): Promise<{ repo: string; text: string } | undefined> {
-  if (!notes || !repo || !isRepoAllowedAnywhere(config, repo)) return undefined;
+  if (!notes || !repo || !isRepoAllowedOnHost(config, repo)) return undefined;
   try {
     const found = await notes.get(repo);
     return found?.text.trim() ? { repo, text: found.text } : undefined;

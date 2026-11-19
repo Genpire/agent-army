@@ -1,7 +1,7 @@
 import type { WebClient } from "@slack/web-api";
 import { ATTACHMENT_LIMITS, type AttachmentRepo, type ThreadRef } from "./attachments.js";
 import { type Config, isChatReady } from "./config.js";
-import { hasGitHub, isRepoAllowedAnywhere } from "./github-access.js";
+import { repoAccessError } from "./code-host-access.js";
 import {
   KeyedQueue,
   RecentSet,
@@ -340,9 +340,9 @@ async function runCommand(ctx: Ctx, command: Command): Promise<string> {
     case "status":
       return statusText(ctx);
     case "bind":
-      if (!hasGitHub(config)) return "GitHub is not connected. Connect it on the admin page first.";
-      if (!isRepoAllowedAnywhere(config, command.repo)) {
-        return `\`${command.repo}\` isn't under an allowed owner or repository of any GitHub connection. Add it on the admin page first.`;
+      {
+        const denied = repoAccessError(config, command.repo);
+        if (denied) return `\`${command.repo}\`: ${denied}`;
       }
       await deps.configRepo.update((c) => {
         c.bindings[e.channel] = command.repo;

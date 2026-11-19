@@ -3,7 +3,8 @@ import { z } from "zod";
 import type { TaskBudgetCheck } from "./budget.js";
 import { type Config, REPO_RE } from "./config.js";
 import { BOT_MARKER, WRITE_ASSOCIATIONS } from "./github.js";
-import { connectionForRepo } from "./github-access.js";
+import { isRepoAllowedOnHost } from "./code-host-access.js";
+import { HOST_TERMS, repoHost } from "./repo-id.js";
 import { KeyedQueue } from "./listen.js";
 import type { SlackDeps } from "./pointer-types.js";
 import type { WebThreads } from "./conversations.js";
@@ -280,7 +281,7 @@ export interface ClosedPr {
 
 async function followUp(event: string, d: Start, config: Config, deps: WebhookDeps, redact: (text: string) => string): Promise<void> {
   const at = `${d.repo}#${d.prNumber}`;
-  if (!connectionForRepo(config, d.repo)) return log(event, at, "ignored: repository not allowed");
+  if (!isRepoAllowedOnHost(config, d.repo)) return log(event, at, "ignored: repository not allowed");
   const ref = await deps.tasks.getPrThread(d.repo, d.prNumber);
   if (!ref) return log(event, at, "ignored: not a pull request the team opened");
   if (ref.channel === WEB_CHANNEL) return webFollowUp(event, d, config, deps, ref);
@@ -388,7 +389,7 @@ async function pullRequestClosed(payload: unknown, config: Config, deps: Webhook
 async function prClosed(event: string, pr: ClosedPr, config: Config, deps: WebhookDeps, redact: (text: string) => string): Promise<void> {
   const repo = pr.repo;
   const at = `${repo}#${pr.prNumber}`;
-  if (!connectionForRepo(config, repo)) return log(event, at, "ignored: repository not allowed");
+  if (!isRepoAllowedOnHost(config, repo)) return log(event, at, "ignored: repository not allowed");
   const ref = await deps.tasks.getPrThread(repo, pr.prNumber);
   if (!ref) return log(event, at, "ignored: not a pull request the team opened");
   const task = (await deps.tasks.recent(TICKET_SCAN)).find((t) => t.channel === ref.channel && t.threadTs === ref.threadTs && t.ticket);
@@ -413,8 +414,9 @@ async function prClosed(event: string, pr: ClosedPr, config: Config, deps: Webho
 }
 
 /** The instruction the worker gets; it fetches every new piece of review feedback itself. */
-export function reviewInstruction(d: Pick<Start, "login" | "prNumber" | "excerpt">): string {
-  const head = `Address the feedback from ${d.login} on pull request #${d.prNumber} (GitHub).`;
+export function reviewInstruction(d: Pick<Start, "login" | "prNumber" | "excerpt"> & { repo?: string }): string {
+  const host = HOST_TERMS[repoHost(d.repo ?? "")];
+  const head = `Address the feedback from ${d.login} on ${host.pr} #${d.prNumber} (${host.name}).`;
   if (!d.excerpt) return head;
   const quoted = d.excerpt
     .split("\n")
