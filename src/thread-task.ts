@@ -1,4 +1,5 @@
 import type { WebClient } from "@slack/web-api";
+import type { TaskBudgetCheck } from "./budget.js";
 import type { Config } from "./config.js";
 import { connectionForRepo, describeAllowed, hasGitHub } from "./github-access.js";
 import type { Runner } from "./runner.js";
@@ -12,6 +13,8 @@ export interface ThreadTaskDeps {
   slack?: WebClient;
   /** Removes credentials from error text before it is stored or returned. */
   redact?: (text: string) => string;
+  /** The spending caps (see budget.ts), checked before anything is posted or saved. Every caller passes it. */
+  budget?: TaskBudgetCheck;
 }
 
 export interface ThreadTaskInput {
@@ -34,12 +37,17 @@ export type ThreadTaskResult = { ok: true; taskId: string } | { ok: false; error
  * Starts a repo task in a Slack thread or a console conversation: for Slack,
  * posts the acknowledgement (its ts is the progress message the worker
  * edits); then saves the task as queued and launches the worker. A launch
- * failure marks the task failed. Never throws.
+ * failure marks the task failed. A spending cap that is used up refuses the
+ * task first, with nothing posted or saved. Never throws.
  */
 export async function startThreadTask(deps: ThreadTaskDeps, input: ThreadTaskInput): Promise<ThreadTaskResult> {
   const redact = deps.redact ?? ((text: string) => text);
   let task: Task | undefined;
   try {
+    if (deps.budget) {
+      const allowed = await deps.budget.checkTask(input.repo);
+      if (!allowed.ok) return { ok: false, error: allowed.error };
+    }
     const web = input.channel === WEB_CHANNEL;
     let progressTs: string | undefined;
     if (!web) {

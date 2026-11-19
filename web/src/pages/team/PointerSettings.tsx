@@ -5,6 +5,7 @@ import { Heading } from "@astryxdesign/core/Heading";
 import { HStack } from "@astryxdesign/core/HStack";
 import { NumberInput } from "@astryxdesign/core/NumberInput";
 import { Selector } from "@astryxdesign/core/Selector";
+import { Switch } from "@astryxdesign/core/Switch";
 import { Text } from "@astryxdesign/core/Text";
 import { TextArea } from "@astryxdesign/core/TextArea";
 import { TextInput } from "@astryxdesign/core/TextInput";
@@ -12,7 +13,7 @@ import { VStack } from "@astryxdesign/core/VStack";
 import { type ReactNode, useState } from "react";
 import type { PointerSpec } from "../../lib/types";
 import { useAction } from "../../lib/useAction";
-import { EFFORT_SELECT_OPTIONS, chatModelOptions, fieldStatus, hasErrors, isEffort, pointerErrors } from "./team";
+import { EFFORT_SELECT_OPTIONS, SIZE_INFO, TASK_SIZE_OPTIONS, type TaskSize, chatModelOptions, fieldStatus, hasErrors, isEffort, pointerErrors } from "./team";
 
 type PointerPatch = Partial<PointerSpec>;
 
@@ -81,15 +82,20 @@ const RUNTIME_KEYS = ["model", "effort", "taskEffort", "budgetUsd", "maxTurns"] 
 const savedKey = (pointer: PointerSpec, keys: readonly (keyof PointerSpec)[]) => JSON.stringify(keys.map((k) => pointer[k]));
 
 /**
- * Pointer's settings as two settings rows, each with its own Save: who it is
- * (name and extra instructions), then how it runs (models, effort, limits).
+ * Pointer's settings as settings rows, each with its own Save: who it is
+ * (name and extra instructions), how it runs (models, effort, limits), and
+ * the model routing of repo tasks by size.
  */
 export function PointerSettings(props: PointerSettingsProps) {
+  const { routing } = props.pointer;
   return (
     <VStack gap={6}>
       <IdentityRow key={savedKey(props.pointer, IDENTITY_KEYS)} {...props} />
       <Divider />
       <RuntimeRow key={savedKey(props.pointer, RUNTIME_KEYS)} {...props} />
+      <Divider />
+      {/* Keyed on the routes only: turning routing on or off keeps unsaved route changes. */}
+      <RoutingRow key={JSON.stringify(TASK_SIZE_OPTIONS.map((s) => routing[s]))} {...props} />
     </VStack>
   );
 }
@@ -184,6 +190,71 @@ function RuntimeRow({ pointer, claudeModel, onSave }: PointerSettingsProps) {
           status={row.status("maxTurns")}
         />
       </Grid>
+      <SaveBar row={row} />
+    </SettingsRow>
+  );
+}
+
+type Routes = Pick<PointerSpec["routing"], TaskSize>;
+const routesOf = (routing: PointerSpec["routing"]): Routes => ({ small: routing.small, medium: routing.medium, large: routing.large });
+
+/**
+ * Model routing: on/off saves at once; each size's model and effort are a
+ * draft with Save. Mirrors team.pointer.routing (RoutingSchema in src/team.ts).
+ */
+function RoutingRow({ pointer, claudeModel, onSave }: PointerSettingsProps) {
+  const saved = pointer.routing;
+  const [draft, setDraft] = useState<Routes>(() => routesOf(saved));
+  const routes = useAction();
+  const toggle = useAction();
+  const setRoute = (size: TaskSize, patch: Partial<Routes[TaskSize]>) => setDraft((d) => ({ ...d, [size]: { ...d[size], ...patch } }));
+  const row = {
+    changed: TASK_SIZE_OPTIONS.some((s) => draft[s].model !== saved[s].model || draft[s].effort !== saved[s].effort),
+    pending: routes.pending,
+    save: async () => {
+      await routes.run(() => onSave({ routing: { ...saved, ...draft } }), { success: "Routes saved. New repo tasks use them." });
+    },
+    discard: () => setDraft(routesOf(saved)),
+  };
+  return (
+    <SettingsRow
+      title="Model routing"
+      description={`Most requests are small and do not need the strongest model. With routing on, each repo task starts with a quick size estimate and runs with that size's model and effort. Agents with their own model or effort keep it. Task cards show the size and a cost range from earlier tasks of the same size.`}>
+      <Switch
+        label="Route repo tasks by size"
+        description={`Before each repo task, Haiku 5.5 reads the request and calls it small, medium or large (a fraction of a cent). Off: every task runs on the configured models with the repo task effort above.`}
+        value={saved.enabled}
+        isLoading={toggle.pending}
+        changeAction={async (on) => {
+          await toggle.run(() => onSave({ routing: { ...saved, enabled: on } }), {
+            success: on ? "Routing is on. New repo tasks are sized first." : "Routing is off. New repo tasks use the repo task effort.",
+          });
+        }}
+      />
+      {TASK_SIZE_OPTIONS.map((size) => (
+        <VStack key={size} gap={2}>
+          <VStack gap={1}>
+            <Text weight="medium">{SIZE_INFO[size].label}</Text>
+            <Text type="supporting" color="secondary">
+              {SIZE_INFO[size].description}
+            </Text>
+          </VStack>
+          <Grid columns={{ minWidth: 200, max: 2 }} gap={4}>
+            <Selector
+              label={`${SIZE_INFO[size].label} task model`}
+              options={chatModelOptions(draft[size].model, claudeModel)}
+              value={draft[size].model}
+              onChange={(v) => setRoute(size, { model: v })}
+            />
+            <Selector
+              label={`${SIZE_INFO[size].label} task effort`}
+              options={EFFORT_SELECT_OPTIONS}
+              value={draft[size].effort}
+              onChange={(v) => isEffort(v) && setRoute(size, { effort: v })}
+            />
+          </Grid>
+        </VStack>
+      ))}
       <SaveBar row={row} />
     </SettingsRow>
   );

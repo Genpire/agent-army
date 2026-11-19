@@ -24,7 +24,9 @@ import type { PublicConfig, Task } from "../../lib/types";
 import { isActive, planProgress, plainText, requestHeadline, taskDuration, taskStatus } from "../activity/model";
 import { TaskTable } from "../activity/TaskTable";
 import { LiveNote, StatTile, spendTiles } from "../activity/Usage";
-import { useTasks, useUsage } from "../activity/usePolled";
+import { useTasks } from "../activity/usePolled";
+import { SpendingBanners, SpendingPanel } from "./SpendingPanel";
+import { useSpending } from "./spending";
 
 interface Readiness {
   /** The integration pane: #/integrations/<id>. */
@@ -155,7 +157,8 @@ const ListSkeleton = () => (
 export default function OverviewPage() {
   const { config, state } = useConfig();
   const tasks = useTasks();
-  const usage = useUsage();
+  // The month's spend with the caps: the tiles, the budget panel and its banners.
+  const usage = useSpending();
   const now = tasks.loadedAt ?? Date.now();
   const pointer = config.team.pointer.name;
 
@@ -188,6 +191,7 @@ export default function OverviewPage() {
             collapsible={false}
           />
         )}
+        {usage.data && <SpendingBanners budget={usage.data.budget} pointer={pointer} />}
 
         <Grid columns={{ minWidth: 150, repeat: "fit" }} gap={3}>
           {spendTiles(usage.data).map((tile) => (
@@ -221,6 +225,9 @@ export default function OverviewPage() {
           </Panel>
           <Panel title="Readiness" aside={<Text type="supporting">{`${items.filter((r) => r.connected).length} of ${items.length} set up`}</Text>}>
             <ReadinessList items={items} />
+          </Panel>
+          <Panel title="Budget this month" aside={<Link href={href("settings")} isStandalone>Change caps</Link>}>
+            <SpendingPanel usage={usage.data} error={usage.error} />
           </Panel>
         </Grid>
 

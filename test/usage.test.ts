@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { FsStore } from "../src/store.js";
 import { type Task, TaskRepo, newTaskId } from "../src/tasks.js";
-import { UsageRepo, monthBounds, monthKey, usageLine } from "../src/usage.js";
+import { UsageRepo, monthBounds, monthKey, repoSpend, usageLine } from "../src/usage.js";
 
 const setup = async () => {
   const store = new FsStore(await mkdtemp(join(tmpdir(), "army-usage-")));
@@ -61,6 +61,23 @@ describe("usage", () => {
     expect(month.totalUsd).toBeCloseTo(11);
     expect(month.topTasks.map((t) => t.instruction)).toEqual(["funnel", "last commit"]);
     expect(usageLine(month)).toBe("$11.00 (chat $1.25 over 1 replies · repo tasks $9.75 over 3 tasks)");
+  });
+
+  it("totals repo tasks per repository, without letter case, highest first", async () => {
+    const { tasks, usage } = await setup();
+    const on = (repo: string, at: string, costUsd: number | undefined) => ({ ...task(new Date(at), costUsd), repo });
+    await tasks.save(on("acme/web", "2026-11-02T00:00:00Z", 2));
+    await tasks.save(on("Acme/Web", "2026-11-03T00:00:00Z", 1.5));
+    await tasks.save(on("acme/api", "2026-11-04T00:00:00Z", 4));
+    await tasks.save(on("acme/api", "2026-11-05T00:00:00Z", undefined));
+    await tasks.save(on("acme/old", "2026-10-30T00:00:00Z", 99));
+    const month = await usage.month(now);
+    expect(month.repos).toEqual([
+      { repo: "acme/api", usd: 4, count: 2 },
+      { repo: "Acme/Web", usd: 3.5, count: 2 },
+    ]);
+    expect(repoSpend(month, "ACME/WEB")).toBe(3.5);
+    expect(repoSpend(month, "acme/old")).toBe(0);
   });
 
   it("treats an unreadable tally as empty", async () => {

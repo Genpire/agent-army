@@ -1,48 +1,25 @@
 import { Button } from "@astryxdesign/core/Button";
 import { Code } from "@astryxdesign/core/Code";
 import { Divider } from "@astryxdesign/core/Divider";
-import { Grid } from "@astryxdesign/core/Grid";
-import { Heading } from "@astryxdesign/core/Heading";
 import { HStack } from "@astryxdesign/core/HStack";
 import { Icon } from "@astryxdesign/core/Icon";
 import { MetadataList, MetadataListItem } from "@astryxdesign/core/MetadataList";
 import { NumberInput } from "@astryxdesign/core/NumberInput";
+import { Selector, type SelectorOptionData } from "@astryxdesign/core/Selector";
 import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { Tokenizer } from "@astryxdesign/core/Tokenizer";
 import type { SearchSource, SearchableItem } from "@astryxdesign/core/Typeahead";
 import { VStack } from "@astryxdesign/core/VStack";
 import { ArrowRightStartOnRectangleIcon } from "@heroicons/react/24/outline";
-import { type ReactNode, useState } from "react";
+import { useState } from "react";
 import { PageFrame } from "../../components/PageFrame";
 import { api } from "../../lib/api";
 import { useConfig } from "../../lib/state";
 import type { Limits } from "../../lib/types";
 import { useAction } from "../../lib/useAction";
-
-/** One settings group: what it is on the start side, its fields on the end side (folds to one column when narrow). */
-function SettingsSection({ title, description, children }: { title: string; description: string; children: ReactNode }) {
-  return (
-    <Grid columns={{ minWidth: 320 }} gap={10}>
-      <VStack gap={1}>
-        <Heading level={3} accessibilityLevel={2}>
-          {title}
-        </Heading>
-        <Text type="supporting">{description}</Text>
-      </VStack>
-      <VStack gap={5}>{children}</VStack>
-    </Grid>
-  );
-}
-
-function SaveRow({ label, isDirty, isInvalid, pending, onSave }: { label: string; isDirty: boolean; isInvalid?: boolean; pending: boolean; onSave: () => void }) {
-  return (
-    <HStack gap={3} vAlign="center">
-      <Button label={label} variant="primary" isLoading={pending} isDisabled={!isDirty || isInvalid} onClick={onSave} />
-      {isDirty && <Text type="supporting">Unsaved changes</Text>}
-    </HStack>
-  );
-}
+import { SaveRow, SettingsSection } from "./parts";
+import { SpendingSection } from "./SpendingSection";
 
 // ---------- Company name ----------
 
@@ -221,13 +198,23 @@ function limitError(f: LimitField, value: number): string | undefined {
   return undefined;
 }
 
+type PreviewCheck = Limits["previewCheck"];
+
+/** Mirrors limits.previewCheck in ConfigSchema (src/config.ts). */
+const PREVIEW_CHECK_OPTIONS: (SelectorOptionData & { value: PreviewCheck })[] = [
+  { value: "off", label: "Off", description: "Never opens the preview" },
+  { value: "visible", label: "When the change is visible", description: "Only for changes to what people see (recommended)" },
+  { value: "always", label: "Always", description: "After every pull request with a preview" },
+];
+const isPreviewCheck = (value: string): value is PreviewCheck => PREVIEW_CHECK_OPTIONS.some((o) => o.value === value);
+
 function LimitsSection({ saved, runner }: { saved: Limits; runner: string | undefined }) {
   const { refresh } = useConfig();
   const { run, pending } = useAction();
   const [limits, setLimits] = useState<Limits>(saved);
   const fields = limitFields(runner);
   const errors = fields.map((f) => limitError(f, limits[f.key]));
-  const isDirty = fields.some((f) => limits[f.key] !== saved[f.key]);
+  const isDirty = fields.some((f) => limits[f.key] !== saved[f.key]) || limits.previewCheck !== saved.previewCheck;
   const save = () =>
     void run(
       async () => {
@@ -256,6 +243,13 @@ function LimitsSection({ saved, runner }: { saved: Limits; runner: string | unde
           status={errors[i] ? { type: "error", message: errors[i] } : undefined}
         />
       ))}
+      <Selector
+        label="Preview check"
+        options={PREVIEW_CHECK_OPTIONS}
+        value={limits.previewCheck}
+        onChange={(v) => isPreviewCheck(v) && setLimits((l) => ({ ...l, previewCheck: v }))}
+        description="After the checks, the team opens the pull request's preview deployment (Vercel, Netlify…) in a browser and looks at the change. Each look is a short extra run, paid from the task's budget."
+      />
       <HStack gap={3} vAlign="center" wrap="wrap">
         <SaveRow label="Save limits" isDirty={isDirty} isInvalid={errors.some(Boolean)} pending={pending} onSave={save} />
         {isDirty && <Button label="Undo changes" variant="ghost" onClick={() => setLimits(saved)} />}
@@ -373,9 +367,11 @@ export default function SettingsPage() {
   const { config, state } = useConfig();
   const pointer = config.team.pointer.name;
   return (
-    <PageFrame title="Settings" description="Limits, access, the admin password and this deployment.">
+    <PageFrame title="Settings" description="Limits, spending, access, the admin password and this deployment.">
       <VStack gap={8}>
         <LimitsSection saved={config.limits} runner={state.runner} />
+        <Divider />
+        <SpendingSection saved={config.budget} pointer={pointer} />
         <Divider />
         <AccessSection saved={config.slack.allowedUserIds} pointer={pointer} />
         <Divider />

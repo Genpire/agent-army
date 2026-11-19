@@ -15,6 +15,7 @@ import {
   parseReport,
 } from "./agents.js";
 import { AttachmentRepo, type ThreadRef, classify, expandZip } from "./attachments.js";
+import { Spending } from "./budget.js";
 import { type Screenshot, browserAvailable, browserServer, collectScreenshots } from "./browser.js";
 import { type CiOutcome, ciFailureDetails, ciFixPrompt, ciSummary, ciSummaryLine, storedCiSummary, waitForChecks } from "./ci.js";
 import { type Config, ConfigRepo, resolveMasterKey } from "./config.js";
@@ -26,11 +27,13 @@ import { formatFeedback } from "./pr-feedback.js";
 import { type PlanItem, ProgressTracker, formatProgress } from "./progress.js";
 import { findRepoSetup, repoSetupContext, runSetupCommand, setupEnv } from "./repo-setup.js";
 import { ScreenshotRepo } from "./screenshots.js";
+import { HISTORY_SCAN, routeRepoTask } from "./sizing.js";
 import { slackClient, slackErrorCode, toMrkdwn, truncate, uploadThreadFiles } from "./slack.js";
 import { createStore } from "./store.js";
 import { TimelineRecorder, checkItems, plainLine } from "./task-events.js";
 import { type Task, type TaskPhase, type TaskReport, TaskRepo, type ThreadState, decodeTaskPayload, isWebTask } from "./tasks.js";
 import { type RepoAgentOptions, type Team, agentLabel, buildRepoAgents, repoAllowedTools } from "./team.js";
+import { UsageRepo } from "./usage.js";
 
 const exec = promisify(execFile);
 
@@ -581,6 +584,8 @@ async function main(): Promise<void> {
   const tasks = new TaskRepo(store);
   const task = await tasks.get(taskId);
   if (!task) throw new Error(`Task ${taskId} not found`);
+  // The monthly and per-repo caps (budget.ts): this task's budget before it runs, the Slack alerts after.
+  const spending = new Spending({ store, usage: new UsageRepo(store, tasks), config: () => new ConfigRepo(store, masterKey).load(true), slack: slackClient });
 
   const notReady = onboardingError(task, config);
   if (notReady) throw new Error(notReady);
@@ -808,7 +813,34 @@ async function main(): Promise<void> {
     await stage("plan", `${pointerName} is reading ${task.repo}${sharedNote} and planning`);
     if (feedback) timeline.add({ kind: "note", text: "Read the new review feedback on the pull request" });
     if (browser) timeline.add({ kind: "note", text: "The team has a headless browser for checks" });
-    await progress(`:compass: ${pointerName} is reading \`${task.repo}\`${sharedNote} and planning…`, true);
+
+    // Spending (budget.ts, sizing.ts): the task's budget is what is left of the caps, at most the per-task
+    // budget (too little left refuses it, before the team runs); with routing on, its size picks the model.
+    const allowance = await spending.taskBudget(task.repo, config.limits.maxBudgetUsd);
+    if (!allowance.ok) throw new Error(allowance.error);
+    const taskBudgetUsd = allowance.budgetUsd;
+    if (allowance.note) timeline.add({ kind: "note", text: allowance.note });
+    const routed = config.team.pointer.routing.enabled
+      ? await routeRepoTask({
+          config,
+          task,
+          followUp: resumed,
+          attachments: attachments.length,
+          history: () => tasks.recent(HISTORY_SCAN),
+          budgetUsd: taskBudgetUsd,
+          apiKey,
+          redact,
+        })
+      : undefined;
+    // The team runs with the routed model and effort (agents with their own keep them).
+    const runConfig = routed?.config ?? config;
+    if (routed) {
+      task.size = routed.size;
+      task.estimateUsd = routed.estimateUsd;
+      timeline.add({ kind: "routing", text: routed.text }, true);
+      await tasks.save(task).catch((err: unknown) => console.error("[worker] task not saved:", redact(String(err))));
+    }
+    await progress(`:compass: ${pointerName} is reading \`${task.repo}\`${sharedNote} and planning…${routed ? ` _(${routed.short})_` : ""}`, true);
 
     // What earlier tasks learned about this repo. Unreadable notes are skipped, not fatal.
     const loadNotes = () =>
@@ -903,7 +935,7 @@ async function main(): Promise<void> {
           options: {
             cwd: repoDir,
             abortController: opts.abort,
-            ...teamQueryOptions(config, opts.context, attachmentsDir, { browser }),
+            ...teamQueryOptions(runConfig, opts.context, attachmentsDir, { browser }),
             // Headless: nothing can prompt, so anything not in allowedTools is denied.
             permissionMode: "dontAsk",
             settingSources: ["project"], // loads the project's own CLAUDE.md
@@ -911,7 +943,7 @@ async function main(): Promise<void> {
             outputFormat: { type: "json_schema", schema: REPORT_SCHEMA },
             maxTurns: config.limits.maxTurns,
             maxBudgetUsd: opts.budgetUsd,
-            ...(config.anthropic.model ? { model: config.anthropic.model } : {}),
+            ...(runConfig.anthropic.model ? { model: runConfig.anthropic.model } : {}),
             env: agentEnv,
           },
         })) {
@@ -958,7 +990,7 @@ async function main(): Promise<void> {
      * not fix them, why.
      */
     const followChecks = async (pr: PrRef): Promise<{ outcome: CiOutcome; note?: string } | undefined> => {
-      const { ciWaitMin, ciFixRounds: rounds, maxBudgetUsd } = config.limits;
+      const { ciWaitMin, ciFixRounds: rounds } = config.limits;
       let fixRounds = 0;
       let last: CiOutcome | undefined;
       for (;;) {
@@ -992,7 +1024,8 @@ async function main(): Promise<void> {
         if (stored) task.ci = stored;
         if (wait.state !== "failed" || fixRounds >= rounds) return { outcome: last };
 
-        const budgetUsd = maxBudgetUsd - (task.costUsd ?? 0);
+        // The task's own budget (capped by what was left of the caps when it started).
+        const budgetUsd = taskBudgetUsd - (task.costUsd ?? 0);
         if (budgetUsd < 1) return { outcome: last, note: "Not enough of the task's budget was left to fix them." };
         const fixMs = fixRunTimeoutMs(deadline, Date.now());
         if (fixMs === null) return { outcome: last, note: "Not enough time was left to fix them." };
@@ -1042,14 +1075,15 @@ async function main(): Promise<void> {
 
     // ---------- 3. Let the team work ----------
     const first = await runTeam(prompt, {
-      budgetUsd: config.limits.maxBudgetUsd,
+      budgetUsd: taskBudgetUsd,
       abort,
       timeoutMin: Math.round(firstRunMs / 60_000),
       since: startSha,
       context,
     });
     clearTimeout(timer);
-    task.costUsd = first.costUsd;
+    // The size estimate's own (tiny) cost counts too.
+    task.costUsd = first.costUsd + (routed?.costUsd ?? 0);
     task.turns = first.turns;
     const { report, failure } = first;
     // What the Slack result says, kept on the task for the console (and Pointer).
@@ -1293,6 +1327,8 @@ async function main(): Promise<void> {
   } finally {
     clearTimeout(timer);
     await rm(workRoot, { recursive: true, force: true }).catch(() => {});
+    // The task's cost is known now: a cap it took past its alert level or 100% tells the alert channel. Never throws.
+    await spending.notify();
   }
 }
 

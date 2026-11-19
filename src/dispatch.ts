@@ -34,6 +34,7 @@ import {
   unreact,
   userName,
 } from "./slack.js";
+import { type CapStatus, type Spending, monthlyStatus, repoStatus } from "./budget.js";
 import type { ThreadState } from "./tasks.js";
 import { resolveTaskRepo, startThreadTask } from "./thread-task.js";
 import {
@@ -45,7 +46,7 @@ import {
 } from "./targeting.js";
 import { configSecrets, makeRedactor } from "./worker.js";
 import { describeTasks } from "./progress.js";
-import { usageLine, usd } from "./usage.js";
+import { type MonthUsage, usageLine, usd } from "./usage.js";
 
 // In-memory routing state: the web service runs as a single instance (max-instances 1).
 function freshState() {
@@ -69,10 +70,16 @@ const CHANNEL_TYPES: readonly string[] = ["im", "channel", "group", "mpim"];
 /** A message that passed shouldRespond, so these fields are present. */
 type Incoming = SlackMessageEvent & { channel: string; ts: string; user: string };
 
+/** The Slack layer's dependencies, with the spending caps (built once in server.ts). */
+export type DispatchDeps = SlackDeps & {
+  /** Caps checked before chat replies and repo tasks; alerts after spend. Absent = no caps (older tests). */
+  spending?: Pick<Spending, "checkTask" | "checkChat" | "notify">;
+};
+
 interface Ctx {
   e: Incoming;
   config: Config;
-  deps: SlackDeps;
+  deps: DispatchDeps;
   slack: WebClient;
   botToken: string;
   mentioned: boolean;
@@ -84,13 +91,13 @@ interface Ctx {
  * answers, run a command or ask the brain, and reply. Never throws; problems
  * the user should know about are posted in the conversation.
  */
-export async function handleSlackEvent(event: SlackMessageEvent, deps: SlackDeps): Promise<void> {
+export async function handleSlackEvent(event: SlackMessageEvent, deps: DispatchDeps): Promise<void> {
   if (!event.channel || !event.ts) return;
   // Queue before the first await so messages in one conversation keep their arrival order.
   await state.conversations.run(queueKey(event), () => route(event, deps));
 }
 
-async function route(event: SlackMessageEvent, deps: SlackDeps): Promise<void> {
+async function route(event: SlackMessageEvent, deps: DispatchDeps): Promise<void> {
   let redact = (text: string) => text;
   try {
     const config = await deps.configRepo.load();
@@ -182,6 +189,9 @@ async function askPointer(
   if (!isChatReady(config)) {
     return { text: "I'm not fully set up yet. Finish onboarding on the admin page (Claude and Slack).", isError: true };
   }
+  // The monthly cap: checked before any model call.
+  const allowed = (await deps.spending?.checkChat()) ?? { ok: true };
+  if (!allowed.ok) return { text: `:no_entry: ${allowed.error}`, isError: true };
   const threadTs = taskThreadTs(e);
   const [convo, thread, name] = await Promise.all([
     history ?? loadHistory(ctx),
@@ -222,7 +232,10 @@ async function askPointer(
     pointerCtx.addAttachment = (file) => repo.add(where, file);
   }
   const reply = await state.brainSlots.run(() => deps.brain.reply(req, pointerCtx));
-  void deps.usage?.recordChat(reply.costUsd).catch((err) => console.error("[usage] chat cost not recorded:", errorText(err)));
+  void deps.usage
+    ?.recordChat(reply.costUsd)
+    .then(() => deps.spending?.notify())
+    .catch((err) => console.error("[usage] chat cost not recorded:", errorText(err)));
   const body = ctx.redact(reply.text.trim()) || "(no reply)";
   return { text: toMrkdwn(reply.isError && !body.startsWith(":x:") ? `:x: ${body}` : body), isError: reply.isError };
 }
@@ -297,7 +310,7 @@ function repoTaskStarter(ctx: Ctx, thread: ThreadState | null): StartRepoTask {
 
       const threadTs = taskThreadTs(e);
       const started = await startThreadTask(
-        { tasks: deps.tasks, runner: deps.runner, slack, redact: ctx.redact },
+        { tasks: deps.tasks, runner: deps.runner, slack, redact: ctx.redact, budget: deps.spending },
         {
           repo: target,
           channel: e.channel,
@@ -378,11 +391,19 @@ async function statusText({ e, config, deps }: Ctx): Promise<string> {
     `*Listening here:* ${listening}`,
     `*Runner:* ${deps.runner.kind}`,
     ...(usage ? [`*Claude spend this month:* ${usageLine(usage)}`] : []),
+    ...(usage ? capLines(config, usage, project) : []),
     "*Recent tasks:*",
     ...(recent.length
       ? recent.map((t) => `• \`${t.repo}\` — ${t.status}${t.costUsd !== undefined ? ` — ${usd(t.costUsd)}` : ""}${t.prUrl ? ` — <${t.prUrl}|PR>` : ""}`)
       : ["• none yet"]),
   ].join("\n");
+}
+
+/** The monthly cap and this channel's repository cap, for `status`; nothing when neither is set. */
+function capLines(config: Config, usage: MonthUsage, project: string | undefined): string[] {
+  const line = (label: string, s: CapStatus | null) =>
+    s ? [`*${label}:* ${usd(s.usedUsd)} of ${usd(s.capUsd)} (${s.percent}%)${s.level === "exceeded" ? ", used up" : ""}`] : [];
+  return [...line("Monthly cap", monthlyStatus(config.budget, usage)), ...(project ? line(`Cap for \`${project}\``, repoStatus(config.budget, usage, project)) : [])];
 }
 
 function loadHistory({ e, slack, config }: Ctx): Promise<ConversationMessage[]> {
