@@ -328,7 +328,7 @@ describe("handleSlackEvent: commands", () => {
     expect((await t.configRepo.load(true)).bindings["C9"]).toBe("acme/api");
     await t.mention("C9", "1.2", "bind stranger/api");
     expect((await t.configRepo.load(true)).bindings["C9"]).toBe("acme/api");
-    expect(t.posts.at(-1)!.text).toContain("allowed owner");
+    expect(t.posts.at(-1)!.text).toContain("Not allowed to work on");
     await t.mention("C9", "1.3", "unbind");
     expect((await t.configRepo.load(true)).bindings["C9"]).toBeUndefined();
     expect(t.requests).toHaveLength(0);
@@ -484,7 +484,7 @@ describe("handleSlackEvent: start_repo_task", () => {
     const t = await setup();
     const none = t.brainStartsTask({ instruction: "fix it" });
     await t.mention("C9", "1.1", "fix it");
-    expect(none[0]).toEqual({ ok: false, error: "No repository: ask the user which owner/repo to use." });
+    expect(none[0]).toEqual({ ok: false, error: "No repository: ask the user which repository to use (owner/repo, gitlab:group/project or bitbucket:workspace/repo)." });
 
     const stranger = t.brainStartsTask({ repo: "stranger/repo", instruction: "do things" });
     await t.mention("C1", "1.2", "do things");
@@ -543,7 +543,7 @@ describe("handleSlackEvent: several GitHub connections", () => {
     await t.mention("C1", "1.2", "fix the build in Partner-Co/other");
     expect(outside[0]).toEqual({
       ok: false,
-      error: "Not allowed to work on Partner-Co/other. Allowed owners and repositories: acme, Partner-Co/Acme.",
+      error: "Not allowed to work on Partner-Co/other. Allowed on GitHub: acme, Partner-Co/Acme.",
     });
     expect(t.launched).toHaveLength(1);
   });
@@ -559,7 +559,7 @@ describe("handleSlackEvent: several GitHub connections", () => {
     await t.mention("C1", "1.2", "fix the build");
     expect(channelRepo[0]).toEqual({
       ok: false,
-      error: "Not allowed to work on acme/web. Allowed owners and repositories: Partner-Co/Acme.",
+      error: "Not allowed to work on acme/web. Allowed on GitHub: Partner-Co/Acme.",
     });
   });
 
@@ -569,7 +569,7 @@ describe("handleSlackEvent: several GitHub connections", () => {
     expect((await t.configRepo.load(true)).bindings["C9"]).toBe("Partner-Co/Acme");
     await t.mention("C9", "1.2", "bind Partner-Co/other");
     expect((await t.configRepo.load(true)).bindings["C9"]).toBe("Partner-Co/Acme");
-    expect(t.posts.at(-1)!.text).toContain("allowed owner");
+    expect(t.posts.at(-1)!.text).toContain("Not allowed to work on");
 
     const none = await setup((c) => void (c.github = { allowedOwners: [] }));
     await none.mention("C9", "2.1", "bind acme/api");
