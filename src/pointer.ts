@@ -11,6 +11,7 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import type { ContentBlockParam } from "@anthropic-ai/sdk/resources";
 import { type AttachmentInfo, type AttachmentRepo, type ThreadRef, toContentBlocks } from "./attachments.js";
+import { type ChatIntegration, chatIntegrations, subagentIntegrationTools } from "./chat-integrations.js";
 import type { Config } from "./config.js";
 import { GitHub } from "./github.js";
 import { isRepoAllowedAnywhere } from "./github-access.js";
@@ -53,6 +54,8 @@ export interface PointerPromptInput {
   monday?: { connected: boolean; accountName?: string; defaultBoardId?: string };
   /** Skills from the team's library this chat can load; absent or empty = none installed. */
   skills?: TeamSkills["skills"];
+  /** Rules of the integrations beyond Pointer's own tools (chat-integrations.ts), one "- …" line or more each. */
+  integrationRules?: string[];
 }
 
 /** The library's skills, named the way the Skill tool takes them. */
@@ -98,7 +101,7 @@ ${list}
 Repo tasks started from this conversation receive these files automatically; the team finds them in an attachments/ folder outside the repository. In start_repo_task instructions, refer to the files by name instead of pasting their contents.`;
 }
 
-export function buildPointerSystemPrompt({ config, facts, req, now, projectNotes, monday, skills }: PointerPromptInput): string {
+export function buildPointerSystemPrompt({ config, facts, req, now, projectNotes, monday, skills, integrationRules = [] }: PointerPromptInput): string {
   const { name, instructions } = config.team.pointer;
   const org = config.orgName.trim();
   const date = now.toLocaleDateString("en-US", {
@@ -162,7 +165,7 @@ export function buildPointerSystemPrompt({ config, facts, req, now, projectNotes
 - Memory is shared by everyone, including public channels. Save with memory_save only when asked ("remember that…") or when it is clearly useful later, and tell the user that memory is shared. Never save secrets, credentials or personal data. Forget with memory_forget and the fact's id.
 - Project notes hold what the team knows about one repository (build and test commands, conventions, gotchas); the team reads them on every task there. Read another repository's notes with project_notes_read. When the user says "remember for owner/repo that …" or asks you to remember something about a specific repository, add it with project_notes_add (repository-specific), not memory_save (global). Never put secrets in them.
 ${mondayRule(monday)}
-- The team (agents, names, instructions, access) can only be changed by the owner on the admin page. You can describe it, not change it. When someone asks who to hire, which agents to change or what the team lacks, you may mention that the owner can ask HR for a review on the admin page's Team page (HR recommendations): it looks at the recent repo tasks and proposes hires, changes and skills to apply in one click.
+${integrationRules.length ? `${integrationRules.join("\n")}\n` : ""}- The team (agents, names, instructions, access) can only be changed by the owner on the admin page. You can describe it, not change it. When someone asks who to hire, which agents to change or what the team lacks, you may mention that the owner can ask HR for a review on the admin page's Team page (HR recommendations): it looks at the recent repo tasks and proposes hires, changes and skills to apply in one click.
 - Here you cannot run commands or read files on the server.
 ${web ? "- Be concise. Use Markdown: short paragraphs, short lists, bold, inline code, code blocks and links. Small tables are fine; no headings." : "- Be concise. Use Slack-friendly Markdown: short paragraphs, short lists, bold, inline code and links. No tables and no headings."}
 - If you cannot do something, say so plainly. Never invent facts, links, commit SHAs or results.`,
@@ -354,12 +357,25 @@ export function createPointerBrain(
       const skillOptions = skillQueryOptions(teamSkills);
       const builtins = skillOptions ? [...CHAT_BUILTIN_TOOLS, SKILL_TOOL] : [...CHAT_BUILTIN_TOOLS];
 
+      // GitLab, Bitbucket, Jira, Miro and apps: each one that cannot be built is left out (chat-integrations.ts).
+      const integrations: ChatIntegration[] = await chatIntegrations(config, {
+        configRepo: deps.configRepo,
+        requester: req.userName || req.userId,
+        addAttachment: ctx.addAttachment,
+        redact,
+      });
+      const connected = integrations.filter((i) => i.server);
+
       const tmp = await mkdtemp(join(tmpdir(), "pointer-"));
       const abort = new AbortController();
       const timer = setTimeout(() => abort.abort(), timeoutMs);
       let reply: PointerReply | undefined;
       try {
-        const subagentTools = ["WebSearch", "WebFetch", ...tools.readOnlyToolNames];
+        const subagentTools = ["WebSearch", "WebFetch", ...tools.readOnlyToolNames, ...subagentIntegrationTools(connected)];
+        // Integrations given to some agents only (apps assigned to agents): their read-only tools, per agent.
+        const scopedTools = (agentId: string) =>
+          connected.filter((i) => i.agentIds?.includes(agentId)).flatMap((i) => i.readOnlyToolNames);
+        const gateTools = new Set([...subagentTools, ...connected.flatMap((i) => i.readOnlyToolNames)]);
         const chatModel = team.pointer.model || config.anthropic.model;
         const options: Options = {
           systemPrompt: buildPointerSystemPrompt({
@@ -370,13 +386,14 @@ export function createPointerBrain(
             projectNotes,
             monday,
             ...(skillOptions && teamSkills ? { skills: teamSkills.skills } : {}),
+            integrationRules: integrations.map((i) => i.promptRule).filter(Boolean),
           }),
           // Pointer's own chat model, else the model on the Claude card, else the SDK default.
           ...(chatModel ? { model: chatModel } : {}),
           effort: team.pointer.effort,
           tools: [...builtins],
           // Headless: nothing can prompt, so anything not listed here is denied.
-          allowedTools: [...builtins, ...tools.allToolNames],
+          allowedTools: [...builtins, ...tools.allToolNames, ...connected.flatMap((i) => i.allToolNames)],
           // The library's plugin (outside any repository) and its skills; Pointer loads them with the Skill tool.
           ...(skillOptions ?? {}),
           disallowedTools: [...CHAT_BLOCKED_TOOLS],
@@ -387,11 +404,11 @@ export function createPointerBrain(
           // Slack text is untrusted: never expand "@/path" file references or other prompt syntax
           // (string prompt and streamed user message alike).
           verbatimPrompts: true,
-          mcpServers: { pointer: tools.server },
-          agents: buildChatAgents(team, subagentTools, skillOptions ? teamSkills : undefined),
+          mcpServers: { pointer: tools.server, ...Object.fromEntries(connected.map((i) => [i.key, i.server!])) },
+          agents: buildChatAgents(team, subagentTools, skillOptions ? teamSkills : undefined, scopedTools),
           // Every subagent, including the SDK's built-in ones (general-purpose, Explore, …),
           // is read-only: writes (memory, notes, tickets, repo tasks) only from Pointer itself.
-          hooks: { PreToolUse: [{ hooks: [subagentReadOnlyGate(new Set(subagentTools))] }] },
+          hooks: { PreToolUse: [{ hooks: [subagentReadOnlyGate(gateTools)] }] },
           maxTurns: team.pointer.maxTurns,
           maxBudgetUsd: team.pointer.budgetUsd,
           cwd: tmp,

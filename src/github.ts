@@ -83,8 +83,10 @@ export interface CheckInfo {
   title: string | null;
   summary: string | null;
   text: string | null;
-  /** Slug of the app that created it, e.g. "github-actions" or "vercel". */
+  /** Slug of the app that created it, e.g. "github-actions" or "vercel" ("gitlab-ci", "bitbucket-pipelines" on those hosts). */
   app: string | null;
+  /** A host's own reference for the job when its id is not a number (Bitbucket: "<pipeline uuid>/<step uuid>"). */
+  ref?: string;
 }
 
 /** A commit status (the older API some services use, e.g. Vercel deployments). */

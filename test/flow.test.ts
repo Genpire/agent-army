@@ -136,7 +136,7 @@ describe("admin API and Slack events", () => {
       const saved = await team();
       expect(saved.pointer.name).toBe("Scout");
       expect(saved.agents.find((a) => a.id === "coder")?.name).toBe("Sara");
-      expect(saved.agents.at(-1)).toEqual({ ...designer, effort: "", skills: [], avatar: "" });
+      expect(saved.agents.at(-1)).toEqual({ ...designer, effort: "", skills: [], avatar: "", apps: [] });
 
       const { manifest } = await (await get("/api/slack/manifest")).json();
       expect(manifest.display_information.name).toBe("Scout");

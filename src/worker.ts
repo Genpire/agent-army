@@ -18,7 +18,8 @@ import { AttachmentRepo, type ThreadRef, classify, expandZip } from "./attachmen
 import { Spending } from "./budget.js";
 import { type Screenshot, browserAvailable, browserServer, collectScreenshots } from "./browser.js";
 import { type CiOutcome, ciFailureDetails, ciFixPrompt, ciSummary, ciSummaryLine, storedCiSummary, waitForChecks } from "./ci.js";
-import { type Config, ConfigRepo, resolveMasterKey } from "./config.js";
+import { repoTaskApps } from "./apps.js";
+import { type Config, ConfigRepo, integrationSecrets, resolveMasterKey } from "./config.js";
 import { GitHub, type PrRef, isHumanFeedback } from "./github.js";
 import { connectionForRepo, githubTokens } from "./github-access.js";
 import { checkBashCommand } from "./guard.js";
@@ -309,7 +310,17 @@ export function configSecrets(c: Config): (string | undefined)[] {
   const repoEnv = Object.values(c.repoSetup)
     .flatMap((setup) => Object.values(setup.env))
     .filter((value) => !/^(?:[A-Za-z]+|\d+)$/.test(value.trim()));
-  return [c.anthropic.apiKey, c.slack.botToken, c.slack.signingSecret, c.monday.token, c.monday.automation.webhookSecret, c.github.webhookSecret, ...github, ...repoEnv];
+  return [
+    c.anthropic.apiKey,
+    c.slack.botToken,
+    c.slack.signingSecret,
+    c.monday.token,
+    c.monday.automation.webhookSecret,
+    c.github.webhookSecret,
+    ...github,
+    ...integrationSecrets(c),
+    ...repoEnv,
+  ];
 }
 
 /**
@@ -825,6 +836,13 @@ async function main(): Promise<void> {
     const skills = await prepareSkills(new SkillLibrary(store, masterKey), skillsDir, redact);
     if (skills) timeline.add({ kind: "note", text: skillsNote(skills) });
 
+    // Apps (MCP servers) assigned to the team's agents; an app that cannot be reached is left out, never fails the task.
+    const apps = await repoTaskApps(config, { configRepo: new ConfigRepo(store, masterKey), redact }).catch((err: unknown) => {
+      console.warn("[worker] apps not available:", redact(errorText(err)).slice(0, 300));
+      return undefined;
+    });
+    if (apps) timeline.add({ kind: "note", text: `Apps for this task: ${Object.keys(apps.servers).length}` });
+
     // Reviews and comments on the pull request since the last run, by people with write access.
     // Feedback written from now on is new to the next run (see lastRunAt below).
     const seenAt = new Date().toISOString();
@@ -978,7 +996,7 @@ async function main(): Promise<void> {
           options: {
             cwd: repoDir,
             abortController: opts.abort,
-            ...teamQueryOptions(runConfig, opts.context, attachmentsDir, { browser, skills }),
+            ...teamQueryOptions(runConfig, opts.context, attachmentsDir, { browser, skills, apps }),
             // Headless: nothing can prompt, so anything not in allowedTools is denied.
             permissionMode: "dontAsk",
             settingSources: ["project"], // loads the project's own CLAUDE.md

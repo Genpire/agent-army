@@ -1,12 +1,12 @@
 /**
- * The four integrations, what each enables, and how connected each one is,
- * derived from the configuration the server sends (it never sends secrets,
- * only whether they are set and their last characters).
+ * The integrations, grouped, what each enables, and how connected each one
+ * is, derived from the configuration the server sends (it never sends
+ * secrets, only whether they are set and their last characters).
  */
 import { plural } from "../../lib/format";
 import type { PublicConfig } from "../../lib/types";
 
-export const INTEGRATION_IDS = ["claude", "slack", "github", "monday"] as const;
+export const INTEGRATION_IDS = ["claude", "slack", "github", "gitlab", "bitbucket", "monday", "jira", "miro", "apps"] as const;
 export type IntegrationId = (typeof INTEGRATION_IDS)[number];
 
 export const isIntegrationId = (s: string | undefined): s is IntegrationId => (INTEGRATION_IDS as readonly string[]).includes(s ?? "");
@@ -14,11 +14,17 @@ export const isIntegrationId = (s: string | undefined): s is IntegrationId => (I
 /** success = connected, warning = required and missing, neutral = optional and missing. */
 export type StatusTone = "success" | "warning" | "neutral";
 
+/** The list's sections, in order. */
+export const INTEGRATION_GROUPS = ["Essentials", "Code", "Work tracking", "Boards", "Apps"] as const;
+export type IntegrationGroup = (typeof INTEGRATION_GROUPS)[number];
+
 export interface IntegrationSummary {
   id: IntegrationId;
   name: string;
+  group: IntegrationGroup;
   /** One line: what it enables. */
   enables: string;
+  /** Needed before the team can work (Claude, Slack, and one code host). */
   required: boolean;
   connected: boolean;
   /** "Connected as octocat", "Not connected", "Optional"… */
@@ -26,9 +32,13 @@ export interface IntegrationSummary {
   tone: StatusTone;
 }
 
+/** GitHub, GitLab or Bitbucket: at least one is needed for repo tasks. */
+export const hasCodeHost = (config: PublicConfig): boolean =>
+  config.github.connected || config.github.extra.length > 0 || config.gitlab.connected || config.bitbucket.connected;
+
 export function summarize(config: PublicConfig): IntegrationSummary[] {
   const name = config.team.pointer.name;
-  const { anthropic, slack, github, monday } = config;
+  const { anthropic, slack, github, gitlab, bitbucket, monday, jira, miro, apps } = config;
   const extra = github.extra.length;
   const githubConnected = github.connected || extra > 0;
   const githubStatus = github.connected
@@ -36,11 +46,16 @@ export function summarize(config: PublicConfig): IntegrationSummary[] {
     : extra
       ? plural(extra, "connection")
       : "Not connected";
+  // A code host is required until one is connected; the others are then optional.
+  const codeRequired = !hasCodeHost(config);
+  const optional = (connected: boolean, text: string) => (connected ? text : "Optional");
+  const enabledApps = apps.filter((a) => a.enabled).length;
 
   const rows: Omit<IntegrationSummary, "tone">[] = [
     {
       id: "claude",
       name: "Claude",
+      group: "Essentials",
       enables: `The model ${name} and the agents think with.`,
       required: true,
       connected: anthropic.connected,
@@ -49,6 +64,7 @@ export function summarize(config: PublicConfig): IntegrationSummary[] {
     {
       id: "slack",
       name: "Slack",
+      group: "Essentials",
       enables: `Where your team talks to ${name} and gets replies.`,
       required: true,
       connected: slack.connected,
@@ -57,18 +73,65 @@ export function summarize(config: PublicConfig): IntegrationSummary[] {
     {
       id: "github",
       name: "GitHub",
+      group: "Code",
       enables: "Reading code, opening pull requests and following reviews.",
-      required: true,
+      required: codeRequired,
       connected: githubConnected,
-      status: githubStatus,
+      status: githubConnected ? githubStatus : codeRequired ? "Not connected" : "Optional",
+    },
+    {
+      id: "gitlab",
+      name: "GitLab",
+      group: "Code",
+      enables: "The same on gitlab.com or your own GitLab: merge requests, pipelines, reviews.",
+      required: codeRequired,
+      connected: gitlab.connected,
+      status: gitlab.connected ? `Connected${gitlab.username ? ` as ${gitlab.username}` : ""}` : codeRequired ? "Not connected" : "Optional",
+    },
+    {
+      id: "bitbucket",
+      name: "Bitbucket",
+      group: "Code",
+      enables: "The same on Bitbucket Cloud: pull requests, Pipelines, reviews.",
+      required: codeRequired,
+      connected: bitbucket.connected,
+      status: bitbucket.connected ? `Connected${bitbucket.username ? ` as ${bitbucket.username}` : ""}` : codeRequired ? "Not connected" : "Optional",
     },
     {
       id: "monday",
       name: "monday.com",
+      group: "Work tracking",
       enables: `Lets ${name} find, open and update tickets.`,
       required: false,
       connected: monday.connected,
-      status: monday.connected ? `Connected${monday.userName ? ` as ${monday.userName}` : ""}` : "Optional",
+      status: optional(monday.connected, `Connected${monday.userName ? ` as ${monday.userName}` : ""}`),
+    },
+    {
+      id: "jira",
+      name: "Jira & Confluence",
+      group: "Work tracking",
+      enables: `Lets ${name} find, open and move issues, read Confluence, and start the team on issues.`,
+      required: false,
+      connected: jira.connected,
+      status: optional(jira.connected, `Connected${jira.userName ? ` as ${jira.userName}` : ""}`),
+    },
+    {
+      id: "miro",
+      name: "Miro",
+      group: "Boards",
+      enables: `Lets ${name} read boards and add stickies, cards and diagrams.`,
+      required: false,
+      connected: miro.connected,
+      status: optional(miro.connected, `Connected${miro.userName ? ` as ${miro.userName}` : ""}`),
+    },
+    {
+      id: "apps",
+      name: "Apps",
+      group: "Apps",
+      enables: "Linear, Notion, Sentry, Stripe, Zapier and more through their MCP servers.",
+      required: false,
+      connected: enabledApps > 0,
+      status: enabledApps > 0 ? plural(enabledApps, "app") + " connected" : "Optional",
     },
   ];
   return rows.map((r) => ({ ...r, tone: r.connected ? "success" : r.required ? "warning" : "neutral" }));

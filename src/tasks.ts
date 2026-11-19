@@ -45,7 +45,7 @@ export interface Task {
   /** Live progress while the team works, saved by the worker; Pointer reads it for status questions. */
   progress?: ProgressSnapshot;
   /** What started the task: a Slack request (default), the admin console, or feedback on its pull request. */
-  trigger?: "slack" | "web" | "review" | "monday";
+  trigger?: "slack" | "web" | "review" | "monday" | "jira";
   /** The pull request's checks after the last push (see ci.ts), when the task waited for them. */
   ci?: CiSummary;
   /** Screenshots from browser checks posted in the thread and kept in the store (see screenshots.ts). */
@@ -60,7 +60,7 @@ export interface Task {
   prDraft?: boolean;
   /** The last round of fixing failing checks the team started. */
   fixRound?: { round: number; rounds: number; failing: string[]; at: string };
-  /** The monday.com ticket this task works on. */
+  /** The monday.com or Jira ticket this task works on. */
   ticket?: TaskTicket;
   /** Estimated size (see sizing.ts) and the model and effort that size runs with. */
   size?: { size: "small" | "medium" | "large"; model: string; effort: string; reason?: string };
@@ -71,9 +71,13 @@ export interface Task {
 }
 
 /** Outcome of waiting for a pull request's checks. */
-/** The monday.com ticket a task works on (started from it, or linked to it). */
+/** The ticket a task works on (started from it, or linked to it): a monday.com item or a Jira issue. */
 export interface TaskTicket {
+  /** Absent on tickets saved before Jira existed: monday.com. */
+  provider?: "monday" | "jira";
+  /** monday.com: the board id. Jira: the project key ("ACME"). */
   boardId: string;
+  /** monday.com: the item id. Jira: the issue key ("ACME-123"). */
   itemId: string;
   /** The ticket's name, for messages. */
   name?: string;

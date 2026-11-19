@@ -238,6 +238,46 @@ export async function handleGithubWebhook(event: string, payload: unknown, deps:
 
 type Start = Extract<ReviewDecision, { start: true }>;
 
+/**
+ * Feedback on a pull or merge request from any code host: GitLab and
+ * Bitbucket webhooks (routes/gitlab.ts, routes/bitbucket.ts) turn their
+ * payloads into a ReviewDecision and hand it here, so the follow-up is the
+ * same as GitHub's. Never throws.
+ */
+export async function handleReviewDecision(event: string, decision: ReviewDecision, deps: WebhookDeps): Promise<void> {
+  let redact = (text: string) => text;
+  try {
+    const config = await deps.configRepo.load();
+    redact = makeRedactor(configSecrets(config));
+    if (!decision.start) return log(event, decision.repo, `ignored: ${decision.reason}`);
+    const key = `${decision.repo.toLowerCase()}#${decision.prNumber}`;
+    await queue.run(key, () => followUp(event, decision, config, deps, redact));
+  } catch (err) {
+    console.error(`[webhook] ${event} failed:`, redact(errorText(err)));
+  }
+}
+
+/** A pull or merge request the team opened was closed (merged or not), on any code host. Never throws. */
+export async function handlePrClosed(event: string, pr: ClosedPr, deps: WebhookDeps): Promise<void> {
+  let redact = (text: string) => text;
+  try {
+    const config = await deps.configRepo.load();
+    redact = makeRedactor(configSecrets(config));
+    await prClosed(event, pr, config, deps, redact);
+  } catch (err) {
+    console.error(`[webhook] ${event} failed:`, redact(errorText(err)));
+  }
+}
+
+/** A closed pull or merge request, as any host's webhook reports it. */
+export interface ClosedPr {
+  repo: string;
+  prNumber: number;
+  /** Its web address; absent or unsafe = built from the repository. */
+  url?: string;
+  merged: boolean;
+}
+
 async function followUp(event: string, d: Start, config: Config, deps: WebhookDeps, redact: (text: string) => string): Promise<void> {
   const at = `${d.repo}#${d.prNumber}`;
   if (!connectionForRepo(config, d.repo)) return log(event, at, "ignored: repository not allowed");
@@ -334,18 +374,29 @@ async function pullRequestClosed(payload: unknown, config: Config, deps: Webhook
   const parsed = PullRequestPayload.safeParse(payload);
   if (!parsed.success) return log(event, repoOf(payload), "ignored: unexpected payload");
   const p = parsed.data;
-  const repo = p.repository.full_name;
-  const at = `${repo}#${p.pull_request.number}`;
+  const at = `${p.repository.full_name}#${p.pull_request.number}`;
   if (p.action !== "closed") return log(event, at, "ignored: pull request not closed");
+  await prClosed(
+    event,
+    { repo: p.repository.full_name, prNumber: p.pull_request.number, url: p.pull_request.html_url, merged: p.pull_request.merged === true },
+    config,
+    deps,
+    redact,
+  );
+}
+
+async function prClosed(event: string, pr: ClosedPr, config: Config, deps: WebhookDeps, redact: (text: string) => string): Promise<void> {
+  const repo = pr.repo;
+  const at = `${repo}#${pr.prNumber}`;
   if (!connectionForRepo(config, repo)) return log(event, at, "ignored: repository not allowed");
-  const ref = await deps.tasks.getPrThread(repo, p.pull_request.number);
+  const ref = await deps.tasks.getPrThread(repo, pr.prNumber);
   if (!ref) return log(event, at, "ignored: not a pull request the team opened");
   const task = (await deps.tasks.recent(TICKET_SCAN)).find((t) => t.channel === ref.channel && t.threadTs === ref.threadTs && t.ticket);
   if (!task) return log(event, at, "ignored: no monday.com ticket");
   const token = config.monday.token;
   if (!token) return log(event, at, "ignored: monday.com not connected");
-  const url = p.pull_request.html_url && URL_RE.test(p.pull_request.html_url) ? p.pull_request.html_url : `https://github.com/${repo}/pull/${p.pull_request.number}`;
-  const merged = p.pull_request.merged === true;
+  const url = pr.url && URL_RE.test(pr.url) ? pr.url : `https://github.com/${repo}/pull/${pr.prNumber}`;
+  const merged = pr.merged;
   const store = deps.store;
   await ticketPrClosed(
     {

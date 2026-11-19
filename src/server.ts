@@ -54,6 +54,12 @@ import { checkAnthropic, checkGithub, checkSlack } from "./validate.js";
 import { UsageRepo } from "./usage.js";
 import { handleGithubWebhook, parseGithubPayload, verifyGithubSignature } from "./webhook.js";
 import { configSecrets, makeRedactor } from "./worker.js";
+import { appsRoutes } from "./routes/apps.js";
+import { bitbucketRoutes } from "./routes/bitbucket.js";
+import { gitlabRoutes } from "./routes/gitlab.js";
+import { jiraRoutes } from "./routes/jira.js";
+import { miroRoutes } from "./routes/miro.js";
+import type { IntegrationRouteDeps } from "./routes/types.js";
 
 const SESSION_COOKIE = "army_session";
 const SESSION_TTL_MS = 1000 * 60 * 60 * 12;
@@ -1239,6 +1245,24 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
   });
 
   // ---------- UI ----------
+  // ---------- More integrations: each one's admin routes and webhook (src/routes/) ----------
+  const routeDeps: IntegrationRouteDeps = {
+    configRepo,
+    store,
+    tasks,
+    masterKey,
+    requireAdmin,
+    throttle,
+    baseUrl,
+    startDirectTask: (repo, instruction, opts) => conversations.startDirectTask(repo, instruction, opts),
+    webhookDeps: { ...slackDeps, store },
+  };
+  app.use(gitlabRoutes(routeDeps));
+  app.use(bitbucketRoutes(routeDeps));
+  app.use(jiraRoutes(routeDeps));
+  app.use(miroRoutes(routeDeps));
+  app.use(appsRoutes(routeDeps));
+
   app.use(express.static(fileURLToPath(new URL("../public", import.meta.url)), { index: "index.html" }));
 
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {

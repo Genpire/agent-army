@@ -68,6 +68,7 @@ const TRIGGER_TEXT: Record<NonNullable<Task["trigger"]>, string> = {
   web: "the admin console",
   review: "review feedback on the pull request",
   monday: "a monday.com ticket",
+  jira: "a Jira issue",
 };
 
 /** The user turn of the estimate: the facts, then the request between tags it cannot close. */
