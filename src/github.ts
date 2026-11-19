@@ -1,3 +1,5 @@
+import type { CodeHost, HostViewer } from "./code-host.js";
+
 export type ItemState = "open" | "closed" | "all";
 
 export interface RepoInfo {
@@ -189,8 +191,29 @@ export const encodePath = (path: string) => {
   return segments.map(encodeURIComponent).join("/");
 };
 
-/** Minimal GitHub REST client: what the worker needs, plus read-only lookups for Pointer's chat tools. */
-export class GitHub {
+/** Used only when the token owner cannot be looked up: a reserved domain, so no host links it to anybody. */
+export const FALLBACK_COMMIT_EMAIL = "pointer@agent-army.invalid";
+
+/**
+ * Who a task's commits on GitHub are authored by. The email is the token
+ * owner's GitHub noreply address, so GitHub and Vercel attribute the commits
+ * to the account that pushes them and opens the pull request. A Vercel team
+ * blocks Git deployments whose commit author is not a member, and an address
+ * like "agent-army@users.noreply.github.com" would belong to an unrelated
+ * GitHub user named agent-army.
+ */
+export function githubCommitIdentity(pointerName: string, viewer: HostViewer | undefined): { name: string; email: string } {
+  const id = viewer?.id;
+  if (!viewer || typeof id !== "number" || !Number.isInteger(id) || id <= 0 || !/^[A-Za-z0-9-]+$/.test(viewer.login)) {
+    return { name: pointerName, email: FALLBACK_COMMIT_EMAIL };
+  }
+  return { name: `${pointerName} (via ${viewer.login})`, email: `${id}+${viewer.login}@users.noreply.github.com` };
+}
+
+/** Minimal GitHub REST client: what the worker needs (the CodeHost interface), plus read-only lookups for Pointer's chat tools. */
+export class GitHub implements CodeHost {
+  readonly kind = "github" as const;
+
   constructor(private readonly token: string) {}
 
   private async call<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -275,6 +298,15 @@ export class GitHub {
     await this.call("PATCH", `/repos/${repo}/pulls/${number}`, patch);
   }
 
+  /** A draft pull request becomes ready for review, by its GraphQL id. */
+  async markReady(_repo: string, pr: Pick<PrRef, "node_id">): Promise<void> {
+    await this.markReadyForReview(pr.node_id);
+  }
+
+  prWebUrl(repo: string, number: number): string {
+    return `https://github.com/${repo}/pull/${number}`;
+  }
+
   /** Turns a draft pull request into one ready for review (GraphQL only; REST cannot). */
   async markReadyForReview(nodeId: string): Promise<void> {
     const data = await this.call<{ errors?: { message?: string }[] }>("POST", "/graphql", {
@@ -328,10 +360,10 @@ export class GitHub {
   }
 
   /** A check run's annotations (file, line, message), at most 50. */
-  async checkAnnotations(repo: string, checkRunId: number): Promise<Annotation[]> {
+  async checkAnnotations(repo: string, check: Pick<CheckInfo, "id">): Promise<Annotation[]> {
     const data = await this.call<
       { path: string; start_line: number; annotation_level: string; title: string | null; message: string }[]
-    >("GET", `/repos/${repo}/check-runs/${checkRunId}/annotations?per_page=50`);
+    >("GET", `/repos/${repo}/check-runs/${check.id}/annotations?per_page=50`);
     return data.map((a) => ({ path: a.path, startLine: a.start_line, level: a.annotation_level, title: a.title, message: a.message }));
   }
 
@@ -352,6 +384,11 @@ export class GitHub {
     if (!res.ok) throw new Error(`GitHub GET job ${jobId} logs failed (HTTP ${res.status})`);
     const text = await res.text();
     return text.length > LOG_MAX_CHARS ? text.slice(-LOG_MAX_CHARS) : text;
+  }
+
+  /** A GitHub Actions check's job log (its check run id is the job id); other apps' checks have no log on GitHub. */
+  async jobLog(repo: string, check: Pick<CheckInfo, "id" | "app">): Promise<string | undefined> {
+    return check.app === "github-actions" ? this.actionsJobLog(repo, check.id) : undefined;
   }
 
   // ---------- Deployments of a commit (preview checks) ----------
@@ -614,10 +651,31 @@ export class GitHub {
     return data.items.slice(0, MAX_ITEMS).map((i) => ({ repo: i.repository.full_name, path: i.path, url: i.html_url }));
   }
 
+  // ---------- git ----------
+
+  cloneUrl(repo: string): string {
+    return `https://github.com/${repo}.git`;
+  }
+
   /** Header git uses for clone/fetch/push, so the token never lands in .git/config. */
   gitAuthHeader(): string {
     const basic = Buffer.from(`x-access-token:${this.token}`).toString("base64");
     return `Authorization: Basic ${basic}`;
+  }
+
+  /** Per-command git config with the header, scoped to github.com so git never sends it to another host. */
+  gitAuthArgs(): string[] {
+    return ["-c", `http.https://github.com/.extraheader=${this.gitAuthHeader()}`];
+  }
+
+  /** The token, the header git sends and the header's Basic value. */
+  secrets(): string[] {
+    const header = this.gitAuthHeader();
+    return [this.token, header, header.split(" ").pop()!];
+  }
+
+  commitIdentity(pointerName: string, viewer: HostViewer | undefined): { name: string; email: string } {
+    return githubCommitIdentity(pointerName, viewer);
   }
 }
 
