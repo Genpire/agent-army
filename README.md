@@ -146,6 +146,8 @@ Workers run as child processes of the server (`RUNNER=local`). Slack needs to re
 
 Every credential is verified before it is saved, stored encrypted (AES-256-GCM with `MASTER_KEY`), and never sent back to the browser.
 
+**Forgot the admin password?** On the sign-in page, choose **Forgot your password?** and paste the setup token to set a new one. On Cloud Run the token is in Secret Manager: `gcloud secrets versions access latest --secret <NAME>-setup-token --project <PROJECT>` (`agent-army-setup-token` by default). Elsewhere it is the `SETUP_TOKEN` you set, or, when unset, the one printed in the server log at startup (`docker logs agent-army 2>&1 | grep setup`). A new password, from a reset or from **Settings → Admin password**, signs out every other session.
+
 ## GitHub connections
 
 Pointer can hold several GitHub tokens: the primary one on **Integrations → GitHub**, plus up to 10 more under **Other connections** on the same pane. Each has its own allow list.
@@ -430,6 +432,8 @@ Besides the admin API, the service takes `POST /slack/events` from Slack and `PO
 | `GET /api/state` | | Setup and sign-in state; when signed in, readiness, `eventsUrl`, `githubWebhookUrl` (the payload URL for GitHub) and the config without secrets (`config.github.extra` lists the other GitHub connections as `{ id, login, allowed, key }` with a masked key; `config.github.webhook.configured` says whether a webhook secret is saved; `config.repoSetup` maps `owner/repo` to `{ setupCommand, startCommand, appUrl, envKeys }`, variable names only; `config.monday` shows `connected`, `userName`, `accountName`, `defaultBoardId`, `allowedBoardIds`; `config.limits` includes `ciWaitMin` and `ciFixRounds`). |
 | `POST /api/setup` | `{ setupToken, password }` | Creates the admin account and signs in. |
 | `POST /api/login` / `POST /api/logout` | `{ password }` / none | Session cookie. |
+| `POST /api/reset-password` | `{ setupToken, password }` | Sets a new admin password with the setup token and signs in; every other session is signed out. `403` for a wrong token, `409` before setup. No session needed; limited to 10 attempts per address per 10 minutes, like sign-in. |
+| `POST /api/password` | `{ currentPassword, password }` | Signed in: changes the admin password (at least 10 characters); `403` when the current password is wrong. Other sessions are signed out; this one stays. |
 | `POST /api/anthropic` | `{ apiKey, model? }` | Verifies and saves the Claude key. |
 | `GET /api/slack/manifest` | `?name=` | `{ manifest, createUrl }` for this deployment. |
 | `POST /api/slack` | `{ botToken, signingSecret }` | Verifies and saves Slack. |

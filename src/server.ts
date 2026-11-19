@@ -15,7 +15,7 @@ import {
   publicView,
   resolveMasterKey,
 } from "./config.js";
-import { hashPassword, randomToken, safeEqual, signSession, verifyPassword, verifySession } from "./crypto.js";
+import { hashPassword, randomToken, safeEqual, sessionKey, signSession, verifyPassword, verifySession } from "./crypto.js";
 import { CONVERSATION_ID_RE, ConversationService, MESSAGE_MAX_CHARS, type WebThreads } from "./conversations.js";
 import { handleSlackEvent, withBrainSlot } from "./dispatch.js";
 import { RecentSet } from "./listen.js";
@@ -148,11 +148,17 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
     web: conversations,
   };
 
-  // First-run protection: the admin account can only be created by someone
-  // holding the setup token (from the deploy output or the server log).
+  // The setup token creates the admin account on first run and resets its
+  // password later: only someone who can read the deployment's secrets (the
+  // deploy output, Secret Manager) or its log can use it.
   const setupToken = env.SETUP_TOKEN ?? randomToken(18);
-  if (!(await configRepo.load()).adminPasswordHash && !env.SETUP_TOKEN) {
-    console.log(`\n[setup] Open the app and use this one-time setup token: ${setupToken}\n`);
+  if (!env.SETUP_TOKEN) {
+    const firstRun = !(await configRepo.load()).adminPasswordHash;
+    console.log(
+      firstRun
+        ? `\n[setup] Open the app and use this one-time setup token: ${setupToken}\n`
+        : `\n[setup] Forgot the admin password? Reset it on the sign-in page with this setup token: ${setupToken}\n`,
+    );
   }
 
   const app = express();
@@ -162,24 +168,27 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
   const baseUrl = (req: Request) =>
     (env.PUBLIC_URL ?? `${req.protocol}://${req.get("host")}`).replace(/\/+$/, "");
 
-  const isAuthed = (req: Request) => {
+  // Sessions are signed with a key tied to the current password, so a new password signs everyone out.
+  const currentSessionKey = async () => sessionKey(masterKey, (await configRepo.load()).adminPasswordHash);
+
+  const isAuthed = async (req: Request) => {
     const cookie = (req.headers.cookie ?? "")
       .split(";")
       .map((p) => p.trim().split("="))
       .find(([k]) => k === SESSION_COOKIE)?.[1];
-    return verifySession(masterKey, cookie);
+    return verifySession(await currentSessionKey(), cookie);
   };
 
-  const startSession = (req: Request, res: Response) => {
+  const startSession = async (req: Request, res: Response) => {
     const secure = req.protocol === "https" ? "; Secure" : "";
     res.setHeader(
       "Set-Cookie",
-      `${SESSION_COOKIE}=${signSession(masterKey, SESSION_TTL_MS)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${SESSION_TTL_MS / 1000}${secure}`,
+      `${SESSION_COOKIE}=${signSession(await currentSessionKey(), SESSION_TTL_MS)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${SESSION_TTL_MS / 1000}${secure}`,
     );
   };
 
-  const requireAdmin = (req: Request, res: Response, next: NextFunction) => {
-    if (!isAuthed(req)) return void res.status(401).json({ error: "Sign in first." });
+  const requireAdmin = async (req: Request, res: Response, next: NextFunction) => {
+    if (!(await isAuthed(req))) return void res.status(401).json({ error: "Sign in first." });
     next();
   };
 
@@ -286,7 +295,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
 
   app.get("/api/state", async (req, res) => {
     const config = await configRepo.load(true);
-    const authed = isAuthed(req);
+    const authed = await isAuthed(req);
     res.json({
       setupRequired: !config.adminPasswordHash,
       authed,
@@ -315,7 +324,25 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
     await configRepo.update((c) => {
       c.adminPasswordHash = hashPassword(input.password);
     });
-    startSession(req, res);
+    await startSession(req, res);
+    res.json({ ok: true });
+  });
+
+  // Forgot the password: the setup token (Secret Manager, the deploy output or
+  // the server log) sets a new one. Every existing session is signed out.
+  app.post("/api/reset-password", throttle, async (req, res) => {
+    const input = body(z.object({ setupToken: z.string(), password: z.string().min(10, "Use at least 10 characters.") }), req, res);
+    if (!input) return;
+    if (!(await configRepo.load(true)).adminPasswordHash) {
+      return void res.status(409).json({ error: "There is no admin account yet. Set it up instead." });
+    }
+    if (!safeEqual(input.setupToken.trim(), setupToken)) {
+      return void res.status(403).json({ error: "Wrong setup token." });
+    }
+    await configRepo.update((c) => {
+      c.adminPasswordHash = hashPassword(input.password);
+    });
+    await startSession(req, res);
     res.json({ ok: true });
   });
 
@@ -326,12 +353,32 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
     if (!hash || !verifyPassword(input.password, hash)) {
       return void res.status(403).json({ error: "Wrong password." });
     }
-    startSession(req, res);
+    await startSession(req, res);
     res.json({ ok: true });
   });
 
   app.post("/api/logout", (_req, res) => {
     res.setHeader("Set-Cookie", `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`);
+    res.json({ ok: true });
+  });
+
+  // Signed in: change the password. The current one is asked again, so a borrowed
+  // session cannot lock the owner out. Other sessions are signed out; this one stays.
+  app.post("/api/password", throttle, requireAdmin, async (req, res) => {
+    const input = body(
+      z.object({ currentPassword: z.string(), password: z.string().min(10, "Use at least 10 characters.") }),
+      req,
+      res,
+    );
+    if (!input) return;
+    const hash = (await configRepo.load(true)).adminPasswordHash;
+    if (!hash || !verifyPassword(input.currentPassword, hash)) {
+      return void res.status(403).json({ error: "The current password is wrong." });
+    }
+    await configRepo.update((c) => {
+      c.adminPasswordHash = hashPassword(input.password);
+    });
+    await startSession(req, res);
     res.json({ ok: true });
   });
 

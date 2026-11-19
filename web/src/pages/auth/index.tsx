@@ -2,6 +2,7 @@ import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
 import { Card } from "@astryxdesign/core/Card";
 import { Center } from "@astryxdesign/core/Center";
+import { Code } from "@astryxdesign/core/Code";
 import { Heading } from "@astryxdesign/core/Heading";
 import { HStack } from "@astryxdesign/core/HStack";
 import { Icon } from "@astryxdesign/core/Icon";
@@ -126,7 +127,7 @@ export function SetupScreen() {
         <TextInput
           label="Admin password"
           type="password"
-          description={`At least ${MIN_PASSWORD} characters. It cannot be reset, so save it somewhere safe.`}
+          description={`At least ${MIN_PASSWORD} characters. If you forget it, you can set a new one with the setup token.`}
           value={password}
           onChange={setPassword}
           size="lg"
@@ -150,13 +151,97 @@ export function SetupScreen() {
   );
 }
 
+/** Where the setup token is, for the password reset: Secret Manager on Cloud Run, the log elsewhere. */
+function SetupTokenHelp() {
+  return (
+    <VStack gap={2}>
+      <Text type="supporting">
+        On Google Cloud Run, print it on your computer with <Code>gcloud secrets versions access latest --secret agent-army-setup-token</Code> (add{" "}
+        <Code>--project</Code> with your project; the secret is named after the deployment).
+      </Text>
+      <Text type="supporting">
+        With Docker, it is in the server log: <Code>docker logs agent-army 2&gt;&amp;1 | grep setup</Code>.
+      </Text>
+    </VStack>
+  );
+}
+
+/** Forgot the password: the setup token sets a new one and signs out every other session. */
+function ResetPassword({ onBack }: { onBack: () => void }) {
+  const { submit, pending, error } = useAuthRequest();
+  const [setupToken, setSetupToken] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [tried, setTried] = useState(false);
+
+  const tokenError = tried && !setupToken.trim() ? "Paste the setup token." : undefined;
+  const passwordError = tried && password.length < MIN_PASSWORD ? `Use at least ${MIN_PASSWORD} characters.` : undefined;
+  const confirmError = tried && confirm !== password ? "The passwords do not match." : undefined;
+
+  const reset = async () => {
+    setTried(true);
+    if (!setupToken.trim() || password.length < MIN_PASSWORD || confirm !== password) return;
+    await submit("/api/reset-password", { setupToken, password });
+  };
+
+  return (
+    <AuthFrame
+      title="Set a new password"
+      description="Use the deployment's setup token to choose a new admin password. Everyone signed in with the old one is signed out."
+      error={error}
+      footnote="Only someone who can read this deployment's secrets or logs has the setup token.">
+      <VStack gap={4}>
+        <TextInput
+          label="Setup token"
+          value={setupToken}
+          onChange={setSetupToken}
+          size="lg"
+          autoComplete="off"
+          hasSpellCheck={false}
+          hasAutoFocus
+          status={tokenError ? { type: "error", message: tokenError } : undefined}
+          onEnter={reset}
+        />
+        <SetupTokenHelp />
+        <TextInput
+          label="New password"
+          type="password"
+          description={`At least ${MIN_PASSWORD} characters.`}
+          value={password}
+          onChange={setPassword}
+          size="lg"
+          autoComplete="new-password"
+          status={passwordError ? { type: "error", message: passwordError } : undefined}
+          onEnter={reset}
+        />
+        <TextInput
+          label="Confirm new password"
+          type="password"
+          value={confirm}
+          onChange={setConfirm}
+          size="lg"
+          autoComplete="new-password"
+          status={confirmError ? { type: "error", message: confirmError } : undefined}
+          onEnter={reset}
+        />
+      </VStack>
+      <VStack gap={2}>
+        <Button label="Set new password and sign in" variant="primary" size="lg" isLoading={pending} clickAction={reset} width="100%" />
+        <Button label="Back to sign in" variant="ghost" size="lg" onClick={onBack} width="100%" />
+      </VStack>
+    </AuthFrame>
+  );
+}
+
 export function LoginScreen() {
   const { submit, pending, error } = useAuthRequest();
   const [password, setPassword] = useState("");
+  const [resetting, setResetting] = useState(false);
   const signIn = async () => {
     if (!password) return;
     await submit("/api/login", { password });
   };
+  if (resetting) return <ResetPassword onBack={() => setResetting(false)} />;
   return (
     <AuthFrame
       title="Sign in"
@@ -173,7 +258,10 @@ export function LoginScreen() {
         hasAutoFocus
         onEnter={signIn}
       />
-      <Button label="Sign in" variant="primary" size="lg" isLoading={pending} isDisabled={!password} clickAction={signIn} width="100%" />
+      <VStack gap={2}>
+        <Button label="Sign in" variant="primary" size="lg" isLoading={pending} isDisabled={!password} clickAction={signIn} width="100%" />
+        <Button label="Forgot your password?" variant="ghost" size="lg" onClick={() => setResetting(true)} width="100%" />
+      </VStack>
     </AuthFrame>
   );
 }

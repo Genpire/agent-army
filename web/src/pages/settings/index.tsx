@@ -287,6 +287,63 @@ function DeploymentSection() {
   );
 }
 
+// ---------- Admin password ----------
+
+const MIN_PASSWORD = 10;
+
+/** Change the admin password: the current one is asked again; other browsers are signed out. */
+function PasswordSection() {
+  const { refresh } = useConfig();
+  const { run, pending } = useAction();
+  const [current, setCurrent] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [tried, setTried] = useState(false);
+  const shortError = tried && password.length < MIN_PASSWORD ? `Use at least ${MIN_PASSWORD} characters.` : undefined;
+  const confirmError = tried && confirm !== password ? "The passwords do not match." : undefined;
+  const save = () => {
+    setTried(true);
+    if (!current || password.length < MIN_PASSWORD || confirm !== password) return;
+    void run(
+      async () => {
+        await api.post("/api/password", { currentPassword: current, password });
+        setCurrent("");
+        setPassword("");
+        setConfirm("");
+        setTried(false);
+        await refresh();
+      },
+      { success: "Password changed. Other browsers were signed out." },
+    );
+  };
+  return (
+    <SettingsSection
+      title="Admin password"
+      description="The password for this console. Changing it signs out every other browser. Forgot it? Use “Forgot your password?” on the sign-in page with the deployment's setup token.">
+      <TextInput label="Current password" type="password" value={current} onChange={setCurrent} autoComplete="current-password" />
+      <TextInput
+        label="New password"
+        type="password"
+        description={`At least ${MIN_PASSWORD} characters.`}
+        value={password}
+        onChange={setPassword}
+        autoComplete="new-password"
+        status={shortError ? { type: "error", message: shortError } : undefined}
+      />
+      <TextInput
+        label="Confirm new password"
+        type="password"
+        value={confirm}
+        onChange={setConfirm}
+        autoComplete="new-password"
+        status={confirmError ? { type: "error", message: confirmError } : undefined}
+        onEnter={save}
+      />
+      <SaveRow label="Change password" isDirty={Boolean(current && password)} pending={pending} onSave={save} />
+    </SettingsSection>
+  );
+}
+
 function SessionSection({ pointer }: { pointer: string }) {
   const { refresh } = useConfig();
   const { run, pending } = useAction();
@@ -313,7 +370,7 @@ export default function SettingsPage() {
   const { config, state } = useConfig();
   const pointer = config.team.pointer.name;
   return (
-    <PageFrame title="Settings" description="Limits, access and this deployment.">
+    <PageFrame title="Settings" description="Limits, access, the admin password and this deployment.">
       <VStack gap={8}>
         <LimitsSection saved={config.limits} runner={state.runner} />
         <Divider />
@@ -322,6 +379,8 @@ export default function SettingsPage() {
         <OrgNameSection saved={config.orgName} />
         <Divider />
         <DeploymentSection />
+        <Divider />
+        <PasswordSection />
         <Divider />
         <SessionSection pointer={pointer} />
       </VStack>

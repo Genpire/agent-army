@@ -50,6 +50,15 @@ export function verifyPassword(password: string, stored: string): boolean {
   return timingSafeEqual(actual, expected);
 }
 
+/**
+ * The key admin sessions are signed with: derived from the master key and the
+ * admin password's hash, so setting a new password (change or reset) signs
+ * out every session made with the old one.
+ */
+export function sessionKey(masterKey: Buffer, passwordHash: string | undefined): Buffer {
+  return createHmac("sha256", masterKey).update(`admin-session:${passwordHash ?? ""}`).digest();
+}
+
 /** Stateless admin session: "<expiryMs>.<hmac>". Works across instances. */
 export function signSession(key: Buffer, ttlMs: number, now = Date.now()): string {
   const exp = String(now + ttlMs);
