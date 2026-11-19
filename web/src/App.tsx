@@ -11,6 +11,7 @@ import {
   ArrowRightStartOnRectangleIcon,
   BoltIcon,
   ChartBarSquareIcon,
+  ChatBubbleLeftRightIcon,
   Cog6ToothIcon,
   CursorArrowRaysIcon,
   FolderIcon,
@@ -26,6 +27,7 @@ import { useAppState } from "./lib/state";
 import type { PublicConfig } from "./lib/types";
 import ActivityPage from "./pages/activity";
 import { LoginScreen, SetupScreen } from "./pages/auth";
+import ChatPage from "./pages/chat";
 import IntegrationsPage from "./pages/integrations";
 import MemoryPage from "./pages/memory";
 import OverviewPage from "./pages/overview";
@@ -35,6 +37,7 @@ import TeamPage from "./pages/team";
 
 const PAGE_COMPONENTS: Record<Page, ComponentType> = {
   overview: OverviewPage,
+  chat: ChatPage,
   team: TeamPage,
   integrations: IntegrationsPage,
   projects: ProjectsPage,
@@ -45,6 +48,7 @@ const PAGE_COMPONENTS: Record<Page, ComponentType> = {
 
 const NAV: { page: Page; label: string; icon: typeof Squares2X2Icon }[] = [
   { page: "overview", label: "Overview", icon: Squares2X2Icon },
+  { page: "chat", label: "Chat", icon: ChatBubbleLeftRightIcon },
   { page: "team", label: "Team", icon: UserGroupIcon },
   { page: "integrations", label: "Integrations", icon: PuzzlePieceIcon },
   { page: "projects", label: "Projects", icon: FolderIcon },

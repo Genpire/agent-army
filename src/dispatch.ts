@@ -1,7 +1,7 @@
 import type { WebClient } from "@slack/web-api";
 import { ATTACHMENT_LIMITS, type AttachmentRepo, type ThreadRef } from "./attachments.js";
 import { type Config, isChatReady } from "./config.js";
-import { connectionForRepo, describeAllowed, hasGitHub, isRepoAllowedAnywhere } from "./github-access.js";
+import { hasGitHub, isRepoAllowedAnywhere } from "./github-access.js";
 import {
   KeyedQueue,
   RecentSet,
@@ -35,15 +35,13 @@ import {
   userName,
 } from "./slack.js";
 import type { ThreadState } from "./tasks.js";
-import { startThreadTask } from "./thread-task.js";
+import { resolveTaskRepo, startThreadTask } from "./thread-task.js";
 import {
   type Command,
   helpText,
   messageText,
   normalizeSlackText,
   parseCommand,
-  repoFromToken,
-  resolveRepo,
 } from "./targeting.js";
 import { configSecrets, makeRedactor } from "./worker.js";
 import { describeTasks } from "./progress.js";
@@ -291,20 +289,10 @@ function repoTaskStarter(ctx: Ctx, thread: ThreadState | null): StartRepoTask {
   return async ({ repo, instruction }) => {
     try {
       const config = await deps.configRepo.load();
-      const named = repo?.trim() ? repoFromToken(repo.trim()) : undefined;
-      if (named === null) return { ok: false, error: `"${repo}" is not a repository. Use owner/repo.` };
-      const target = resolveRepo({ override: named, threadRepo: thread?.repo, channelRepo: config.bindings[e.channel] });
-      if (!target) return { ok: false, error: "No repository: ask the user which owner/repo to use." };
-      if (!hasGitHub(config)) {
-        return { ok: false, error: "GitHub is not connected. Ask the owner to connect it on the admin page." };
-      }
       // The worker uses the same rule to pick the connection (and its token) for the task.
-      if (!connectionForRepo(config, target)) {
-        return {
-          ok: false,
-          error: `Not allowed to work on ${target}. Allowed owners and repositories: ${describeAllowed(config)}.`,
-        };
-      }
+      const checked = resolveTaskRepo(config, { repo, threadRepo: thread?.repo, channelRepo: config.bindings[e.channel] });
+      if (!checked.ok) return checked;
+      const target = checked.repo;
       if (!instruction.trim()) return { ok: false, error: "Say what the team should do." };
 
       const threadTs = taskThreadTs(e);
@@ -443,4 +431,12 @@ const errorText = (err: unknown): string => (err instanceof Error ? err.message 
 /** Tests only: start from empty dedupe, thread, queue and concurrency state. */
 export function resetDispatchStateForTests(): void {
   state = freshState();
+}
+
+/**
+ * Runs one Pointer answer within the limit Slack answers use (six at once in
+ * this process), so the admin console's chat shares it instead of adding to it.
+ */
+export function withBrainSlot<T>(fn: () => Promise<T>): Promise<T> {
+  return state.brainSlots.run(fn);
 }

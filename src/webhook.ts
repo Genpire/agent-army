@@ -5,7 +5,8 @@ import { BOT_MARKER, WRITE_ASSOCIATIONS } from "./github.js";
 import { connectionForRepo } from "./github-access.js";
 import { KeyedQueue } from "./listen.js";
 import type { SlackDeps } from "./pointer-types.js";
-import type { PrThread, TaskRepo } from "./tasks.js";
+import type { WebThreads } from "./conversations.js";
+import { type PrThread, type TaskRepo, WEB_CHANNEL } from "./tasks.js";
 import { startThreadTask } from "./thread-task.js";
 import { configSecrets, makeRedactor } from "./worker.js";
 
@@ -197,7 +198,10 @@ export function reviewTrigger(event: string, payload: unknown, opts: { pointerNa
   };
 }
 
-export type WebhookDeps = Pick<SlackDeps, "configRepo" | "tasks" | "runner" | "slack">;
+export type WebhookDeps = Pick<SlackDeps, "configRepo" | "tasks" | "runner" | "slack"> & {
+  /** Console conversations, for pull requests opened from the admin console (no Slack there). */
+  web?: WebThreads;
+};
 
 // One delivery at a time per pull request, so two quick reviews cannot both start a task.
 let queue = new KeyedQueue();
@@ -228,6 +232,7 @@ async function followUp(event: string, d: Start, config: Config, deps: WebhookDe
   if (!connectionForRepo(config, d.repo)) return log(event, at, "ignored: repository not allowed");
   const ref = await deps.tasks.getPrThread(d.repo, d.prNumber);
   if (!ref) return log(event, at, "ignored: not a pull request the team opened");
+  if (ref.channel === WEB_CHANNEL) return webFollowUp(event, d, config, deps, ref);
   const botToken = config.slack.botToken;
   if (!botToken) return log(event, at, "ignored: Slack not connected");
   const slack = deps.slack(botToken);
@@ -264,6 +269,38 @@ async function followUp(event: string, d: Start, config: Config, deps: WebhookDe
     return log(event, at, `could not start a follow-up: ${started.error}`);
   }
   log(event, at, `started follow-up task ${started.taskId}`);
+}
+
+/**
+ * The same follow-up for a pull request opened from the admin console: the
+ * conversation gets Pointer's messages (Markdown) and the task; Slack is never
+ * called. The requester is the console's admin.
+ */
+async function webFollowUp(event: string, d: Start, config: Config, deps: WebhookDeps, ref: PrThread): Promise<void> {
+  const at = `${d.repo}#${d.prNumber}`;
+  if (!deps.web) return log(event, at, "ignored: console conversations are not available");
+  const prLink = `[PR #${d.prNumber}](${d.prUrl})`;
+  if ((await deps.tasks.activeInThread(ref.channel, ref.threadTs)).length > 0) {
+    const posted = await deps.web.post(
+      ref.threadTs,
+      `**${d.login}** reviewed ${prLink} while the team is still working. When this run ends, reply here (for example "address the review") and the team will pick it up.`,
+    );
+    return log(event, at, posted ? "noted in the console: a task is still running" : "ignored: the conversation was deleted");
+  }
+  const thread = await deps.tasks.getThread(ref.channel, ref.threadTs);
+  const repo = thread && thread.repo.toLowerCase() === d.repo.toLowerCase() ? thread.repo : d.repo;
+  const verb = d.kind === "changes_requested" ? "requested changes on" : d.kind === "commented" ? "commented on" : `asked ${config.team.pointer.name} on`;
+  const started = await deps.web.startTask(ref.threadTs, {
+    repo,
+    instruction: reviewInstruction(d),
+    ackText: `**${d.login}** ${verb} ${prLink}. The team is on it…`,
+    trigger: "review",
+  });
+  if (!started.ok) {
+    await deps.web.post(ref.threadTs, started.error).catch(() => undefined);
+    return log(event, at, `could not start a follow-up: ${started.error}`);
+  }
+  log(event, at, `started follow-up task ${started.taskId} (console)`);
 }
 
 /** The instruction the worker gets; it fetches every new piece of review feedback itself. */

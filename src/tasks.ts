@@ -4,6 +4,24 @@ import type { Store } from "./store.js";
 
 export type TaskStatus = "queued" | "running" | "done" | "failed";
 
+/** The channel of tasks started from the admin console: no Slack thread, everything is on the task record. */
+export const WEB_CHANNEL = "web";
+
+/** True for tasks started from the admin console (a chat conversation or a direct task), which run without Slack. */
+export const isWebTask = (task: Pick<Task, "channel">): boolean => task.channel === WEB_CHANNEL;
+
+/** The steps of a repo task, in order: the console shows them as a stepper. */
+export const TASK_PHASES = ["clone", "setup", "plan", "build", "verify", "publish", "checks"] as const;
+export type TaskPhase = (typeof TASK_PHASES)[number];
+
+/** What the team reported at the end of a run (the Slack result says the same). */
+export interface TaskReport {
+  title: string;
+  summary: string;
+  verification: string;
+  risks: string;
+}
+
 export interface Task {
   id: string;
   createdAt: string;
@@ -11,7 +29,7 @@ export interface Task {
   status: TaskStatus;
   repo: string;
   channel: string;
-  /** Slack thread the task lives in; follow-ups in the thread reuse the branch. */
+  /** Slack thread the task lives in (a conversation id for web tasks); follow-ups in the thread reuse the branch. */
   threadTs: string;
   /** The bot's own progress message, edited in place while the team works. */
   progressTs?: string;
@@ -26,12 +44,22 @@ export interface Task {
   error?: string;
   /** Live progress while the team works, saved by the worker; Pointer reads it for status questions. */
   progress?: ProgressSnapshot;
-  /** What started the task: a Slack request (default) or feedback on its pull request. */
-  trigger?: "slack" | "review";
+  /** What started the task: a Slack request (default), the admin console, or feedback on its pull request. */
+  trigger?: "slack" | "web" | "review";
   /** The pull request's checks after the last push (see ci.ts), when the task waited for them. */
   ci?: CiSummary;
-  /** Screenshots from browser checks posted in the thread. */
+  /** Screenshots from browser checks posted in the thread and kept in the store (see screenshots.ts). */
   screenshots?: number;
+  /** The team's report (title, summary, verification, risks), once it finished with one. */
+  report?: TaskReport;
+  /** Other lines of the result (checks that could not be fixed, screenshots that could not be posted), Markdown. */
+  notes?: string[];
+  /** Where the task is now, outside the team's own progress: cloning, setup, publishing, waiting for checks. */
+  stage?: { phase: TaskPhase; text: string; at: string };
+  /** The pull request is a draft that keeps unfinished work (the task stopped early). */
+  prDraft?: boolean;
+  /** The last round of fixing failing checks the team started. */
+  fixRound?: { round: number; rounds: number; failing: string[]; at: string };
 }
 
 /** Outcome of waiting for a pull request's checks. */

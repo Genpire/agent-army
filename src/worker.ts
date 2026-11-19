@@ -25,9 +25,11 @@ import { NOTES_MAX_CHARS, NotesRepo } from "./notes.js";
 import { formatFeedback } from "./pr-feedback.js";
 import { type PlanItem, ProgressTracker, formatProgress } from "./progress.js";
 import { findRepoSetup, repoSetupContext, runSetupCommand, setupEnv } from "./repo-setup.js";
+import { ScreenshotRepo } from "./screenshots.js";
 import { slackClient, slackErrorCode, toMrkdwn, truncate, uploadThreadFiles } from "./slack.js";
 import { createStore } from "./store.js";
-import { type Task, TaskRepo, type ThreadState, decodeTaskPayload } from "./tasks.js";
+import { TimelineRecorder, checkItems, plainLine } from "./task-events.js";
+import { type Task, type TaskPhase, type TaskReport, TaskRepo, type ThreadState, decodeTaskPayload, isWebTask } from "./tasks.js";
 import { type RepoAgentOptions, type Team, agentLabel, buildRepoAgents, repoAllowedTools } from "./team.js";
 
 const exec = promisify(execFile);
@@ -326,28 +328,43 @@ export function planChecklist(plan: PlanItem[]): string {
   return plan.map(line).join("\n");
 }
 
+/** Where a task was requested and reports: a Slack thread, or a conversation in the admin console. */
+export type TaskSurface = "slack" | "web";
+
 /** The last part of every pull request body the platform writes. */
-export function prFooter(taskId: string, pointerName: string): string {
-  return `---\nRequested in Slack · task \`${taskId}\` · built by ${pointerName} and the team. A human must review and merge.`;
+export function prFooter(taskId: string, pointerName: string, where: TaskSurface = "slack"): string {
+  const from = where === "web" ? "the admin console" : "Slack";
+  return `---\nRequested in ${from} · task \`${taskId}\` · built by ${pointerName} and the team. A human must review and merge.`;
 }
 
-/** Points reviewers to the screenshots posted in Slack, or "" when there are none. */
-export function screenshotsSection(count: number): string {
+/** Points reviewers to the screenshots posted in Slack (or kept in the admin console), or "" when there are none. */
+export function screenshotsSection(count: number, where: TaskSurface = "slack"): string {
   if (!count) return "";
-  return `### Screenshots\n${plural(count, "screenshot")} from the browser checks ${count === 1 ? "is" : "are"} in the Slack thread.`;
+  const place = where === "web" ? "the admin console, on this task in its conversation" : "the Slack thread";
+  return `### Screenshots\n${plural(count, "screenshot")} from the browser checks ${count === 1 ? "is" : "are"} in ${place}.`;
 }
 
-const CONTINUE_HINT = 'Reply in the Slack thread (for example "continue") to pick it up on this branch.';
+const continueHint = (where: TaskSurface) =>
+  where === "web"
+    ? 'Reply in its conversation in the admin console (for example "continue") to pick it up on this branch.'
+    : 'Reply in the Slack thread (for example "continue") to pick it up on this branch.';
 
 /** The body of the draft pull request that keeps a stopped task's work. */
-export function draftPrBody(o: { reason: string; plan: PlanItem[]; filesChanged: number; screenshots: number; footer: string }): string {
+export function draftPrBody(o: {
+  reason: string;
+  plan: PlanItem[];
+  filesChanged: number;
+  screenshots: number;
+  footer: string;
+  where?: TaskSurface;
+}): string {
   return [
     `**Stopped early:** ${o.reason}`,
     "The team did not finish this task; this draft keeps its work so far.",
     o.plan.length ? `### Plan\n${planChecklist(o.plan)}` : "",
     `${plural(o.filesChanged, "file")} changed.`,
-    CONTINUE_HINT,
-    screenshotsSection(o.screenshots),
+    continueHint(o.where ?? "slack"),
+    screenshotsSection(o.screenshots, o.where),
     o.footer,
   ]
     .filter(Boolean)
@@ -355,8 +372,34 @@ export function draftPrBody(o: { reason: string; plan: PlanItem[]; filesChanged:
 }
 
 /** Posted on an open pull request when a follow-up on it stopped early. */
-export function stoppedComment(reason: string, plan: PlanItem[]): string {
-  return [`**Stopped early:** ${reason}`, plan.length ? planChecklist(plan) : "", CONTINUE_HINT].filter(Boolean).join("\n\n");
+export function stoppedComment(reason: string, plan: PlanItem[], where: TaskSurface = "slack"): string {
+  return [`**Stopped early:** ${reason}`, plan.length ? planChecklist(plan) : "", continueHint(where)].filter(Boolean).join("\n\n");
+}
+
+/**
+ * Why the worker cannot run this task, or undefined when it can: Claude is
+ * always needed; Slack only for tasks that report in a Slack thread (console
+ * tasks keep everything on the task record).
+ */
+export function onboardingError(task: Pick<Task, "channel">, config: Pick<Config, "anthropic" | "slack">): string | undefined {
+  if (!config.anthropic.apiKey) return isWebTask(task) ? "Onboarding is incomplete (Claude missing)." : "Onboarding is incomplete (Claude or Slack missing).";
+  if (!isWebTask(task) && !config.slack.botToken) return "Onboarding is incomplete (Claude or Slack missing).";
+  return undefined;
+}
+
+/** The team's report as kept on the task (redacted): what the Slack result says, for the console. */
+export function taskReport(report: Pick<Report, "title" | "summary" | "verification" | "risks">, redact: (text: string) => string = (t) => t): TaskReport {
+  return { title: redact(report.title), summary: redact(report.summary), verification: redact(report.verification), risks: redact(report.risks) };
+}
+
+/**
+ * Screenshots not handled yet, by content: a later one saved under the same
+ * name is new. Marks the returned ones as handled in `seen`.
+ */
+export function newScreenshots(shots: Screenshot[], seen: Set<string>): Screenshot[] {
+  const fresh = shots.filter((s) => !seen.has(screenshotKey(s)));
+  for (const s of fresh) seen.add(screenshotKey(s));
+  return fresh;
 }
 
 /** The Slack result when a stopped task's work was saved in a pull request. */
@@ -404,9 +447,13 @@ export function taskPrompt(o: {
   stopped?: ThreadState["stopped"];
   /** formatFeedback's section, or "". */
   feedback?: string;
+  /** Where the request was made; "slack" when omitted. */
+  where?: TaskSurface;
 }): string {
+  const from =
+    o.trigger === "review" ? `GitHub (user ${o.userId})` : o.where === "web" ? "the admin console (the owner)" : `Slack (user ${o.userId})`;
   const lines = [
-    `Request from ${o.trigger === "review" ? "GitHub" : "Slack"} (user ${o.userId}):`,
+    `Request from ${from}:`,
     o.instruction,
     "",
     `Repository: ${o.repo}. Base branch: ${o.base}. You are on branch: ${o.branch}.`,
@@ -535,17 +582,31 @@ async function main(): Promise<void> {
   const task = await tasks.get(taskId);
   if (!task) throw new Error(`Task ${taskId} not found`);
 
-  const { apiKey } = config.anthropic;
-  const { botToken } = config.slack;
-  if (!apiKey || !botToken) throw new Error("Onboarding is incomplete (Claude or Slack missing).");
+  const notReady = onboardingError(task, config);
+  if (notReady) throw new Error(notReady);
+  const apiKey = config.anthropic.apiKey!;
+  // Console tasks run without Slack: everything the Slack messages would say is kept on the task record.
+  const web = isWebTask(task);
+  const where: TaskSurface = web ? "web" : "slack";
+  const botToken = config.slack.botToken;
+  const slack = !web && botToken ? slackClient(botToken) : undefined;
 
   const pointerName = config.team.pointer.name;
-  const slack = slackClient(botToken);
   // Every credential, including every GitHub connection's token, not only this task's.
   const redact = makeRedactor(configSecrets(config));
+  // The fuller timeline the admin console shows (Slack and console tasks alike).
+  const timeline = new TimelineRecorder(store, task.id, { redact });
+  const screenshotStore = new ScreenshotRepo(store, masterKey);
+  /** Moves the timeline to a step and keeps where the task is on its record. Never throws. */
+  const stage = async (phase: TaskPhase, text: string) => {
+    timeline.enter(phase, text);
+    task.stage = { phase, text: plainLine(redact(text), 200), at: new Date().toISOString() };
+    await tasks.save(task).catch((err: unknown) => console.error("[worker] stage not saved:", redact(String(err))));
+  };
 
   let lastProgress = 0;
   const progress = async (text: string, force = false) => {
+    if (!slack) return;
     if (!force && Date.now() - lastProgress < 4000) return;
     lastProgress = Date.now();
     const body = { channel: task.channel, text: truncate(text) };
@@ -563,6 +624,7 @@ async function main(): Promise<void> {
   // Everything (the team's runs, waiting for checks, fix rounds) ends before the job's own limit.
   const deadline = jobDeadline(workerStart, process.env.JOB_TIMEOUT_MIN);
   const finish = async (text: string, outcome: string) => {
+    if (!slack) return;
     const minutes = Math.max(1, Math.round((Date.now() - workerStart) / 60_000));
     await progress(`${outcome} after ${minutes} min. The result is below.`, true);
     try {
@@ -579,6 +641,7 @@ async function main(): Promise<void> {
     task.status = "failed";
     task.error = access.error;
     await tasks.save(task);
+    await timeline.close(false, access.error);
     await progress(`:x: <@${task.userId}> ${access.error}`, true);
     process.exitCode = 1;
     return;
@@ -618,6 +681,7 @@ async function main(): Promise<void> {
 
   try {
     // ---------- 1. Check out the project ----------
+    await stage("clone", `Cloning ${task.repo}`);
     await progress(`:package: Cloning \`${task.repo}\`…`, true);
     const base = await github.defaultBranch(task.repo);
     await git(["clone", "--depth", "50", "--no-tags", `https://github.com/${task.repo}.git`, repoDir], {
@@ -650,6 +714,7 @@ async function main(): Promise<void> {
     const startSha = await git(["rev-parse", "HEAD"]);
     task.branch = branch;
     await tasks.save(task);
+    timeline.add({ kind: "note", text: resumed ? `Continuing on branch ${branch} (base ${base})` : `New branch ${branch} off ${base}` });
 
     // ---------- 2. Prepare: the owner's setup, shared files, the browser, review feedback ----------
     const setup = findRepoSetup(config, task.repo);
@@ -668,10 +733,23 @@ async function main(): Promise<void> {
     let setupResult: SetupResult | undefined;
     const setupCommand = setup?.setupCommand.trim();
     if (setupCommand) {
+      await stage("setup", "Running the repo's setup command");
       await progress(":wrench: Running the repo's setup command…", true);
       // Never throws; a failed setup is reported to the team, which decides what to do about it.
       setupResult = await runSetupCommand(setupCommand, { cwd: repoDir, env: agentEnv, redact });
       console.log(`[worker] setup command ${setupResult.ok ? "succeeded" : "failed"} after ${setupResult.seconds}s`);
+      const lastLine = setupResult.outputTail.trim().split("\n").at(-1) ?? "";
+      timeline.add(
+        {
+          kind: "setup",
+          text: setupResult.ok ? `Setup command succeeded: ${setupCommand}` : `Setup command failed: ${setupCommand}${lastLine ? ` — ${lastLine}` : ""}`,
+          ok: setupResult.ok,
+          ms: setupResult.seconds * 1000,
+        },
+        true,
+      );
+    } else {
+      timeline.skip("setup", "No setup command for this repository");
     }
 
     const dataDir = process.env.DATA_DIR ? resolve(process.env.DATA_DIR) : "";
@@ -723,9 +801,13 @@ async function main(): Promise<void> {
       attachments: attachments.length,
       stopped: prior?.stopped,
       feedback,
+      where,
     });
 
     const sharedNote = attachments.length ? ` and ${attachments.length} shared file${attachments.length === 1 ? "" : "s"}` : "";
+    await stage("plan", `${pointerName} is reading ${task.repo}${sharedNote} and planning`);
+    if (feedback) timeline.add({ kind: "note", text: "Read the new review feedback on the pull request" });
+    if (browser) timeline.add({ kind: "note", text: "The team has a headless browser for checks" });
     await progress(`:compass: ${pointerName} is reading \`${task.repo}\`${sharedNote} and planning…`, true);
 
     // What earlier tasks learned about this repo. Unreadable notes are skipped, not fatal.
@@ -781,6 +863,7 @@ async function main(): Promise<void> {
         lead: pointerName,
         label: (type) => subagentLabel(config.team, type),
         repoDir,
+        onEvent: (e) => timeline.tracker(e),
       });
       if (opts.phaseLabel) tracker.setPhase(opts.phaseLabel);
       let lastSaved = 0;
@@ -796,6 +879,8 @@ async function main(): Promise<void> {
           .then(async () => {
             tracker.setFiles(await changedFiles(opts.since).catch(() => []));
             await saveProgress(true);
+            // Console tasks: the saved progress is the update.
+            if (!slack) return;
             await slack.chat.postMessage({
               channel: task.channel,
               thread_ts: task.threadTs,
@@ -804,7 +889,9 @@ async function main(): Promise<void> {
           })
           .catch((err: unknown) => console.error("[worker] progress update failed:", redact(String(err))));
       };
-      const updateTimer = everyMin > 0 ? setInterval(postUpdate, everyMin * 60_000) : undefined;
+      // Console tasks refresh the saved progress (files changed) every minute; Slack gets an update every `everyMin`.
+      const updateMs = web ? 60_000 : everyMin * 60_000;
+      const updateTimer = updateMs > 0 ? setInterval(postUpdate, updateMs) : undefined;
 
       let report: Report | undefined;
       let failure: string | undefined;
@@ -877,10 +964,32 @@ async function main(): Promise<void> {
       for (;;) {
         const waitMs = Math.min(ciWaitMin * 60_000, deadline === undefined ? Infinity : deadline - Date.now());
         if (waitMs < 60_000) return last && { outcome: last, note: "No time was left to wait for the checks after the last fix." };
+        await stage("checks", "Waiting for the pull request's checks");
         await progress(":hourglass_flowing_sand: Waiting for the pull request's checks…", true);
         const sha = await git(["rev-parse", "HEAD"]);
-        const wait = await waitForChecks(github, task.repo, sha, { waitMs });
+        const waitStart = Date.now();
+        // Each poll's checks go to the timeline, so the console lists them live.
+        const watched = {
+          checksFor: async (repo: string, ref: string) => {
+            const data = await github.checksFor(repo, ref);
+            timeline.checks(checkItems(data));
+            return data;
+          },
+        };
+        const wait = await waitForChecks(watched, task.repo, sha, { waitMs });
         last = ciSummary(wait, fixRounds);
+        timeline.add(
+          {
+            kind: "checks",
+            text: plainLine(ciSummaryLine(last, ciWaitMin).replace(/\*/g, "")) || "The repository has no checks",
+            ok: last.state === "passed" || last.state === "none",
+            ms: Date.now() - waitStart,
+          },
+          true,
+        );
+        // Kept as it goes, so the console and Pointer see the checks before the task ends.
+        const stored = storedCiSummary(last);
+        if (stored) task.ci = stored;
         if (wait.state !== "failed" || fixRounds >= rounds) return { outcome: last };
 
         const budgetUsd = maxBudgetUsd - (task.costUsd ?? 0);
@@ -890,6 +999,9 @@ async function main(): Promise<void> {
 
         fixRounds += 1;
         const round = `round ${fixRounds} of ${rounds}`;
+        task.fixRound = { round: fixRounds, rounds, failing: last.names.slice(0, 20), at: new Date().toISOString() };
+        timeline.add({ kind: "fix-round", text: `Checks failed (${last.names.join(", ")}): fixing them (${round})` }, true);
+        await stage("checks", `Fixing the failing checks (${round})`);
         await progress(`:wrench: Checks failed (${truncate(last.names.join(", "), 200)}): the team is fixing them (${round})…`, true);
         const details = await ciFailureDetails(github, task.repo, wait, redact);
         const notesBefore = await loadNotes();
@@ -911,7 +1023,8 @@ async function main(): Promise<void> {
         // An unfinished or blocked fix is not pushed: the pull request keeps its last complete state.
         if (!run.report || run.failure) return { outcome: last, note: `Fixing the checks stopped early: ${run.failure}` };
         if (run.report.kind === "blocked") {
-          return { outcome: last, note: `*Checks blocked: ${run.report.title}* ${toMrkdwn(truncate(run.report.summary, 800))}` };
+          // Markdown; the Slack result converts it.
+          return { outcome: last, note: `**Checks blocked: ${run.report.title}** ${truncate(run.report.summary, 800)}` };
         }
         await git(["add", "-A"]);
         if ((await git(["status", "--porcelain"])) !== "") await git(["commit", "-m", `Fix failing checks: ${run.report.title}`]);
@@ -920,6 +1033,7 @@ async function main(): Promise<void> {
         }
         await progress(":rocket: Pushing the fix…", true);
         await push();
+        timeline.add({ kind: "push", text: `Pushed the fix (round ${fixRounds}): ${run.report.title}` }, true);
         await github
           .commentOnPr(task.repo, pr.number, redact(fixComment(fixRounds, run.report)))
           .catch((err: unknown) => console.error(`[worker] fix comment not posted: ${redact(errorText(err))}`));
@@ -938,6 +1052,8 @@ async function main(): Promise<void> {
     task.costUsd = first.costUsd;
     task.turns = first.turns;
     const { report, failure } = first;
+    // What the Slack result says, kept on the task for the console (and Pointer).
+    if (report) task.report = taskReport(report, redact);
 
     // Saved before publishing so a failed push doesn't lose what the team learned (blocked reports too).
     if (report) await saveProjectNotes(notes, task.repo, projectNotes, report.projectNotes, redact);
@@ -948,12 +1064,26 @@ async function main(): Promise<void> {
     if (dirty) await git(["commit", "-m", failure || !report ? `Work in progress (stopped early): ${failure}` : report.title]);
     const ahead = Number(await git(["rev-list", "--count", `${startSha}..HEAD`]));
 
-    // Screenshots go up first, so the pull request can point to them.
+    // Screenshots go up first, so the pull request can point to them: into the store
+    // (the console shows them, for every task) and, for Slack tasks, into the thread.
+    const seenShots = new Set<string>();
     const posted = new Set<string>();
+    let storedShots = 0;
     const resultNotes: string[] = [];
     const postScreenshots = async (comment: (count: number) => string) => {
-      const shots = (await collectScreenshots(shotsDir)).filter((s) => !posted.has(screenshotKey(s)));
+      const shots = newScreenshots(await collectScreenshots(shotsDir), seenShots);
       if (!shots.length) return;
+      try {
+        const stored = await screenshotStore.add(task.id, shots);
+        storedShots += stored.length;
+        task.screenshots = Math.max(task.screenshots ?? 0, storedShots);
+        if (stored.length) {
+          timeline.add({ kind: "screenshot", text: `${plural(stored.length, "screenshot")} saved: ${stored.map((s) => s.name).join(", ")}` }, true);
+        }
+      } catch (err) {
+        console.error(`[worker] screenshots not stored: ${redact(errorText(err))}`);
+      }
+      if (!slack) return;
       try {
         await uploadThreadFiles(slack, {
           channel: task.channel,
@@ -962,7 +1092,7 @@ async function main(): Promise<void> {
           files: shots.map((s) => ({ filename: s.name, data: s.bytes })),
         });
         for (const s of shots) posted.add(screenshotKey(s));
-        task.screenshots = posted.size;
+        task.screenshots = Math.max(task.screenshots ?? 0, posted.size);
       } catch (err) {
         const code = slackErrorCode(err);
         console.error(`[worker] screenshots not posted: ${redact(code ?? errorText(err))}`);
@@ -971,9 +1101,11 @@ async function main(): Promise<void> {
       }
     };
     await postScreenshots((n) => `:camera: ${plural(n, "screenshot")} from the browser checks.`);
+    // What the pull request points reviewers to: the thread's screenshots, or the console's.
+    const shotsForPr = () => (slack ? posted.size : storedShots);
 
     const cost = () => (task.costUsd !== undefined ? ` · ~$${task.costUsd.toFixed(2)}` : "");
-    const footer = prFooter(task.id, pointerName);
+    const footer = prFooter(task.id, pointerName, where);
     // Never fails the task: the pull request is already there.
     const saveThreadState = async (state: ThreadState | null) => {
       if (!state) return;
@@ -999,27 +1131,34 @@ async function main(): Promise<void> {
       const reason = failure ?? "The team finished without a report.";
       let saved: PrRef | undefined;
       let pushed = false;
+      timeline.add({ kind: "error", text: `Stopped early: ${reason}` }, true);
+      // Where the team stopped; saving its work in a draft afterwards is not the failure.
+      const stoppedIn = timeline.phase;
       if (ahead > 0) {
         try {
+          await stage("publish", "Saving the unfinished work in a draft pull request");
           await progress(":rocket: Saving the unfinished work in a draft pull request…", true);
           await push();
           pushed = true;
+          timeline.add({ kind: "push", text: `Pushed branch ${branch}` });
           const existing = await github.findOpenPr(task.repo, branch);
           if (existing) {
-            await github.commentOnPr(task.repo, existing.number, redact(stoppedComment(reason, first.plan)));
+            await github.commentOnPr(task.repo, existing.number, redact(stoppedComment(reason, first.plan, where)));
             saved = existing;
           } else {
             const filesChanged = (await git(["diff", "--name-only", startSha, "HEAD"])).split("\n").filter(Boolean).length;
             saved = await github.createPr(task.repo, {
               title: redact(wipTitle(task.instruction)),
-              body: redact(draftPrBody({ reason, plan: first.plan, filesChanged, screenshots: posted.size, footer })),
+              body: redact(draftPrBody({ reason, plan: first.plan, filesChanged, screenshots: shotsForPr(), footer, where })),
               head: branch,
               base,
               draft: true,
             });
           }
+          timeline.add({ kind: "pr", text: `${saved.draft ? "Draft pull request" : "Pull request"} #${saved.number} keeps the unfinished work`, url: saved.html_url }, true);
         } catch (err) {
           console.error(`[worker] unfinished work not published: ${redact(errorText(err))}`);
+          timeline.add({ kind: "error", text: `The unfinished work was not published: ${redact(errorText(err))}` });
           saved = undefined;
         }
       }
@@ -1028,6 +1167,7 @@ async function main(): Promise<void> {
       task.error = reason;
       if (saved) {
         task.prUrl = saved.html_url;
+        task.prDraft = Boolean(saved.draft);
         await saveThreadState(nextThreadState(saved, { reason, at: new Date().toISOString() }));
         const text = stoppedSlackText({ userId: task.userId, reason, pr: saved, cost: cost() });
         await finish([text, ...resultNotes].join("\n\n"), ":warning: Stopped");
@@ -1038,22 +1178,27 @@ async function main(): Promise<void> {
           : pushed
             ? ` The unfinished work is on branch \`${branch}\`, but no pull request could be opened.`
             : " Partial work was not published.";
+        if (partial) task.notes = [partial.trim()];
         await finish([`:x: <@${task.userId}> ${reason}${partial}${cost()}`, ...resultNotes].join("\n\n"), ":x: Stopped");
       }
+      task.notes = [...(task.notes ?? []), ...resultNotes];
+      await timeline.close(false, saved ? `Stopped: ${reason} The work so far is in pull request #${saved.number}.` : `Stopped: ${reason}`, stoppedIn);
     } else {
       const publish = ahead > 0 && report.kind !== "blocked";
       let pr: PrRef | undefined;
       let ci: { outcome: CiOutcome; note?: string } | undefined;
 
       if (publish) {
+        await stage("publish", "Publishing the branch and opening the pull request");
         await progress(":rocket: Publishing the branch and opening the pull request…", true);
         await push();
+        timeline.add({ kind: "push", text: `Pushed branch ${branch}` });
         const prBody = redact(
           [
             report.summary,
             report.verification && `### Verification\n${report.verification}`,
             report.risks && `### Risks and follow-ups\n${report.risks}`,
-            screenshotsSection(posted.size),
+            screenshotsSection(shotsForPr(), where),
             footer,
           ]
             .filter(Boolean)
@@ -1074,9 +1219,14 @@ async function main(): Promise<void> {
         } else {
           pr = await github.createPr(task.repo, { title: redact(report.title), body: prBody, head: branch, base });
         }
-        // Saved now, not at the end: waiting for the checks can take a while.
+        timeline.add({ kind: "pr", text: `${existing ? "Updated" : "Opened"} pull request #${pr.number}: ${report.title}`, url: pr.html_url }, true);
+        // Saved now, not at the end: waiting for the checks can take a while (the console shows the link meanwhile).
         await saveThreadState(nextThreadState(pr));
+        task.prUrl = pr.html_url;
+        task.prDraft = false;
+        await tasks.save(task).catch((err: unknown) => console.error("[worker] task not saved:", redact(String(err))));
 
+        if (config.limits.ciWaitMin <= 0) timeline.skip("checks", "Waiting for checks is turned off");
         if (config.limits.ciWaitMin > 0) {
           try {
             ci = await followChecks(pr);
@@ -1100,6 +1250,15 @@ async function main(): Promise<void> {
       task.prUrl = publish ? pr?.html_url : undefined;
       const storedCi = ci && storedCiSummary(ci.outcome);
       if (storedCi) task.ci = storedCi;
+      // Markdown for the console (the Slack text below converts the same notes).
+      task.notes = [ci?.note, ...resultNotes].filter((n): n is string => Boolean(n)).map((n) => redact(n));
+      const endText =
+        report.kind === "blocked"
+          ? `Blocked: ${report.title}`
+          : publish
+            ? `Done: ${report.title}${ci ? CHECKS_OUTCOME[ci.outcome.state] : ""}`
+            : `Answered: ${report.title}`;
+      await timeline.close(report.kind !== "blocked", endText);
       const head =
         report.kind === "blocked"
           ? `:warning: <@${task.userId}> *Blocked: ${report.title}*`
@@ -1112,7 +1271,7 @@ async function main(): Promise<void> {
         report.verification && `*Verification:* ${toMrkdwn(report.verification)}`,
         report.risks && `*Risks:* ${toMrkdwn(report.risks)}`,
         ci && ciSummaryLine(ci.outcome, config.limits.ciWaitMin),
-        ci?.note,
+        ci?.note && toMrkdwn(ci.note),
         ...resultNotes,
         `_${task.repo} · \`${branch}\`${cost()}_`,
       ];
@@ -1128,6 +1287,7 @@ async function main(): Promise<void> {
     task.status = "failed";
     task.error = messageText;
     await tasks.save(task);
+    await timeline.close(false, `The task failed: ${messageText}`);
     await finish(`:x: <@${task.userId}> The task failed: ${truncate(messageText, 600)}`, ":x: Failed");
     process.exitCode = 1;
   } finally {

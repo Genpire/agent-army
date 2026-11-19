@@ -9,11 +9,12 @@ A self-hosted Slack assistant, **Pointer**, with a team of Claude agents that an
 - **Pointer:** talk to it in a DM, in channels you mark as Pointer channels, or in any thread it is part of. It answers questions, researches the web, reads GitHub and the files you share (designs, code, screenshots, PDFs, zips), remembers facts you give it, opens and updates monday.com tickets (optional), and hands work to its team. Built on the Claude Agent SDK.
 - **The team:** agents you list, name, edit and create on the admin page, for any role: engineering (Coder, Reviewer, QA) or not (Researcher, Writer). Pointer picks the agent whose description fits the job.
 - **Code changes:** any change to a repo runs as a task in its own isolated worker: clone, Pointer and the team work on a branch, then the platform opens a pull request, waits for its CI checks and has the team fix failing ones. Agents can check UI changes in a headless browser and post screenshots in Slack. With the GitHub webhook set up, review comments on the pull request start a follow-up. Each agent learns the project from the repo itself (CLAUDE.md, README, scripts, CI) and from the team's **project notes**, which every task reads at the start and updates at the end.
+- **Admin console chat:** talk to Pointer and start repo tasks from the admin page too, with Pointer's steps and the team's work shown live (see [Using it from the admin console](#using-it-from-the-admin-console)).
 - **Standalone:** deploy the container, open the URL, and the onboarding page walks you through connecting Claude, Slack and GitHub. Nothing is hard-coded to one company; to use it elsewhere, deploy it again there.
 - **Humans stay in charge:** agents only ever open pull requests. They cannot push to protected branches or merge.
 
 ```
-Slack (DM, Pointer channel, thread, @mention)
+Slack (DM, Pointer channel, thread, @mention)  ·  admin console (Chat page)
    │
    ▼
 web service: Pointer ─── web search · GitHub (read) · memory · project notes · monday.com · team agents
@@ -23,9 +24,9 @@ one isolated worker per task
    ├─ clone repo, new branch, run the repo's setup command
    ├─ read project notes, Pointer ⇄ the team (Coder, Reviewer, QA, …), headless browser for UI checks
    ├─ push branch, open PR (a draft if the task stopped early), wait for CI, fix failing checks
-   └─ update project notes, report in thread with screenshots
+   └─ update project notes, report in thread (or the console) with screenshots
 
-GitHub: review or /pointer comment on the team's PR ──webhook──► follow-up task in the same thread
+GitHub: review or /pointer comment on the team's PR ──webhook──► follow-up task in the same thread or conversation
 ```
 
 ## Quick start
@@ -107,6 +108,16 @@ Pointer can hold several GitHub tokens: the primary one on the **GitHub** card, 
 - **When to add one:** for a repository outside your organisation, for example a private repo on someone's personal account. GitHub's fine-grained tokens only cover one owner, so a token made for your organisation cannot reach it. Add a token that can: a fine-grained token created by the repo's owner (same permissions as above, limited to that repo), or a classic token with the `repo` scope. Then limit the connection to the exact repo (`someone/some-repo`); a classic token reaches everything its user can, so the allow list is what keeps Pointer to that one repo.
 - **Checks:** a new token is verified with GitHub, and each exact repo in its allow list must be reachable with it ("This token cannot reach someone/some-repo." otherwise). Editing a connection's allow list checks its exact repos the same way. Owner entries are not checked.
 - The page shows each connection's GitHub user, the last four characters of its token and its allow list, which you can edit in place. Removing one takes two clicks.
+
+## Using it from the admin console
+
+The **Chat** page (second in the admin page's menu, `#/chat/<conversation>`) is a second way to talk to Pointer, next to Slack. Only the signed-in admin uses it, and Slack is not needed for it: Claude is enough to chat, and GitHub to start repo tasks.
+
+- **Conversations.** Start one with a message; Pointer answers with the same brain, tools and team as in Slack (web search, GitHub, memory, project notes, monday.com, repo tasks) and within the same limit of answers at once. The list keeps your conversations, newest first; deleting one takes two clicks. A new message waits until Pointer has answered the last one.
+- **Live while Pointer answers.** The reply appears as it is written, with each step Pointer takes ("Searching the web for …", "Reading acme/web: src/app.tsx", "Asking Rita (Researcher)…", "Starting a repo task on acme/web"). The finished reply keeps its steps ("Used 5 tools") and its cost.
+- **Repo tasks.** Ask for a change in the chat and Pointer starts a repo task, or use **New repo task** to start one directly (a repository and an instruction; same checks as Slack: GitHub connected, allow lists). Each task appears as a card in the conversation: its status, what the team is doing now, the plan, the pull request, the checks, the cost and the screenshots from browser checks. Open it for the full timeline: the steps (clone, setup, plan, build, verify, publish, checks), each agent's work and how long it took, files changed, commands run, each CI check's state, and the screenshots full size.
+- **No Slack thread.** A task started from the console has no Slack thread: its progress, result (summary, verification, risks, checks), screenshots and milestones (pull request opened, checks failing and being fixed, done, stopped with a draft) are in the conversation and on the pull request. Reply in the conversation (for example `continue`, or "how is it going?") and Pointer follows up on the same branch, as in a Slack thread. Reviews and `/pointer` comments on its pull request start follow-ups in the conversation (with the GitHub webhook set up).
+- **Screenshots** from browser checks are kept for every task, Slack ones included, encrypted in the store, so the console shows them for any task.
 
 ## Using it from Slack
 
@@ -392,7 +403,16 @@ Besides the admin API, the service takes `POST /slack/events` from Slack and `PO
 | `GET /api/notes` | | `{ notes: [{ repo, updatedAt, chars }], max }`, newest first; `max` is 8 000. |
 | `GET /api/notes/:owner/:repo` | | `{ repo, text, updatedAt }`, or `404` when the repo has no notes. |
 | `POST /api/notes` | `{ repo, text }` | Replaces the repo's notes; empty text deletes them. `400` for a bad repo name or text over the limit. |
-| `GET /api/tasks` | | `{ tasks }`: the 30 most recent repo tasks; a running task carries `progress` (`now`, `plan`, `agents`, `recent`, `files`, `filesCount`, `startedAt`, `updatedAt`). A task may also have `trigger` (`slack` or `review`), `ci` (`{ state, fixRounds, names, total }`, state `passed`, `failed`, `pending` or `none`) and `screenshots` (how many were posted). |
+| `GET /api/tasks` | | `{ tasks }`: the 30 most recent repo tasks; a running task carries `progress` (`now`, `plan`, `agents`, `recent`, `files`, `filesCount`, `startedAt`, `updatedAt`) and `stage` (`{ phase, text, at }`: cloning, setup, publishing, waiting for checks). A task may also have `channel` `web` (started from the console; `threadTs` is its conversation), `trigger` (`slack`, `web` or `review`), `report` (`{ title, summary, verification, risks }`), `notes` (other result lines), `ci` (`{ state, fixRounds, names, total }`, state `passed`, `failed`, `pending` or `none`), `fixRound` (`{ round, rounds, failing, at }`), `prDraft` and `screenshots` (how many were kept). |
+| `POST /api/tasks` | `{ repo, instruction }` | Starts a repo task directly (no Pointer reply) in a new conversation whose first message is the instruction (up to 8 000 characters). Same checks as Slack (GitHub connected, allow lists: `400`). `202` with `{ conversationId, taskId }`; `502` with `{ error, conversationId }` when the worker could not start. |
+| `GET /api/tasks/:id/events` | | `{ timeline }`: the task's steps (`phases`: `clone`, `setup`, `plan`, `build`, `verify`, `publish`, `checks`, each `pending`, `active`, `done`, `skipped` or `failed`, with times), its last 300 events (`{ at, phase, kind, text, agent?, ms?, ok?, url? }`; kinds such as `phase`, `setup`, `agent-start`, `agent-done`, `edit`, `command`, `browser`, `screenshot`, `push`, `pr`, `checks`, `fix-round`, `end`), `dropped` (older events left out) and `checks` (`[{ name, state, url? }]`). `null` for tasks without one. Slack and console tasks alike. |
+| `GET /api/tasks/:id/screenshots` | | `{ screenshots: [{ name, size }] }`: the screenshots from the task's browser checks. |
+| `GET /api/tasks/:id/screenshots/:name` | | The image (`image/png`, `image/jpeg` or `image/webp`, `Cache-Control: private`). Names are checked (`400`); `404` when unknown. |
+| `GET /api/conversations` | | `{ conversations: [{ id, title, updatedAt, pending, messageCount, taskCount }] }`, newest activity first. |
+| `POST /api/conversations` | `{ text }` | Starts a conversation (titled by the first line) with its first message, up to 8 000 characters; Pointer answers in the background. `202` with `{ conversation }`. |
+| `GET /api/conversations/:id` | | `{ conversation, tasks, live? }`. `conversation`: `{ id, title, createdAt, updatedAt, pending, taskIds, messages: [{ id, role: "user" \| "pointer", text, at, costUsd?, isError?, activity?, tasks?, result? }] }` (Markdown text; `activity` is Pointer's steps, `tasks` the repo tasks started with that message, `result` marks a task milestone `{ taskId, milestone: "pr" \| "checks" \| "end" }`). `tasks`: its repo tasks, newest first, with progress. `live` while Pointer answers: `{ messageId, startedAt, text, activity, tasks }`. |
+| `POST /api/conversations/:id/messages` | `{ text }` | Sends a message (up to 8 000 characters); `409` while Pointer is still answering. `202` with `{ conversation }`. |
+| `POST /api/conversations/:id/delete` | | Deletes the conversation (`404` if unknown). Its repo tasks keep running. |
 | `GET /api/usage` | | Claude spend this calendar month (UTC): `{ month, chat: { usd, count }, tasks: { usd, count }, totalUsd, topTasks: [{ id, repo, instruction, costUsd, createdAt }] }`. Chat is tallied from each reply's reported cost; tasks from their records. The Activity card and Slack's `status` show it. |
 
 ## Development
@@ -427,6 +447,8 @@ Layout:
 - `src/repo-setup.ts`: a repo's setup command and variables; `src/ci.ts`: waiting for and fixing the pull request's checks; `src/pr-feedback.ts`: review feedback for the team.
 - `src/browser.ts` + `src/browser-mcp.ts`: the headless browser (Playwright MCP) and screenshots.
 - `src/webhook.ts` + `src/thread-task.ts`: the GitHub webhook and follow-up tasks in a thread.
+- `src/conversations.ts`: the admin console's chat (conversations, Pointer's answers and live activity, task milestones); `src/pointer-activity.ts`: Pointer's steps in words.
+- `src/task-events.ts`: a repo task's timeline (steps and events); `src/screenshots.ts`: encrypted screenshots from browser checks.
 - `src/agents.ts`: the repo-task prompt and report.
 - `src/guard.ts`: shell guard.
 - `src/config.ts` + `src/store.ts`: encrypted config, storage.
