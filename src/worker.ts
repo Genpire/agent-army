@@ -266,7 +266,11 @@ export function configSecrets(c: Config): (string | undefined)[] {
     const header = new GitHub(token).gitAuthHeader();
     return [token, header, header.split(" ").pop()];
   });
-  const repoEnv = Object.values(c.repoSetup).flatMap((setup) => Object.values(setup.env));
+  // Repo variables are redacted unless they are plainly not secret (a word like "development", a port):
+  // hiding those would garble every Slack message and PR text that happens to contain the word.
+  const repoEnv = Object.values(c.repoSetup)
+    .flatMap((setup) => Object.values(setup.env))
+    .filter((value) => !/^(?:[A-Za-z]+|\d+)$/.test(value.trim()));
   return [c.anthropic.apiKey, c.slack.botToken, c.slack.signingSecret, c.monday.token, c.github.webhookSecret, ...github, ...repoEnv];
 }
 
@@ -438,6 +442,12 @@ export function jobDeadline(workerStart: number, jobTimeoutMin: string | undefin
   return Number.isFinite(minutes) && minutes > 0 ? workerStart + minutes * 60_000 - JOB_MARGIN_MS : undefined;
 }
 
+/** TASK_TIMEOUT_MIN as a positive number of minutes; unset, empty or invalid means the default of 50. */
+export function taskTimeoutMin(value: string | undefined): number {
+  const minutes = Number(value);
+  return value?.trim() && Number.isFinite(minutes) && minutes > 0 ? minutes : 50;
+}
+
 /** How long the first team run may take: TASK_TIMEOUT_MIN, capped by the deadline (at least a minute). */
 export function firstRunTimeoutMs(taskTimeoutMin: number, deadline: number | undefined, now: number): number {
   const own = taskTimeoutMin * 60_000;
@@ -603,7 +613,7 @@ async function main(): Promise<void> {
 
   // The first run of the team (with the checkout and setup before it) stops at TASK_TIMEOUT_MIN, or earlier at the deadline.
   const abort = new AbortController();
-  const firstRunMs = firstRunTimeoutMs(Number(process.env.TASK_TIMEOUT_MIN ?? 50), deadline, workerStart);
+  const firstRunMs = firstRunTimeoutMs(taskTimeoutMin(process.env.TASK_TIMEOUT_MIN), deadline, workerStart);
   const timer = setTimeout(() => abort.abort(), firstRunMs);
 
   try {
@@ -1053,10 +1063,12 @@ async function main(): Promise<void> {
         if (existing) {
           await github.commentOnPr(task.repo, existing.number, `**Update: ${redact(report.title)}**\n\n${prBody}`);
           pr = existing;
-          // Unfinished work kept in a draft is finished now.
+          // Unfinished work kept in a draft is finished now: ready for review, with the
+          // finished work's title and description instead of the "WIP: …" ones.
           if (existing.draft) {
             await github
               .markReadyForReview(existing.node_id)
+              .then(() => github.updatePr(task.repo, existing.number, { title: redact(report.title), body: prBody }))
               .catch((err: unknown) => console.error(`[worker] could not mark the pull request ready: ${redact(errorText(err))}`));
           }
         } else {

@@ -234,6 +234,11 @@ export class GitHub {
     };
   }
 
+  /** Changes a pull request's title and/or description. */
+  async updatePr(repo: string, number: number, patch: { title?: string; body?: string }): Promise<void> {
+    await this.call("PATCH", `/repos/${repo}/pulls/${number}`, patch);
+  }
+
   /** Turns a draft pull request into one ready for review (GraphQL only; REST cannot). */
   async markReadyForReview(nodeId: string): Promise<void> {
     const data = await this.call<{ errors?: { message?: string }[] }>("POST", "/graphql", {

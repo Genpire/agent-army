@@ -67,7 +67,7 @@ export function outputTail(text: string, maxLines = SETUP_TAIL_LINES, maxChars =
 const minutes = (ms: number) => `${Math.round(ms / 60_000)} min`;
 
 /**
- * Runs the owner's setup command with `bash -lc` in the checkout and reports
+ * Runs the owner's setup command with `bash -c` in the checkout (not a login shell: on Debian that resets PATH from /etc/profile and hides tools an extended image adds) and reports
  * how it went: ok when it exits 0, the combined output's tail (redacted),
  * and how long it took. A command that outlives `timeoutMs` has its whole
  * process group stopped. Never throws: a broken setup must not fail the task,
@@ -97,7 +97,7 @@ export function runSetupCommand(
     let child: ReturnType<typeof spawn>;
     try {
       // detached: the shell leads its own process group, so a timeout stops everything it started.
-      child = spawn("bash", ["-lc", command], { cwd, env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+      child = spawn("bash", ["-c", command], { cwd, env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
     } catch (err) {
       resolvePromise({ command, ok: false, seconds: 0, outputTail: redact(`The setup command could not start: ${errorText(err)}`) });
       return;

@@ -11,6 +11,9 @@ services:
       SETUP_TOKEN: ${SETUP_TOKEN:-}
       PUBLIC_URL: ${PUBLIC_URL:-}
       RUNNER: local
+      # Optional: see .env.example. Local workers have no hard job deadline, so JOB_TIMEOUT_MIN is not passed.
+      TASK_TIMEOUT_MIN: ${TASK_TIMEOUT_MIN:-50}
+      BROWSER: ${BROWSER:-on}
     volumes:
       - army-data:/data
 volumes:

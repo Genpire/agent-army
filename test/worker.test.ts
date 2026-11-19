@@ -37,6 +37,7 @@ import {
   subagentLabel,
   taskGitHubToken,
   taskPrompt,
+  taskTimeoutMin,
   teamQueryOptions,
   threadStateAfter,
   usd,
@@ -674,6 +675,14 @@ describe("secrets of the repo setup and the webhook", () => {
     expect(text).toBe("[redacted] [redacted] [redacted] [redacted] port 3000");
   });
 
+  it("leaves plain words and numbers readable", () => {
+    const config = ConfigSchema.parse({
+      repoSetup: { "acme/web": { env: { NODE_ENV: "development", PORT: "3000", API_KEY: "key-abcdef-123" } } },
+    });
+    const redact = makeRedactor(configSecrets(config));
+    expect(redact("development build on 3000 with key-abcdef-123")).toBe("development build on 3000 with [redacted]");
+  });
+
   it("redacts a long secret whole even when a shorter one is part of it", () => {
     const redact = makeRedactor(["abcdef", "xx-abcdef-yy-long-token"]);
     expect(redact("token xx-abcdef-yy-long-token and abcdef")).toBe("token [redacted] and [redacted]");
@@ -819,6 +828,14 @@ describe("time limits", () => {
     expect(jobDeadline(start, "")).toBeUndefined();
     expect(jobDeadline(start, "abc")).toBeUndefined();
     expect(jobDeadline(start, "0")).toBeUndefined();
+  });
+
+  it("reads TASK_TIMEOUT_MIN, falling back to 50 when it is unset, empty or invalid", () => {
+    expect(taskTimeoutMin("30")).toBe(30);
+    expect(taskTimeoutMin(undefined)).toBe(50);
+    expect(taskTimeoutMin("")).toBe(50);
+    expect(taskTimeoutMin("0")).toBe(50);
+    expect(taskTimeoutMin("soon")).toBe(50);
   });
 
   it("caps the first run by the deadline", () => {
