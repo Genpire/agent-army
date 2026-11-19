@@ -1,5 +1,5 @@
 import { decrypt, encrypt } from "./crypto.js";
-import { REPO_RE } from "./config.js";
+import { CODE_HOST_KINDS, type CodeHostKind, REPO_FORMAT_HINT, isRepoId, repoHost, repoId, repoPath } from "./repo-id.js";
 import type { Store } from "./store.js";
 
 /**
@@ -16,8 +16,28 @@ export interface ProjectNotes {
 
 export const NOTES_MAX_CHARS = 8000;
 
-const keyFor = (repo: string) => `notes/${repo.toLowerCase().replace("/", "__")}.enc`;
-const repoFromKey = (key: string) => key.slice("notes/".length, -".enc".length).replace("__", "/");
+/**
+ * One flat file per repository, named without letter case:
+ *   owner/repo                → notes/owner__repo.enc (GitHub, as before)
+ *   gitlab:group/sub/project  → notes/gitlab~group~sub~project.enc
+ *   bitbucket:workspace/repo  → notes/bitbucket~workspace~repo.enc
+ * "~" is not allowed in repository ids, so the other hosts' names never clash
+ * with GitHub's and read back unambiguously. Ids are checked first (no "." or
+ * ".." segments), and no name holds a "/" or ":", so a key never leaves notes/.
+ */
+function keyFor(repo: string): string {
+  const id = repo.toLowerCase();
+  const host = repoHost(id);
+  const name = host === "github" ? id.replace("/", "__") : `${host}~${repoPath(id).replaceAll("/", "~")}`;
+  return `notes/${name}.enc`;
+}
+
+function repoFromKey(key: string): string {
+  const name = key.slice("notes/".length, -".enc".length);
+  const [host, ...path] = name.split("~");
+  if (path.length && CODE_HOST_KINDS.includes(host as CodeHostKind)) return repoId(host as CodeHostKind, path.join("/"));
+  return name.replace("__", "/");
+}
 
 export class NotesRepo {
   /** Serialises writes so concurrent appends (Slack, worker, admin page) don't lose each other. */
@@ -29,7 +49,7 @@ export class NotesRepo {
   ) {}
 
   async get(repo: string): Promise<ProjectNotes | null> {
-    if (!REPO_RE.test(repo)) return null;
+    if (!isRepoId(repo)) return null;
     const blob = await this.store.get(keyFor(repo));
     // The store has no delete; deleted notes are an empty blob.
     return blob && blob.length > 0 ? (JSON.parse(decrypt(this.key, blob)) as ProjectNotes) : null;
@@ -57,7 +77,7 @@ export class NotesRepo {
   }
 
   private async putNow(repo: string, text: string): Promise<{ ok: true } | { ok: false; error: string }> {
-    if (!REPO_RE.test(repo)) return { ok: false, error: "Repos look like owner/repo." };
+    if (!isRepoId(repo)) return { ok: false, error: REPO_FORMAT_HINT };
     const clean = text.trim();
     if (clean.length > NOTES_MAX_CHARS) {
       return { ok: false, error: `Project notes are limited to ${NOTES_MAX_CHARS} characters; condense them.` };

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parseReport } from "../src/agents.js";
-import { ConfigRepo, publicView } from "../src/config.js";
+import { ConfigRepo, ConfigSchema, publicView } from "../src/config.js";
 import { decrypt, deriveKey, encrypt, hashPassword, signSession, verifyPassword, verifySession } from "../src/crypto.js";
 import { checkBashCommand } from "../src/guard.js";
 import { ATTACHMENT_LIMITS } from "../src/attachments.js";
@@ -21,8 +21,15 @@ import {
 import { FsStore } from "../src/store.js";
 import { type Conversation, pendingMilestones, taskResultMarkdown } from "../src/conversations.js";
 import { type Task, decodeTaskPayload, encodeTaskPayload, newTaskId } from "../src/tasks.js";
+import { GITHUB_REPO_RE, REPO_FORMAT_HINT, REPO_RE } from "../src/repo-id.js";
 import { helpText, isRepoAllowed, messageText, parseCommand, repoFromToken, resolveRepo } from "../src/targeting.js";
 import { branchName, makeRedactor } from "../src/worker.js";
+import {
+  GITHUB_REPO_RE as WEB_GITHUB_REPO_RE,
+  REPO_ERROR,
+  REPO_RE as WEB_REPO_RE,
+  allowListRepos,
+} from "../web/src/pages/projects/validation.js";
 
 describe("targeting", () => {
   it("parses commands, with or without a mention", () => {
@@ -53,6 +60,29 @@ describe("targeting", () => {
     expect(repoFromToken("https://github.com/acme/web/pull/3")).toBe("acme/web");
     expect(repoFromToken("nonsense")).toBeNull();
   });
+  it("reads GitLab and Bitbucket ids and URLs, a self-managed GitLab's included", () => {
+    expect(repoFromToken("gitlab:acme/platform/web")).toBe("gitlab:acme/platform/web");
+    expect(repoFromToken("bitbucket:acme-ws/api.")).toBe("bitbucket:acme-ws/api");
+    expect(repoFromToken("https://gitlab.com/acme/platform/web/-/merge_requests/3")).toBe("gitlab:acme/platform/web");
+    expect(repoFromToken("https://bitbucket.org/acme-ws/api/pull-requests/4")).toBe("bitbucket:acme-ws/api");
+    expect(repoFromToken("https://git.acme.test/acme/web")).toBeNull();
+    expect(repoFromToken("https://git.acme.test/acme/web", "https://git.acme.test")).toBe("gitlab:acme/web");
+    expect(repoFromToken("https://git.acme.test/gitlab/acme/web/-/tree/main", "https://git.acme.test/gitlab")).toBe("gitlab:acme/web");
+    expect(repoFromToken("https://git.acme.test:8443/acme/web", "https://git.acme.test:8443")).toBe("gitlab:acme/web");
+    expect(repoFromToken("https://gitlab.com/acme/web", "https://git.acme.test")).toBe("gitlab:acme/web");
+    expect(repoFromToken("gitlab:acme")).toBeNull();
+    expect(repoFromToken("gitlab:acme/../web")).toBeNull();
+    expect(repoFromToken("bitbucket:acme/web/extra")).toBeNull();
+  });
+  it("binds GitLab and Bitbucket repositories by id or link", () => {
+    expect(parseCommand("<@U1> bind gitlab:acme/platform/web")).toEqual({ kind: "bind", repo: "gitlab:acme/platform/web" });
+    expect(parseCommand("bind bitbucket:acme-ws/api")).toEqual({ kind: "bind", repo: "bitbucket:acme-ws/api" });
+    expect(parseCommand("bind <https://gitlab.com/acme/web|gitlab.com/acme/web>")).toEqual({ kind: "bind", repo: "gitlab:acme/web" });
+    expect(parseCommand("bind <https://bitbucket.org/acme-ws/api/src/main/|bitbucket.org/acme-ws/api>")).toEqual({ kind: "bind", repo: "bitbucket:acme-ws/api" });
+    expect(parseCommand("bind <https://git.acme.test/acme/web>", "https://git.acme.test")).toEqual({ kind: "bind", repo: "gitlab:acme/web" });
+    expect(parseCommand("bind <https://git.acme.test/acme/web>")).toBeNull();
+    expect(parseCommand("bind gitlab:acme")).toBeNull();
+  });
   it("keeps other people's mentions in the text for Pointer", () => {
     expect(messageText("<@UBOT> ask <@U2> about <https://x.y/a|the doc>", "UBOT")).toBe("ask <@U2> about https://x.y/a");
     expect(messageText("<@UBOT>", "UBOT")).toBe("");
@@ -62,6 +92,42 @@ describe("targeting", () => {
     expect(help).toContain("Pointer");
     for (const cmd of ["bind owner/repo", "unbind", "status", "listen here", "stop listening"]) expect(help).toContain(cmd);
     expect(help).toMatch(/pull request/i);
+    expect(help).toContain("bind gitlab:group/project");
+    expect(help).toContain("bind bitbucket:workspace/repo");
+  });
+  it("checks repositories in the console the way the server does", () => {
+    const ids = [
+      "acme/web",
+      "Acme/web.app",
+      "gitlab:acme/web",
+      "gitlab:acme/platform/team/web",
+      "bitbucket:acme-ws/api",
+      "acme",
+      "acme/web/x",
+      "../x",
+      "acme/..",
+      "gitlab:acme",
+      "gitlab:acme/../web",
+      "bitbucket:acme/api/x",
+      "github:acme/web",
+      "GitLab:acme/web",
+      "gitlab:acme/~web",
+    ];
+    for (const id of ids) {
+      expect(WEB_REPO_RE.test(id), id).toBe(REPO_RE.test(id));
+      expect(WEB_GITHUB_REPO_RE.test(id), id).toBe(GITHUB_REPO_RE.test(id));
+    }
+    expect(REPO_ERROR).toBe(REPO_FORMAT_HINT);
+  });
+  it("suggests the exact repositories of every code host's allow list", () => {
+    const view = publicView(
+      ConfigSchema.parse({
+        github: { token: "t", allowedOwners: ["acme", "acme/web"], extra: [{ id: "gh-abc123", token: "ghp_extra_connection_0000000000", allowed: ["Partner-Co/Acme"] }] },
+        gitlab: { token: "t", allowed: ["acme", "acme/platform/web"] },
+        bitbucket: { token: "t", allowed: ["acme-ws", "acme-ws/api"] },
+      }),
+    );
+    expect(allowListRepos(view)).toEqual(["acme/web", "Partner-Co/Acme", "gitlab:acme/platform/web", "bitbucket:acme-ws/api"]);
   });
   it("resolves precedence: explicit > thread > channel", () => {
     expect(resolveRepo({ override: "a/a", threadRepo: "b/b", channelRepo: "c/c" })).toBe("a/a");

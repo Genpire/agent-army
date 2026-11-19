@@ -18,7 +18,7 @@ import { useConfig } from "../../lib/state";
 import { useAction } from "../../lib/useAction";
 import { AddRow } from "./components/AddRow";
 import { SectionHeader } from "./components/SectionHeader";
-import { CHANNEL_ERROR, REPO_ERROR, REPO_RE, parseChannelId } from "./validation";
+import { CHANNEL_ERROR, REPO_ERROR, REPO_PLACEHOLDER, REPO_RE, parseChannelId } from "./validation";
 
 const MAX_POINTER_CHANNELS = 100;
 
@@ -121,7 +121,8 @@ function BindingsSection({ bindings, pointer }: { bindings: Record<string, strin
         description={
           <>
             A request in one of these channels that names no repository works on this one. In Slack you can also type{" "}
-            <Code size="inherit">@{pointer} bind owner/repo</Code> or <Code size="inherit">unbind</Code> in the channel.
+            <Code size="inherit">@{pointer} bind owner/repo</Code> (or <Code size="inherit">bind gitlab:group/project</Code>,{" "}
+            <Code size="inherit">bind bitbucket:workspace/repo</Code>) or <Code size="inherit">unbind</Code> in the channel.
           </>
         }
       />
@@ -163,7 +164,7 @@ function BindingsSection({ bindings, pointer }: { bindings: Record<string, strin
             setRepo(v);
             setErrors((e) => ({ ...e, repo: undefined }));
           }}
-          placeholder="owner/repo"
+          placeholder={REPO_PLACEHOLDER}
           width={260}
           autoCapitalize="off"
           hasAutoCorrect={false}

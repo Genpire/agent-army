@@ -9,6 +9,7 @@ import { MemoryRepo } from "../src/memory.js";
 import { MONDAY_API_URL } from "../src/monday.js";
 import { NOTES_MAX_CHARS } from "../src/notes.js";
 import type { SlackDeps, SlackMessageEvent } from "../src/pointer-types.js";
+import { REPO_FORMAT_HINT } from "../src/repo-id.js";
 import { createApp } from "../src/server.js";
 import { FsStore } from "../src/store.js";
 import type { AgentSpec, Team } from "../src/team.js";
@@ -87,6 +88,7 @@ describe("admin API and Slack events", () => {
       expect((await get("/api/slack/manifest", false)).status).toBe(401);
       expect((await get("/api/notes", false)).status).toBe(401);
       expect((await get("/api/notes/acme/web", false)).status).toBe(401);
+      expect((await get("/api/notes/repo?repo=gitlab:acme/web", false)).status).toBe(401);
       expect((await post("/api/notes", { repo: "acme/web", text: "x" }, false)).status).toBe(401);
       expect((await post("/api/monday", { token: "eyJ0123456789abcdefghij" }, false)).status).toBe(401);
       expect((await post("/api/monday/disconnect", {}, false)).status).toBe(401);
@@ -263,6 +265,21 @@ describe("admin API and Slack events", () => {
       expect((await post("/api/settings", { pointerChannels: [] })).status).toBe(200);
       expect((await state()).config.slack.pointerChannels).toEqual([]);
     });
+
+    it("binds channels to repositories on every code host", async () => {
+      const before = (await state()).config.bindings;
+      const bindings = { C123: "acme/web", C456: "gitlab:acme/platform/web", C789: "bitbucket:acme/api" };
+      expect((await post("/api/settings", { bindings })).status).toBe(200);
+      expect((await state()).config.bindings).toEqual(bindings);
+
+      for (const repo of ["gitlab:acme", "bitbucket:acme/api/x", "gitlab:acme/../web", "github:acme/web"]) {
+        const res = await post("/api/settings", { bindings: { C123: repo } });
+        expect(res.status).toBe(400);
+        expect(await res.json()).toEqual({ error: REPO_FORMAT_HINT });
+      }
+      expect((await state()).config.bindings).toEqual(bindings);
+      expect((await post("/api/settings", { bindings: before })).status).toBe(200);
+    });
   });
 
   describe("GitHub connections", () => {
@@ -300,7 +317,8 @@ describe("admin API and Slack events", () => {
 
     it("rejects invalid allow entries and tokens, and unknown ids", async () => {
       const entryError = "Allowed entries are owners (your-org) or exact repos (owner/repo).";
-      for (const allowed of [["not a repo"], ["a/b/c"], ["../x"], ["owner/.."], [""]]) {
+      // GitHub's allow list holds GitHub owners and repositories only.
+      for (const allowed of [["not a repo"], ["a/b/c"], ["../x"], ["owner/.."], [""], ["gitlab:acme/web"], ["bitbucket:acme/web"]]) {
         expect(await error("/api/github/connections", { token: TOKEN, allowed })).toEqual({ status: 400, error: entryError });
         expect(await error("/api/github/connections/update", { id, allowed })).toEqual({ status: 400, error: entryError });
       }
@@ -514,8 +532,8 @@ describe("admin API and Slack events", () => {
         const { status, json } = await save(input);
         return { status, error: json.error as string };
       };
-      expect(await error({ repo: "not a repo" })).toEqual({ status: 400, error: "Repos look like owner/repo." });
-      expect(await error({ repo: "../x" })).toEqual({ status: 400, error: "Repos look like owner/repo." });
+      expect(await error({ repo: "not a repo" })).toEqual({ status: 400, error: REPO_FORMAT_HINT });
+      expect(await error({ repo: "../x" })).toEqual({ status: 400, error: REPO_FORMAT_HINT });
       expect(await error({ repo: "acme/web", env: { PATH: "/tmp" } })).toEqual({ status: 400, error: "PATH is reserved by the platform." });
       expect(await error({ repo: "acme/web", env: { ANTHROPIC_API_KEY: "x" } })).toEqual({ status: 400, error: "ANTHROPIC_API_KEY is reserved by the platform." });
       expect(await error({ repo: "acme/web", env: { EMPTY: "" } })).toEqual({
@@ -574,6 +592,18 @@ describe("admin API and Slack events", () => {
       expect((await post("/api/repo-setup/delete", { repo: "acme/big" })).status).toBe(200);
       expect(await setups()).toEqual({});
     });
+
+    it("sets up GitLab and Bitbucket repositories by id", async () => {
+      expect((await save({ repo: "gitlab:acme/platform/web", startCommand: "pnpm dev" })).status).toBe(200);
+      expect((await save({ repo: "bitbucket:acme/api", setupCommand: "npm ci" })).status).toBe(200);
+      expect(Object.keys(await setups()).sort()).toEqual(["bitbucket:acme/api", "gitlab:acme/platform/web"]);
+      expect(await save({ repo: "gitlab:acme" })).toEqual({ status: 400, json: { error: REPO_FORMAT_HINT } });
+
+      expect((await post("/api/repo-setup/delete", { repo: "GITLAB:acme/platform/web" })).status).toBe(400);
+      expect((await post("/api/repo-setup/delete", { repo: "gitlab:Acme/Platform/web" })).status).toBe(200);
+      expect((await post("/api/repo-setup/delete", { repo: "bitbucket:acme/api" })).status).toBe(200);
+      expect(await setups()).toEqual({});
+    });
   });
 
   describe("project notes", () => {
@@ -613,13 +643,42 @@ describe("admin API and Slack events", () => {
 
       const badRepo = await post("/api/notes", { repo: "not a repo", text: "hello" });
       expect(badRepo.status).toBe(400);
-      expect((await badRepo.json()).error).toBe("Repos look like owner/repo.");
+      expect((await badRepo.json()).error).toBe(REPO_FORMAT_HINT);
 
       expect((await post("/api/notes", { repo: "acme/web.app" })).status).toBe(400);
       expect((await post("/api/notes", { repo: 42, text: "hello" })).status).toBe(400);
       expect((await get("/api/notes/bad%20owner/web")).status).toBe(400);
 
       expect((await (await get("/api/notes/acme/web.app")).json()).text).toBe("- Tests: npm test\n- Uses pnpm");
+    });
+
+    it("stores and reads notes for GitLab and Bitbucket repositories by id, nested groups included", async () => {
+      const nested = "gitlab:Acme/platform/web";
+      expect((await post("/api/notes", { repo: nested, text: "Uses pnpm" })).status).toBe(200);
+      expect((await post("/api/notes", { repo: "bitbucket:acme/api", text: "Express API" })).status).toBe(200);
+
+      const read = await get(`/api/notes/repo?repo=${encodeURIComponent("gitlab:acme/platform/WEB")}`);
+      expect(read.status).toBe(200);
+      expect(await read.json()).toEqual({ repo: nested, text: "Uses pnpm", updatedAt: expect.any(String) });
+      expect((await (await get("/api/notes/repo?repo=bitbucket%3Aacme%2Fapi")).json()).text).toBe("Express API");
+      // GitHub repositories work on both routes.
+      expect((await (await get("/api/notes/repo?repo=acme/web.app")).json()).text).toBe("- Tests: npm test\n- Uses pnpm");
+      expect((await listNotes()).notes.map((n) => n.repo).sort()).toEqual(["Acme/web.app", "bitbucket:acme/api", nested].sort());
+
+      for (const bad of ["", "gitlab:acme", "gitlab:acme/../web", "bitbucket:acme/api/x", "acme/web/x", "x/".repeat(200)]) {
+        const res = await get(`/api/notes/repo?repo=${encodeURIComponent(bad)}`);
+        expect(res.status).toBe(400);
+        expect(await res.json()).toEqual({ error: REPO_FORMAT_HINT });
+      }
+      expect((await get("/api/notes/repo")).status).toBe(400);
+      expect((await get("/api/notes/repo?repo=acme/web.app&repo=acme/api")).status).toBe(400);
+      const missing = await get("/api/notes/repo?repo=gitlab:acme/none");
+      expect(missing.status).toBe(404);
+      expect(await missing.json()).toEqual({ error: "No notes for gitlab:acme/none yet." });
+
+      expect((await post("/api/notes", { repo: nested, text: "" })).status).toBe(200);
+      expect((await post("/api/notes", { repo: "bitbucket:acme/api", text: "" })).status).toBe(200);
+      expect((await listNotes()).notes.map((n) => n.repo)).toEqual(["Acme/web.app"]);
     });
   });
 

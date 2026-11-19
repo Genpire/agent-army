@@ -20,6 +20,7 @@ import type { RepoSetupView } from "../../lib/types";
 import { useAction } from "../../lib/useAction";
 import {
   REPO_ERROR,
+  REPO_PLACEHOLDER,
   REPO_RE,
   REPO_SETUP_MAX_ENV,
   SETUP_COMMAND_MAX,
@@ -168,8 +169,8 @@ export function RepoSetupDrawer({ isOpen, repo, setups, onOpenChange, onOpenRepo
                     setRepoInput(v);
                     clear("repo");
                   }}
-                  placeholder="owner/repo"
-                  description="The GitHub repository, as owner/repo."
+                  placeholder={REPO_PLACEHOLDER}
+                  description="The repository: owner/repo on GitHub, gitlab:group/project on GitLab, bitbucket:workspace/repo on Bitbucket."
                   isRequired
                   hasAutoFocus
                   autoCapitalize="off"

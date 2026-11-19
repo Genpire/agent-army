@@ -1,5 +1,5 @@
 import { matchesAllowList } from "./github-access.js";
-import { REPO_RE } from "./config.js";
+import { repoFromInput } from "./repo-id.js";
 
 export type Command =
   | { kind: "help" }
@@ -36,8 +36,9 @@ export function messageText(text: string, botUserId?: string): string {
 /**
  * The few things Pointer does without thinking. Everything else, including
  * "in owner/repo: …" requests, goes to the brain, which understands them.
+ * `gitlabBaseUrl` (config.gitlab.baseUrl) lets `bind` take a self-managed GitLab's URLs.
  */
-export function parseCommand(rawText: string): Command | null {
+export function parseCommand(rawText: string, gitlabBaseUrl?: string): Command | null {
   const text = normalizeSlackText(rawText).replace(/[.!]+$/, "");
   if (/^(help|\?)$/i.test(text)) return { kind: "help" };
   if (/^status$/i.test(text)) return { kind: "status" };
@@ -45,15 +46,35 @@ export function parseCommand(rawText: string): Command | null {
   if (/^listen( here)?$/i.test(text)) return { kind: "listen" };
   if (/^(stop listening|unlisten)$/i.test(text)) return { kind: "unlisten" };
   const bind = text.match(/^bind\s+(\S+)$/i);
-  const repo = bind ? repoFromToken(bind[1]!) : null;
+  const repo = bind ? repoFromToken(bind[1]!, gitlabBaseUrl) : null;
   return repo ? { kind: "bind", repo } : null;
 }
 
-/** "owner/repo", "owner/repo.git" or a GitHub URL → "owner/repo". */
-export function repoFromToken(token: string): string | null {
-  const url = token.match(/^https?:\/\/github\.com\/([^/\s]+\/[^/\s#?]+)/i);
-  const candidate = cleanRepo(url ? url[1]! : token);
-  return REPO_RE.test(candidate) ? candidate : null;
+/**
+ * A repository id from what someone typed: an id ("owner/repo",
+ * "gitlab:group/project", "bitbucket:workspace/repo"), "owner/repo.git", or a
+ * web or clone URL on GitHub, Bitbucket, gitlab.com or the GitLab instance at
+ * `gitlabBaseUrl`. Null when it is none of these.
+ */
+export function repoFromToken(token: string, gitlabBaseUrl?: string): string | null {
+  const text = cleanRepo(token.trim());
+  const gitlab = gitlabAddress(gitlabBaseUrl);
+  // A GitLab served on a port or under a path (https://host:8443/gitlab): what follows it is the project.
+  const prefix = gitlab?.prefix;
+  const local = gitlab && prefix && text.toLowerCase().startsWith(prefix) ? `https://${gitlab.host}/${text.slice(prefix.length)}` : text;
+  return repoFromInput(local, gitlab?.host);
+}
+
+/** The host name of a GitLab address, and its URL prefix when it has a port or a path. */
+function gitlabAddress(baseUrl: string | undefined): { host: string; prefix?: string } | undefined {
+  if (!baseUrl) return undefined;
+  try {
+    const url = new URL(baseUrl);
+    const base = `${url.origin}${url.pathname.replace(/\/+$/, "")}`.toLowerCase();
+    return { host: url.hostname.toLowerCase(), ...(base !== `https://${url.hostname}`.toLowerCase() ? { prefix: `${base}/` } : {}) };
+  } catch {
+    return undefined;
+  }
 }
 
 /** Project precedence: named explicitly > this thread's repo > the channel's default. */
@@ -72,10 +93,10 @@ export function isRepoAllowed(repo: string, allowedOwners: string[]): boolean {
 
 export function helpText(name: string): string {
   return [
-    `*${name}*: just talk to me. I answer questions, look things up on the web, read GitHub, remember what you ask me to, and put the team on code changes.`,
+    `*${name}*: just talk to me. I answer questions, look things up on the web, read GitHub (and GitLab or Bitbucket when connected), remember what you ask me to, and put the team on code changes.`,
     "• I answer every message in DMs and in channels where I'm listening, and I follow threads I'm in. Elsewhere, mention me.",
-    "• Code changes go to the team: they work on a branch and open a pull request for a human to review and merge.",
-    "• `bind owner/repo` sets this channel's default project · `unbind` · `status`",
+    "• Code changes go to the team: they work on a branch and open a pull request (a merge request on GitLab) for a human to review and merge.",
+    "• `bind owner/repo` sets this channel's default project; on GitLab or Bitbucket, `bind gitlab:group/project` or `bind bitbucket:workspace/repo` (a repository link works too) · `unbind` · `status`",
     "• `listen here` makes me answer every message in this channel · `stop listening` undoes it",
   ].join("\n");
 }

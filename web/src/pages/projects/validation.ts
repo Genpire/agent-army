@@ -1,12 +1,19 @@
+import type { PublicConfig } from "../../lib/types";
+
 /**
- * Client-side checks for the Projects page. They mirror REPO_RE, CHANNEL_RE,
- * ENV_KEY_RE, RESERVED_ENV_KEYS and the repo setup limits in src/config.ts and
- * src/server.ts (values cannot be imported: that module pulls in Node crypto).
+ * Client-side checks for the Projects page. They mirror REPO_RE and
+ * REPO_FORMAT_HINT in src/repo-id.ts, and CHANNEL_RE, ENV_KEY_RE,
+ * RESERVED_ENV_KEYS and the repo setup limits in src/config.ts and
+ * src/server.ts (the browser bundle takes nothing from the server's modules).
  * The server validates everything again; these only give a faster, clearer error.
  */
 
-/** owner/repo; "." and ".." are rejected as either part. */
-export const REPO_RE = /^(?!\.{1,2}\/)[A-Za-z0-9_.-]+\/(?!\.{1,2}$)[A-Za-z0-9_.-]+$/;
+/** One path segment: letters, digits, "_", "." and "-", never "." or "..". */
+const SEG = String.raw`(?!\.{1,2}(?:/|$))[A-Za-z0-9_.-]+`;
+/** A repository on any code host: owner/repo (GitHub), gitlab:group/project (nested groups allowed) or bitbucket:workspace/repo. */
+export const REPO_RE = new RegExp(`^${SEG}/${SEG}$|^gitlab:${SEG}(?:/${SEG}){1,20}$|^bitbucket:${SEG}/${SEG}$`);
+/** A GitHub repository, owner/repo. */
+export const GITHUB_REPO_RE = new RegExp(`^${SEG}/${SEG}$`);
 export const CHANNEL_RE = /^[CGD][A-Z0-9]+$/;
 export const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 export const RESERVED_ENV_KEYS: ReadonlySet<string> = new Set([
@@ -29,14 +36,29 @@ export const APP_URL_MAX = 300;
 const APP_URL_RE = /^https?:\/\/\S+$/;
 const CHANNEL_LINK_RE = /\/archives\/([A-Z0-9]+)/;
 
-export const REPO_ERROR = "Repos look like owner/repo.";
+export const REPO_ERROR = "Repositories look like owner/repo (GitHub), gitlab:group/project or bitbucket:workspace/repo.";
+/** Where a repository input says what to type. */
+export const REPO_PLACEHOLDER = "owner/repo or gitlab:group/project";
 export const CHANNEL_ERROR = "Channel IDs look like C012ABCDEF.";
 
-/** The saved key for a repo, matched without case (GitHub repos are case-insensitive). */
+/** The saved key for a repo, matched without case (repository names are case-insensitive on the code hosts). */
 export function findRepo(repos: Iterable<string>, repo: string): string | undefined {
   const wanted = repo.trim().toLowerCase();
   for (const r of repos) if (r.toLowerCase() === wanted) return r;
   return undefined;
+}
+
+/**
+ * The exact repositories in the code hosts' allow lists, as repository ids:
+ * GitHub's owner/repo entries, Bitbucket's workspace/repo entries, and GitLab's
+ * entries below a group (group/project; a subgroup entry looks the same and is
+ * offered too). Owner, workspace and top-level group entries are not repositories.
+ */
+export function allowListRepos(config: PublicConfig): string[] {
+  const github = [...config.github.allowedOwners, ...config.github.extra.flatMap((x) => x.allowed)].filter((x) => GITHUB_REPO_RE.test(x));
+  const gitlab = config.gitlab.allowed.filter((x) => x.includes("/")).map((x) => `gitlab:${x}`);
+  const bitbucket = config.bitbucket.allowed.map((x) => `bitbucket:${x}`);
+  return [...github, ...gitlab, ...bitbucket].filter((x) => REPO_RE.test(x));
 }
 
 /**
