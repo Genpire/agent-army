@@ -103,6 +103,40 @@ export interface Annotation {
   message: string;
 }
 
+/** A deployment GitHub knows of for a commit (Vercel, Netlify… create one per preview and production deploy). */
+export interface DeploymentInfo {
+  id: number;
+  sha: string;
+  /** e.g. "Preview", "Preview – web", "Production – web", "github-pages". */
+  environment: string;
+  originalEnvironment: string | null;
+  /** As the deployer set it; Vercel leaves it false even for production, so the name matters too. */
+  production: boolean;
+  transient: boolean;
+  createdAt: string;
+  /** Login of the account or app that created it, e.g. "vercel[bot]". */
+  creator: string | null;
+}
+
+/** One status of a deployment; a deployment's statuses are its history. */
+export interface DeploymentStatusInfo {
+  id: number;
+  state: "error" | "failure" | "inactive" | "pending" | "success" | "queued" | "in_progress";
+  /** Where the deployed app answers ("" or null when unknown). */
+  environmentUrl: string | null;
+  createdAt: string;
+}
+
+/** A conversation comment on a pull request (the issue comments API), with when it was last edited. */
+export interface IssueComment {
+  id: number;
+  author: string;
+  bot: boolean;
+  body: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 /** One piece of feedback on a pull request: a review, an inline review comment, or a conversation comment. */
 export interface PrFeedback {
   kind: "review" | "inline" | "comment";
@@ -316,6 +350,58 @@ export class GitHub {
     if (!res.ok) throw new Error(`GitHub GET job ${jobId} logs failed (HTTP ${res.status})`);
     const text = await res.text();
     return text.length > LOG_MAX_CHARS ? text.slice(-LOG_MAX_CHARS) : text;
+  }
+
+  // ---------- Deployments of a commit (preview checks) ----------
+
+  /** The deployments of a commit (up to 30). Needs Deployments: read on fine-grained tokens. */
+  async deploymentsFor(repo: string, sha: string): Promise<DeploymentInfo[]> {
+    const data = await this.call<
+      {
+        id: number;
+        sha: string;
+        environment: string;
+        original_environment?: string | null;
+        production_environment?: boolean;
+        transient_environment?: boolean;
+        created_at: string;
+        creator?: { login?: string } | null;
+      }[]
+    >("GET", `/repos/${repo}/deployments?sha=${encodeURIComponent(sha)}&per_page=30`);
+    return data.map((d) => ({
+      id: d.id,
+      sha: d.sha,
+      environment: d.environment ?? "",
+      originalEnvironment: d.original_environment ?? null,
+      production: d.production_environment === true,
+      transient: d.transient_environment === true,
+      createdAt: d.created_at,
+      creator: d.creator?.login ?? null,
+    }));
+  }
+
+  /** A deployment's statuses (up to 30). Needs Deployments: read on fine-grained tokens. */
+  async deploymentStatuses(repo: string, deploymentId: number): Promise<DeploymentStatusInfo[]> {
+    const data = await this.call<{ id: number; state: DeploymentStatusInfo["state"]; environment_url?: string | null; created_at: string }[]>(
+      "GET",
+      `/repos/${repo}/deployments/${deploymentId}/statuses?per_page=30`,
+    );
+    return data.map((s) => ({ id: s.id, state: s.state, environmentUrl: s.environment_url || null, createdAt: s.created_at }));
+  }
+
+  /** The pull request's conversation comments, oldest first (up to 100). Needs Pull requests: read. */
+  async issueComments(repo: string, number: number): Promise<IssueComment[]> {
+    const data = await this.call<
+      { id: number; user?: { login?: string; type?: string } | null; body: string | null; created_at: string; updated_at?: string }[]
+    >("GET", `/repos/${repo}/issues/${number}/comments?per_page=100`);
+    return data.map((c) => ({
+      id: c.id,
+      author: c.user?.login ?? "unknown",
+      bot: c.user?.type === "Bot",
+      body: c.body ?? "",
+      createdAt: c.created_at,
+      updatedAt: c.updated_at ?? c.created_at,
+    }));
   }
 
   // ---------- Feedback on a pull request (reviews and comments) ----------

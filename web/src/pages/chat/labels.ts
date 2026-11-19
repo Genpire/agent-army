@@ -47,6 +47,46 @@ export function checksStatus(t: Task): { label: string; tone: StatusTone } | nul
   return { label: "Checks still running", tone: "warning" };
 }
 
+/** What the preview check found, in a few words; null when there is no result (not run yet, or an older task). */
+export function previewStatus(t: Pick<Task, "preview">): { label: string; tone: StatusTone; note?: string; url?: string } | null {
+  const p = t.preview;
+  if (!p) return null;
+  const rest = { ...(p.note ? { note: plainLabel(p.note) } : {}), ...(p.url && /^https?:\/\//.test(p.url) ? { url: p.url } : {}) };
+  switch (p.state) {
+    case "checked":
+      return { label: "Preview looks right", tone: "success", ...rest };
+    case "problems":
+      return { label: "Problems on the preview", tone: "warning", ...rest };
+    case "unavailable":
+      return { label: "Preview not checked", tone: "neutral", ...rest };
+    case "skipped":
+      return { label: "Preview not needed", tone: "neutral", ...rest };
+  }
+}
+
+const SIZE_NAME = { small: "Small", medium: "Medium", large: "Large" } as const;
+
+/** "$1.20–$3.50", or "" without an estimate. */
+export function estimateRange(t: Pick<Task, "estimateUsd">): string {
+  const e = t.estimateUsd;
+  if (!e || !Number.isFinite(e.low) || !Number.isFinite(e.high)) return "";
+  return e.low === e.high ? `$${e.low.toFixed(2)}` : `$${e.low.toFixed(2)}–$${e.high.toFixed(2)}`;
+}
+
+/** "Medium task · est. $1.20–$3.50" for the task card, or "" when neither is known. */
+export function sizeLine(t: Pick<Task, "size" | "estimateUsd">): string {
+  const size = t.size ? `${SIZE_NAME[t.size.size] ?? t.size.size} task` : "";
+  const estimate = estimateRange(t);
+  return [size, estimate && `est. ${estimate}`].filter(Boolean).join(" · ");
+}
+
+/** "Medium · claude-sonnet-5-5, medium effort" for the task's details, or "" when it was not sized. */
+export function sizeDetail(t: Pick<Task, "size">): string {
+  const s = t.size;
+  if (!s) return "";
+  return `${SIZE_NAME[s.size] ?? s.size} · ${s.model || "the configured model"}, ${s.effort} effort`;
+}
+
 /** What the team is doing now, in a few words. */
 export function taskNow(t: Task): string {
   if (t.status === "queued") return "Waiting for a worker…";

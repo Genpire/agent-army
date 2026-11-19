@@ -16,6 +16,7 @@ import {
   CommandLineIcon,
   EllipsisHorizontalCircleIcon,
   ExclamationTriangleIcon,
+  EyeIcon,
   GlobeAltIcon,
   PencilSquareIcon,
   PlayCircleIcon,
@@ -26,6 +27,7 @@ import type { CheckItem, PhaseInfo, Task, TaskEvent, TaskTimeline } from "../../
 import { TASK_PHASE_ORDER } from "../../lib/types";
 import { useTaskTimeline } from "./hooks";
 import { EVENT_VERB, PHASE_LABEL, type StatusTone, agentWork, between, formatMs, isActiveTask, plainLabel } from "./labels";
+import { PreviewStatus } from "./PreviewStatus";
 import { ScreenshotStrip } from "./Screenshots";
 
 /** Rows shown per list before the rest are summarised. */
@@ -103,7 +105,17 @@ function More({ shown, total }: { shown: number; total: number }) {
 }
 
 const stepIcon = (e: TaskEvent) =>
-  e.kind === "edit" ? PencilSquareIcon : e.kind === "command" ? CommandLineIcon : e.kind === "browser" ? GlobeAltIcon : e.kind === "error" ? ExclamationTriangleIcon : ClockIcon;
+  e.kind === "edit"
+    ? PencilSquareIcon
+    : e.kind === "command"
+      ? CommandLineIcon
+      : e.kind === "browser"
+        ? GlobeAltIcon
+        : e.kind === "preview"
+          ? EyeIcon
+          : e.kind === "error"
+            ? ExclamationTriangleIcon
+            : ClockIcon;
 
 function EventRow({ e, showAgent = true }: { e: TaskEvent; showAgent?: boolean }) {
   const who = showAgent && e.agent ? `${e.agent} · ` : "";
@@ -126,7 +138,7 @@ export interface TaskTimelineViewProps {
 /**
  * Everything happening inside a repo task, live: the step it is on, its plan,
  * what each team member did and for how long, files, commands, the pull
- * request's checks, screenshots, and the full event log.
+ * request's checks, its preview deployment, screenshots, and the full event log.
  */
 export function TaskTimelineView({ task }: TaskTimelineViewProps) {
   const { timeline, error } = useTaskTimeline(task, true);
@@ -137,6 +149,7 @@ export function TaskTimelineView({ task }: TaskTimelineViewProps) {
   const work = agentWork(events);
   const commands = events.filter((e) => e.kind === "command");
   const checks = timeline?.checks ?? [];
+  const previewEvents = events.filter((e) => e.kind === "preview");
   const log = events.slice(-100);
 
   return (
@@ -253,6 +266,21 @@ export function TaskTimelineView({ task }: TaskTimelineViewProps) {
               />
             ))}
           </List>
+        </Part>
+      )}
+
+      {(previewEvents.length > 0 || (task.preview && task.preview.state !== "skipped")) && (
+        <Part title="Preview deployment" defaultOpen>
+          <VStack gap={2}>
+            <PreviewStatus task={task} noteLines={0} />
+            {previewEvents.length > 0 && (
+              <List density="compact">
+                {previewEvents.slice(-SHOWN).map((e, i) => (
+                  <EventRow key={`${e.at}-${i}`} e={e} showAgent={false} />
+                ))}
+              </List>
+            )}
+          </VStack>
         </Part>
       )}
 

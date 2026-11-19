@@ -16,7 +16,8 @@ import { ChevronDownIcon, ChevronUpIcon, CodeBracketSquareIcon } from "@heroicon
 import { useState } from "react";
 import { headline, usd } from "../../lib/format";
 import type { Task } from "../../lib/types";
-import { checksStatus, isActiveTask, plainLabel, prLabel, taskNow, taskStatus } from "./labels";
+import { checksStatus, isActiveTask, plainLabel, prLabel, sizeLine, taskNow, taskStatus } from "./labels";
+import { PreviewStatus } from "./PreviewStatus";
 import { ScreenshotStrip } from "./Screenshots";
 import { TaskTimelineView } from "./TaskTimelineView";
 
@@ -26,8 +27,9 @@ export interface TaskCardProps {
 
 /**
  * A repo task inline in the thread: status, what the team is doing now, plan
- * progress, pull request and checks, cost and screenshots. "Details" opens
- * the live timeline (steps, team, files, commands, checks, every event).
+ * progress, pull request, checks and preview, size, cost and screenshots.
+ * "Details" opens the live timeline (steps, team, files, commands, checks,
+ * preview, every event).
  */
 export function TaskCard({ task }: TaskCardProps) {
   const [expanded, setExpanded] = useState(false);
@@ -37,6 +39,7 @@ export function TaskCard({ task }: TaskCardProps) {
   const plan = task.progress?.plan ?? [];
   const planDone = plan.filter((p) => p.status === "completed").length;
   const title = task.report?.title || headline(task.instruction, 120);
+  const size = sizeLine(task);
 
   return (
     <Card variant="muted" padding={3} width="100%">
@@ -104,6 +107,11 @@ export function TaskCard({ task }: TaskCardProps) {
               {usd(task.costUsd)}
             </Text>
           )}
+          {size && (
+            <Text type="supporting" color="secondary">
+              {size}
+            </Text>
+          )}
           {task.progress && task.progress.filesCount > 0 && (
             <Text type="supporting" color="secondary">
               {task.progress.filesCount} file{task.progress.filesCount === 1 ? "" : "s"} changed
@@ -114,6 +122,8 @@ export function TaskCard({ task }: TaskCardProps) {
           </Text>
           {task.trigger === "review" && <Badge label="From PR review" variant="purple" />}
         </HStack>
+
+        <PreviewStatus task={task} />
 
         {!expanded && <ScreenshotStrip taskId={task.id} count={task.screenshots} />}
 

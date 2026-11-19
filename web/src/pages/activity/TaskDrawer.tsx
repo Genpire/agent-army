@@ -21,6 +21,8 @@ import { href } from "../../lib/router";
 import type { Task } from "../../lib/types";
 import { checksView, isActive, plainText, prLabel, requestHeadline, taskDuration, taskStatus } from "./model";
 import { ChecksStatus, StatusLabel } from "./TaskTable";
+import { estimateRange, sizeDetail } from "../chat/labels";
+import { PreviewStatus } from "../chat/PreviewStatus";
 import { TaskTimelineView } from "../chat/TaskTimelineView";
 
 /** Started from the admin console (Chat or a direct task), not Slack. */
@@ -98,9 +100,29 @@ function Details({ task }: { task: Task }) {
           <Text color="secondary">{task.prUrl ? "Not followed" : "No pull request"}</Text>
         )}
       </MetadataListItem>
+      <MetadataListItem label="Preview">
+        {task.preview ? (
+          <PreviewStatus task={task} showSkipped noteLines={0} />
+        ) : (
+          <Text color="secondary">{!task.prUrl ? "No pull request" : isActive(task) ? "No result yet" : "Not checked"}</Text>
+        )}
+      </MetadataListItem>
       <MetadataListItem label="Screenshots">
         <Text>{task.screenshots ? `${plural(task.screenshots, "screenshot")}${fromConsole(task) ? "" : ", also in the Slack thread"}` : "None"}</Text>
       </MetadataListItem>
+      {task.size && (
+        <MetadataListItem label="Size">
+          <VStack gap={1}>
+            <Text>{sizeDetail(task)}</Text>
+            {task.size.reason && <Text type="supporting">{plainText(task.size.reason)}</Text>}
+          </VStack>
+        </MetadataListItem>
+      )}
+      {estimateRange(task) && (
+        <MetadataListItem label="Estimate">
+          <Text hasTabularNumbers>{estimateRange(task)}</Text>
+        </MetadataListItem>
+      )}
       <MetadataListItem label="Cost">
         <Text hasTabularNumbers>
           {task.costUsd === undefined ? "–" : usd(task.costUsd)}

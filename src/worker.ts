@@ -23,6 +23,7 @@ import { connectionForRepo, githubTokens } from "./github-access.js";
 import { checkBashCommand } from "./guard.js";
 import { NOTES_MAX_CHARS, NotesRepo } from "./notes.js";
 import { formatFeedback } from "./pr-feedback.js";
+import { BYPASS_ENV, type PreviewResult, checkPreview, previewSlackLine } from "./preview.js";
 import { type PlanItem, ProgressTracker, formatProgress } from "./progress.js";
 import { findRepoSetup, repoSetupContext, runSetupCommand, setupEnv } from "./repo-setup.js";
 import { ScreenshotRepo } from "./screenshots.js";
@@ -1040,6 +1041,68 @@ async function main(): Promise<void> {
       }
     };
 
+    /**
+     * After the checks: open the pull request's preview deployment in the
+     * browser with one more round of the team that changes nothing (see
+     * preview.ts). Its cost counts toward the task's; screenshots go the same
+     * way as the others.
+     */
+    const previewOf = async (pr: PrRef, published: Report, checksFollowed: boolean): Promise<PreviewResult> => {
+      const names = (out: string) => out.split("\n").filter(Boolean);
+      const files = await git(["--no-optional-locks", "diff", "--name-only", `origin/${base}...HEAD`])
+        .catch(() => git(["--no-optional-locks", "diff", "--name-only", startSha, "HEAD"]))
+        .then(names);
+      const sha = await git(["rev-parse", "HEAD"]);
+      const phase: TaskPhase = config.limits.ciWaitMin > 0 ? "checks" : "publish";
+      return checkPreview({
+        mode: config.limits.previewCheck,
+        files,
+        browser: Boolean(browser),
+        budget: { maxUsd: config.limits.maxBudgetUsd, spentUsd: task.costUsd ?? 0 },
+        deadline,
+        github,
+        repo: task.repo,
+        sha,
+        since: await git(["show", "-s", "--format=%cI", "HEAD"]).catch(() => undefined),
+        prNumber: pr.number,
+        checksFollowed,
+        report: published,
+        base,
+        branch,
+        request: task.instruction,
+        where,
+        bypassSecret: agentEnv[BYPASS_ENV],
+        redact,
+        onStage: async (text) => {
+          await stage(phase, text);
+          await progress(`:globe_with_meridians: ${text}…`, true);
+        },
+        onEvent: (e) => timeline.add({ kind: "preview", ...e }, true),
+        runRound: async (roundPrompt, { budgetUsd, runMs }) => {
+          const notesBefore = await loadNotes();
+          const roundAbort = new AbortController();
+          const roundTimer = setTimeout(() => roundAbort.abort(), runMs);
+          const run = await runTeam(roundPrompt, {
+            budgetUsd,
+            abort: roundAbort,
+            timeoutMin: Math.round(runMs / 60_000),
+            since: sha,
+            context: { ...context, projectNotes: notesBefore },
+            phaseLabel: "Checking the preview deployment",
+          }).finally(() => clearTimeout(roundTimer));
+          task.costUsd = (task.costUsd ?? 0) + run.costUsd;
+          task.turns = (task.turns ?? 0) + run.turns;
+          if (run.report) await saveProjectNotes(notes, task.repo, notesBefore, run.report.projectNotes, redact);
+          return run;
+        },
+        postScreenshots: async (url) => {
+          const before = shotsForPr();
+          await postScreenshots((n) => `:camera: ${plural(n, "screenshot")} from the preview at ${url}.`);
+          return shotsForPr() - before;
+        },
+      });
+    };
+
     // ---------- 3. Let the team work ----------
     const first = await runTeam(prompt, {
       budgetUsd: config.limits.maxBudgetUsd,
@@ -1239,6 +1302,15 @@ async function main(): Promise<void> {
           // Only fix rounds can have added any; those already posted are skipped.
           await postScreenshots((n) => `:camera: ${plural(n, "more screenshot")} from fixing the checks.`);
         }
+
+        // The preview deployment, after the checks (see preview.ts). Never fails the task: the pull request is open.
+        task.preview = await previewOf(pr, report, ci !== undefined && ci.outcome.state !== "unavailable").catch((err: unknown): PreviewResult => {
+          const note = `The preview could not be checked: ${truncate(redact(errorText(err)), 200)}`;
+          console.error(`[worker] ${note}`);
+          timeline.add({ kind: "preview", text: note, ok: false }, true);
+          return { state: "unavailable", note };
+        });
+        await tasks.save(task).catch((err: unknown) => console.error("[worker] task not saved:", redact(String(err))));
       } else {
         await saveThreadState(nextThreadState());
       }
@@ -1272,6 +1344,7 @@ async function main(): Promise<void> {
         report.risks && `*Risks:* ${toMrkdwn(report.risks)}`,
         ci && ciSummaryLine(ci.outcome, config.limits.ciWaitMin),
         ci?.note && toMrkdwn(ci.note),
+        task.preview && previewSlackLine(task.preview),
         ...resultNotes,
         `_${task.repo} · \`${branch}\`${cost()}_`,
       ];
