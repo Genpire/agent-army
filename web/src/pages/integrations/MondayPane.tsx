@@ -3,7 +3,7 @@ import { FormLayout } from "@astryxdesign/core/FormLayout";
 import { MetadataList, MetadataListItem } from "@astryxdesign/core/MetadataList";
 import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
-import { type SearchSource, type SearchableItem, Typeahead, TypeaheadItem } from "@astryxdesign/core/Typeahead";
+import { type SearchSource, Typeahead, TypeaheadItem } from "@astryxdesign/core/Typeahead";
 import { VStack } from "@astryxdesign/core/VStack";
 import { RectangleStackIcon } from "@heroicons/react/24/outline";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -14,12 +14,9 @@ import { plural } from "../../lib/format";
 import { useConfig } from "../../lib/state";
 import type { MondayBoardSummary } from "../../lib/types";
 import { type IntegrationSummary, boardIdsError, parseList } from "./catalog";
+import { MondayAutomation } from "./MondayAutomation";
+import { type BoardItem, boardDescription, boardItem } from "./mondayBoards";
 import { FormActions, FormError, PaneHeader, PaneSection, Steps, Strong, useSave } from "./parts";
-
-type BoardItem = SearchableItem<MondayBoardSummary>;
-
-const boardItem = (b: MondayBoardSummary): BoardItem => ({ id: b.id, label: b.name, auxiliaryData: b });
-const boardDescription = (b: MondayBoardSummary | undefined, id: string) => [b?.workspace, `Board ${id}`].filter(Boolean).join(" · ");
 
 export function MondayPane({ summary, onBack }: { summary: IntegrationSummary; onBack?: () => void }) {
   const { config } = useConfig();
@@ -33,7 +30,7 @@ export function MondayPane({ summary, onBack }: { summary: IntegrationSummary; o
         title="monday.com"
         tone={summary.tone}
         status={summary.status}
-        description={`Lets ${name} find, open, update and comment on monday.com items from Slack, for example "open a ticket for the login bug on the Bugs board". It never deletes or archives anything.`}
+        description={`Lets ${name} find, open, update and comment on monday.com items from Slack, for example "open a ticket for the login bug on the Bugs board", and, when you turn it on, start the team on tickets that are ready for development. It never deletes or archives anything.`}
         onBack={onBack}
       />
 
@@ -52,6 +49,7 @@ export function MondayPane({ summary, onBack }: { summary: IntegrationSummary; o
 
       <MondayToken />
       {m.connected && <MondayBoards />}
+      {m.connected && <MondayAutomation />}
     </VStack>
   );
 }

@@ -271,6 +271,109 @@ async function seedFinishedWebTask(now: number): Promise<void> {
   await conversations.save(conversation, new Date(started + 26 * MIN));
 }
 
+/** A task a monday.com ticket started (board 4012345678 is automated for acme/web): its pull request is in review. */
+async function seedMondayTask(now: number): Promise<void> {
+  const started = now - 50 * MIN;
+  const taskId = newTaskId(started);
+  const conversationId = `c-${newTaskId(started - 1000)}`;
+  const ticket = { boardId: "4012345678", itemId: "8123456701", name: "Checkout button overlaps the cart total on small phones", url: "https://acme.monday.com/boards/4012345678/pulses/8123456701" };
+  const instruction = [
+    `Work on this monday.com ticket: ${ticket.name}`,
+    `(board "Web bugs", group "This sprint", item ${ticket.itemId})`,
+    `Link: ${ticket.url}`,
+    "",
+    "Description and first updates (oldest first):",
+    "",
+    "Dana, 2026-11-18:\nOn screens narrower than 360 px the Pay button covers the cart total. Seen on iPhone SE and small Android phones.",
+    "",
+    "Columns:\n- Status: Ready for dev\n- Priority: High\n- Owner: Dana",
+  ].join("\n");
+  const task: Task = {
+    id: taskId,
+    createdAt: iso(started),
+    updatedAt: iso(started + 19 * MIN),
+    status: "done",
+    repo: "acme/web",
+    channel: WEB_CHANNEL,
+    threadTs: conversationId,
+    userId: "admin",
+    instruction,
+    trigger: "monday",
+    ticket,
+    branch: "army/work-on-this-monday-com-ticket-chec-7c1d20",
+    prUrl: "https://github.com/acme/web/pull/46",
+    prDraft: false,
+    kind: "change",
+    summary: "The checkout footer stacks the total above the Pay button below 380 px, so neither covers the other.",
+    report: {
+      title: "Keep the cart total visible above the Pay button on small phones",
+      summary: "The checkout footer stacks the total above the Pay button below 380 px, so neither covers the other.",
+      verification: "QA checked checkout at 320, 360 and 414 px in the browser; `npm test` passes.",
+      risks: "",
+    },
+    ci: { state: "passed", fixRounds: 0, names: [], total: 3 },
+    costUsd: 1.36,
+    turns: 38,
+  };
+  await putTask(task);
+
+  let clock = started;
+  const at = (min: number) => (clock = started + min * MIN);
+  const rec = new TimelineRecorder(store, taskId, { now: () => clock });
+  at(0);
+  rec.enter("clone", "Cloning acme/web");
+  rec.add({ kind: "ticket", text: `Ticket "${ticket.name}": status set to "Working on it"; update posted`, ok: true, url: ticket.url });
+  rec.add({ kind: "note", text: `New branch ${task.branch} off main` });
+  at(2);
+  rec.enter("plan", "Pointer is reading acme/web and planning");
+  at(4);
+  rec.tracker({ kind: "agent-start", label: CODER, description: "Stack the checkout footer on small screens" });
+  rec.tracker({ kind: "edit", by: CODER, path: "src/components/CheckoutFooter.tsx" });
+  at(9);
+  rec.tracker({ kind: "agent-done", label: CODER, ms: 5 * MIN, outcome: "The footer stacks below 380 px.", isError: false, toolUses: 22 });
+  rec.tracker({ kind: "agent-start", label: QA, description: "Check checkout on small screens" });
+  rec.tracker({ kind: "browser", by: QA, action: "Opened", detail: "http://localhost:3000/checkout" });
+  at(13);
+  rec.tracker({ kind: "agent-done", label: QA, ms: 4 * MIN, outcome: "Total and button are both visible at 320 px.", isError: false, toolUses: 10 });
+  at(14);
+  rec.enter("publish", "Publishing the branch and opening the pull request");
+  rec.add({ kind: "push", text: `Pushed branch ${task.branch}` });
+  rec.add({ kind: "pr", text: `Opened pull request #46: ${task.report!.title}`, url: task.prUrl });
+  rec.add({ kind: "ticket", text: `Ticket "${ticket.name}": status set to "In review"; update posted`, ok: true, url: ticket.url });
+  at(15);
+  rec.enter("checks", "Waiting for the pull request's checks");
+  rec.checks([
+    { name: "build", state: "passed" },
+    { name: "test", state: "passed" },
+    { name: "Vercel", state: "passed" },
+  ]);
+  at(19);
+  rec.add({ kind: "checks", text: "Checks: all 3 passed", ok: true, ms: 4 * MIN });
+  await rec.close(true, `Done: ${task.report!.title}`);
+
+  await conversations.save(
+    {
+      id: conversationId,
+      title: ticket.name,
+      createdAt: iso(started - 1000),
+      updatedAt: iso(started + 19 * MIN),
+      pending: false,
+      taskIds: [taskId],
+      messages: [
+        { id: "m-1", role: "user", text: instruction, at: iso(started - 1000) },
+        {
+          id: "m-2",
+          role: "pointer",
+          at: iso(started - 500),
+          text: `The ticket **${ticket.name}** moved to *Ready for dev* on monday.com. Putting the team on \`acme/web\`…`,
+          tasks: [taskId],
+        },
+      ],
+    },
+    new Date(started + 19 * MIN),
+  );
+}
+
 /** A question and its answer: no repo task. */
 async function seedQuestion(now: number): Promise<void> {
   const at = now - 30 * MIN;
@@ -582,6 +685,7 @@ const now = Date.now();
 await seedKnowledge();
 await seedSlackTasks(now);
 await seedFinishedWebTask(now);
+await seedMondayTask(now);
 await seedQuestion(now);
 
 const port = Number(process.env.PORT ?? 8080);

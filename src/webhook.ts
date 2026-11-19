@@ -7,14 +7,17 @@ import { KeyedQueue } from "./listen.js";
 import type { SlackDeps } from "./pointer-types.js";
 import type { WebThreads } from "./conversations.js";
 import { type PrThread, type TaskRepo, WEB_CHANNEL } from "./tasks.js";
+import type { Store } from "./store.js";
 import { startThreadTask } from "./thread-task.js";
+import { type TicketClient, appendTicketEvent, ticketPrClosed } from "./ticket-sync.js";
 import { configSecrets, makeRedactor } from "./worker.js";
 
 /**
  * GitHub webhook: a review or a comment addressed to Pointer on a pull request
  * the team opened starts a follow-up task in that pull request's Slack thread.
  * Only people with write access steer the team; nothing from the payload is
- * logged except the event type, the repository and the outcome.
+ * logged except the event type, the repository and the outcome. When such a
+ * pull request is merged (or closed), its monday.com ticket is told.
  */
 
 /** Longest part of a review or comment quoted in the follow-up's instruction. */
@@ -201,6 +204,10 @@ export function reviewTrigger(event: string, payload: unknown, opts: { pointerNa
 export type WebhookDeps = Pick<SlackDeps, "configRepo" | "tasks" | "runner" | "slack"> & {
   /** Console conversations, for pull requests opened from the admin console (no Slack there). */
   web?: WebThreads;
+  /** Where task timelines are kept: a ticket update after a merge is added to the task's timeline. */
+  store?: Pick<Store, "get" | "put">;
+  /** Test seam: the monday.com client for a token. */
+  monday?: (token: string) => TicketClient;
 };
 
 // One delivery at a time per pull request, so two quick reviews cannot both start a task.
@@ -216,6 +223,7 @@ export async function handleGithubWebhook(event: string, payload: unknown, deps:
   try {
     const config = await deps.configRepo.load();
     redact = makeRedactor([...configSecrets(config), config.github.webhookSecret]);
+    if (event === "pull_request") return await pullRequestClosed(payload, config, deps, redact);
     const decision = reviewTrigger(event, payload, { pointerName: config.team.pointer.name });
     if (!decision.start) return log(event, decision.repo, `ignored: ${decision.reason}`);
     const key = `${decision.repo.toLowerCase()}#${decision.prNumber}`;
@@ -301,6 +309,53 @@ async function webFollowUp(event: string, d: Start, config: Config, deps: Webhoo
     return log(event, at, `could not start a follow-up: ${started.error}`);
   }
   log(event, at, `started follow-up task ${started.taskId} (console)`);
+}
+
+const PullRequestPayload = z.object({
+  action: z.string().max(40),
+  pull_request: z.object({ number: z.number().int().positive(), merged: z.boolean().nullish(), html_url: z.string().max(500).optional() }),
+  repository: Repository,
+});
+
+/** Recent tasks looked at to find the ticket of a pull request's thread. */
+const TICKET_SCAN = 200;
+
+/**
+ * A pull request the team opened was closed: merged, its monday.com ticket
+ * gets the board's "done" label and an update; closed without merging, an
+ * update only. The ticket is the one of the newest task in the pull request's
+ * thread that has one.
+ */
+async function pullRequestClosed(payload: unknown, config: Config, deps: WebhookDeps, redact: (text: string) => string): Promise<void> {
+  const event = "pull_request";
+  const parsed = PullRequestPayload.safeParse(payload);
+  if (!parsed.success) return log(event, repoOf(payload), "ignored: unexpected payload");
+  const p = parsed.data;
+  const repo = p.repository.full_name;
+  const at = `${repo}#${p.pull_request.number}`;
+  if (p.action !== "closed") return log(event, at, "ignored: pull request not closed");
+  if (!connectionForRepo(config, repo)) return log(event, at, "ignored: repository not allowed");
+  const ref = await deps.tasks.getPrThread(repo, p.pull_request.number);
+  if (!ref) return log(event, at, "ignored: not a pull request the team opened");
+  const task = (await deps.tasks.recent(TICKET_SCAN)).find((t) => t.channel === ref.channel && t.threadTs === ref.threadTs && t.ticket);
+  if (!task) return log(event, at, "ignored: no monday.com ticket");
+  const token = config.monday.token;
+  if (!token) return log(event, at, "ignored: monday.com not connected");
+  const url = p.pull_request.html_url && URL_RE.test(p.pull_request.html_url) ? p.pull_request.html_url : `https://github.com/${repo}/pull/${p.pull_request.number}`;
+  const merged = p.pull_request.merged === true;
+  const store = deps.store;
+  await ticketPrClosed(
+    {
+      config,
+      redact,
+      ...(deps.monday ? { client: deps.monday(token) } : {}),
+      // Only a finished task's timeline: while a follow-up runs, its worker is the timeline's only writer.
+      ...(store && task.status !== "queued" && task.status !== "running" ? { record: (e) => appendTicketEvent(store, task.id, e) } : {}),
+    },
+    task,
+    { url, merged },
+  );
+  log(event, at, merged ? `ticket ${task.ticket!.itemId} marked done` : `ticket ${task.ticket!.itemId} told the pull request was closed`);
 }
 
 /** The instruction the worker gets; it fetches every new piece of review feedback itself. */

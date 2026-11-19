@@ -14,7 +14,7 @@ import { describeTasks } from "./progress.js";
 import type { Runner } from "./runner.js";
 import type { Store } from "./store.js";
 import { describeTimeline, plainLine, readTimeline } from "./task-events.js";
-import { type Task, type TaskRepo, type ThreadState, WEB_CHANNEL, newTaskId } from "./tasks.js";
+import { type Task, type TaskRepo, type TaskTicket, type ThreadState, WEB_CHANNEL, newTaskId } from "./tasks.js";
 import { type ThreadTaskResult, resolveTaskRepo, startThreadTask } from "./thread-task.js";
 import type { UsageRepo } from "./usage.js";
 import { configSecrets, makeRedactor } from "./worker.js";
@@ -400,8 +400,17 @@ export interface WebThreads {
   /** Starts a repo task in the conversation, with `ackText` as Pointer's message above its card. */
   startTask(
     conversationId: string,
-    input: { repo: string; instruction: string; ackText: string; trigger: Task["trigger"] },
+    input: { repo: string; instruction: string; ackText: string; trigger: Task["trigger"]; ticket?: TaskTicket },
   ): Promise<ThreadTaskResult>;
+}
+
+/** Options of a direct task: what started it (the console by default), its monday.com ticket, the conversation's title and Pointer's first message. */
+export interface DirectTaskOptions {
+  trigger?: Task["trigger"];
+  ticket?: TaskTicket;
+  /** The conversation's name; the instruction's first line when omitted. */
+  title?: string;
+  ackText?: string;
 }
 
 const STILL_ANSWERING = "Pointer is still answering. Wait for the reply, then send your next message.";
@@ -520,9 +529,10 @@ export class ConversationService implements WebThreads {
   /**
    * A repo task straight from the console, without asking Pointer: a new
    * conversation whose first message is the instruction, then the task. The
-   * same checks as Slack (GitHub connected, allow lists).
+   * same checks as Slack (GitHub connected, allow lists). A monday.com ticket
+   * starts one too (trigger "monday", with the ticket, named after it).
    */
-  async startDirectTask(repo: string, instruction: string): Promise<DirectTaskResult> {
+  async startDirectTask(repo: string, instruction: string, opts: DirectTaskOptions = {}): Promise<DirectTaskResult> {
     const body = instruction.trim();
     if (!body) return { ok: false, status: 400, error: "Say what the team should do." };
     if (body.length > MESSAGE_MAX_CHARS) return { ok: false, status: 400, error: `Instructions are limited to ${MESSAGE_MAX_CHARS} characters.` };
@@ -532,7 +542,7 @@ export class ConversationService implements WebThreads {
     const now = this.iso();
     const c: Conversation = {
       id: newConversationId(this.now().getTime()),
-      title: conversationTitle(body),
+      title: conversationTitle(opts.title?.trim() || body),
       createdAt: now,
       updatedAt: now,
       pending: false,
@@ -543,8 +553,9 @@ export class ConversationService implements WebThreads {
     const started = await this.startTask(c.id, {
       repo: checked.repo,
       instruction: body,
-      ackText: `On it. Putting the team on \`${checked.repo}\`…`,
-      trigger: "web",
+      ackText: opts.ackText ?? `On it. Putting the team on \`${checked.repo}\`…`,
+      trigger: opts.trigger ?? "web",
+      ...(opts.ticket ? { ticket: opts.ticket } : {}),
     });
     if (!started.ok) {
       await this.post(c.id, started.error, true);
@@ -567,9 +578,12 @@ export class ConversationService implements WebThreads {
 
   async startTask(
     conversationId: string,
-    input: { repo: string; instruction: string; ackText?: string; trigger: Task["trigger"] },
+    input: { repo: string; instruction: string; ackText?: string; trigger: Task["trigger"]; ticket?: TaskTicket },
   ): Promise<ThreadTaskResult> {
-    if (!(await this.repo.get(conversationId))) return { ok: false, error: NOT_FOUND };
+    const conversation = await this.repo.get(conversationId);
+    if (!conversation) return { ok: false, error: NOT_FOUND };
+    // A follow-up in a ticket's conversation keeps working on that ticket (same repository).
+    const ticket = input.ticket ?? (await this.tasksOf(conversation)).reverse().find((t) => t.ticket && t.repo.toLowerCase() === input.repo.toLowerCase())?.ticket;
     const config = await this.deps.configRepo.load();
     const started = await startThreadTask(
       { tasks: this.deps.tasks, runner: this.deps.runner, redact: makeRedactor(configSecrets(config)) },
@@ -581,6 +595,7 @@ export class ConversationService implements WebThreads {
         instruction: input.instruction,
         ackText: input.ackText ?? "",
         trigger: input.trigger,
+        ...(ticket ? { ticket } : {}),
       },
     );
     if (!started.ok) return started;
