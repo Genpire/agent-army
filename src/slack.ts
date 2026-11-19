@@ -319,6 +319,30 @@ async function readCapped(res: Response, max: number): Promise<Uint8Array> {
   return out;
 }
 
+/**
+ * Posts files (e.g. screenshots) as one reply in a thread, with a comment.
+ * Needs the files:write scope; Slack's error code (e.g. "missing_scope") is
+ * on the thrown error, see slackErrorCode.
+ */
+export async function uploadThreadFiles(
+  client: Pick<WebClient, "filesUploadV2">,
+  opts: { channel: string; threadTs: string; comment: string; files: { filename: string; data: Buffer }[] },
+): Promise<void> {
+  if (!opts.files.length) return;
+  await client.filesUploadV2({
+    channel_id: opts.channel,
+    thread_ts: opts.threadTs,
+    initial_comment: opts.comment,
+    file_uploads: opts.files.map((f) => ({ file: f.data, filename: f.filename, title: f.filename })),
+  });
+}
+
+/** The error code of a failed Slack API call ("missing_scope", "not_in_channel"…), if it has one. */
+export function slackErrorCode(err: unknown): string | undefined {
+  const code = (err as { data?: { error?: unknown } } | undefined)?.data?.error;
+  return typeof code === "string" ? code : undefined;
+}
+
 /** Best effort: reactions fail until the app is reinstalled with reactions:write. */
 export async function react(client: WebClient, channel: string, ts: string, name: string): Promise<void> {
   try {

@@ -11,17 +11,36 @@ import { NOTES_MAX_CHARS, NotesRepo } from "../src/notes.js";
 import { FsStore } from "../src/store.js";
 import { REPO_RULES, type AgentSpec, defaultTeam, rosterText } from "../src/team.js";
 import { GitHub } from "../src/github.js";
+import { BROWSER_SERVER, BROWSER_TOOLS, browserServer } from "../src/browser.js";
+import type { PlanItem } from "../src/progress.js";
+import type { ThreadState } from "../src/tasks.js";
 import {
   FALLBACK_COMMIT_EMAIL,
+  FIX_RUN_MAX_MS,
   commitIdentity,
   configSecrets,
+  draftPrBody,
+  firstRunTimeoutMs,
+  fixComment,
+  fixRunTimeoutMs,
+  jobDeadline,
   makeRedactor,
   materializeAttachments,
   notesToSave,
+  planChecklist,
+  prFooter,
   saveProjectNotes,
+  screenshotFailureLine,
+  screenshotsSection,
+  stoppedComment,
+  stoppedSlackText,
   subagentLabel,
   taskGitHubToken,
+  taskPrompt,
   teamQueryOptions,
+  threadStateAfter,
+  usd,
+  wipTitle,
 } from "../src/worker.js";
 
 const baseConfig = (): Config => ConfigSchema.parse({});
@@ -37,6 +56,7 @@ const designer: AgentSpec = {
   instructions: "You are the Designer. Look at the UI the change touches and report problems with fixes.",
   access: "read",
   model: "",
+  effort: "",
   enabled: true,
 };
 
@@ -595,5 +615,271 @@ describe("commitIdentity", () => {
       expect(commitIdentity("Pointer", viewer)).toEqual({ name: "Pointer", email: FALLBACK_COMMIT_EMAIL });
     }
     expect(FALLBACK_COMMIT_EMAIL).not.toContain("users.noreply.github.com");
+  });
+});
+
+describe("teamQueryOptions with a browser", () => {
+  const shotsDir = "/work/army-1/screenshots";
+
+  it("gives the browser tools and server to agents that can run commands, and opens the screenshots folder", () => {
+    const config = baseConfig();
+    config.team.agents.push(designer);
+    const browser = browserServer(shotsDir, { PATH: "/usr/bin" });
+    const opts = teamQueryOptions(config, { browser: { shotsDir } }, undefined, { browser });
+    for (const id of ["coder", "reviewer", "qa"]) {
+      expect(opts.agents[id]!.tools).toEqual(expect.arrayContaining(BROWSER_TOOLS));
+      expect(opts.agents[id]!.mcpServers).toEqual([{ [BROWSER_SERVER]: browser }]);
+    }
+    // "Looks only" agents cannot start the app, so they get no browser.
+    for (const id of ["researcher", "designer"]) {
+      expect(opts.agents[id]!.tools).not.toContain(BROWSER_TOOLS[0]);
+      expect(opts.agents[id]!.mcpServers).toBeUndefined();
+    }
+    expect(opts.allowedTools).toEqual(expect.arrayContaining(BROWSER_TOOLS));
+    expect(opts.additionalDirectories).toEqual([shotsDir]);
+    expect(opts.systemPrompt).toEqual({
+      type: "preset",
+      preset: "claude_code",
+      append: orchestratorPrompt(config, { browser: { shotsDir } }),
+    });
+  });
+
+  it("has no browser tools and no screenshots folder without a browser", () => {
+    const opts = teamQueryOptions(baseConfig(), {}, undefined, {});
+    expect(opts.allowedTools).not.toContain(BROWSER_TOOLS[0]);
+    expect(opts.agents.coder!.mcpServers).toBeUndefined();
+    expect(opts).not.toHaveProperty("additionalDirectories");
+  });
+
+  it("opens both the shared files and the screenshots folder", () => {
+    const attachments: SharedFile[] = [{ path: "/work/army-1/attachments/a.png", name: "a.png", size: 1 }];
+    const opts = teamQueryOptions(baseConfig(), { attachments, browser: { shotsDir } }, "/work/army-1/attachments", {
+      browser: browserServer(shotsDir, {}),
+    });
+    expect(opts.additionalDirectories).toEqual(["/work/army-1/attachments", shotsDir]);
+  });
+});
+
+describe("secrets of the repo setup and the webhook", () => {
+  it("redacts the webhook secret and every repository's variable values", () => {
+    const config = ConfigSchema.parse({
+      github: { webhookSecret: "whsec_0123456789abcdefghij" },
+      repoSetup: {
+        "acme/web": { env: { DATABASE_URL: "postgres://user:pw@db/app", STRIPE_KEY: "sk_test_123456" } },
+        "acme/api": { env: { API_TOKEN: "api-token-abcdef", PORT: "3000" } },
+      },
+    });
+    const redact = makeRedactor(configSecrets(config));
+    const text = redact("whsec_0123456789abcdefghij postgres://user:pw@db/app sk_test_123456 api-token-abcdef port 3000");
+    expect(text).toBe("[redacted] [redacted] [redacted] [redacted] port 3000");
+  });
+
+  it("redacts a long secret whole even when a shorter one is part of it", () => {
+    const redact = makeRedactor(["abcdef", "xx-abcdef-yy-long-token"]);
+    expect(redact("token xx-abcdef-yy-long-token and abcdef")).toBe("token [redacted] and [redacted]");
+  });
+});
+
+const PLAN: PlanItem[] = [
+  { content: "Read the login code", status: "completed" },
+  { content: "Fix the button handler", status: "in_progress" },
+  { content: "Add a test", status: "pending" },
+];
+
+describe("unfinished work in a draft pull request", () => {
+  it("titles the draft with the request's first line, short", () => {
+    expect(wipTitle("Fix the login button\nIt does nothing on mobile")).toBe("WIP: Fix the login button");
+    expect(wipTitle("\n  Make it faster  ")).toBe("WIP: Make it faster");
+    const long = wipTitle("x".repeat(200));
+    expect(long.length).toBeLessThanOrEqual(5 + 60);
+    expect(long.endsWith("…")).toBe(true);
+    expect(wipTitle("  ")).toBe("WIP: unfinished task");
+  });
+
+  it("writes the plan as a Markdown checklist", () => {
+    expect(planChecklist(PLAN)).toBe("- [x] Read the login code\n- [ ] ▶ Fix the button handler\n- [ ] Add a test");
+  });
+
+  it("explains the stop, the plan, the size of the work and how to continue, with the usual footer", () => {
+    const footer = prFooter("task-1", "Pointer");
+    const body = draftPrBody({ reason: "Timed out after 50 minutes.", plan: PLAN, filesChanged: 3, screenshots: 2, footer });
+    expect(body).toBe(
+      [
+        "**Stopped early:** Timed out after 50 minutes.",
+        "The team did not finish this task; this draft keeps its work so far.",
+        `### Plan\n${planChecklist(PLAN)}`,
+        "3 files changed.",
+        'Reply in the Slack thread (for example "continue") to pick it up on this branch.',
+        "### Screenshots\n2 screenshots from the browser checks are in the Slack thread.",
+        "---\nRequested in Slack · task `task-1` · built by Pointer and the team. A human must review and merge.",
+      ].join("\n\n"),
+    );
+    const bare = draftPrBody({ reason: "Stopped.", plan: [], filesChanged: 1, screenshots: 0, footer });
+    expect(bare).not.toContain("### Plan");
+    expect(bare).not.toContain("### Screenshots");
+    expect(bare).toContain("1 file changed.");
+  });
+
+  it("comments on an open pull request with the reason and the plan", () => {
+    expect(stoppedComment("The team stopped early: hit the 200-turn limit.", PLAN)).toBe(
+      `**Stopped early:** The team stopped early: hit the 200-turn limit.\n\n${planChecklist(PLAN)}\n\nReply in the Slack thread (for example "continue") to pick it up on this branch.`,
+    );
+    expect(stoppedComment("Stopped.", [])).not.toContain("- [");
+  });
+
+  it("tells the requester where the work is and how to continue", () => {
+    const pr = { html_url: "https://github.com/acme/web/pull/7", number: 7, draft: true };
+    expect(stoppedSlackText({ userId: "U1", reason: "Timed out after 50 minutes.", pr, cost: " · ~$4.20" })).toBe(
+      ':warning: <@U1> Stopped: Timed out after 50 minutes. The unfinished work is saved in a draft pull request: <https://github.com/acme/web/pull/7|#7>. Reply here (for example "continue") to pick it up on the same branch. · ~$4.20',
+    );
+    expect(stoppedSlackText({ userId: "U1", reason: "x.", pr: { ...pr, draft: false }, cost: "" })).toContain(
+      "saved in the pull request: <https://github.com/acme/web/pull/7|#7>",
+    );
+  });
+});
+
+describe("pull request texts", () => {
+  it("points to the screenshots in Slack only when there are some", () => {
+    expect(screenshotsSection(0)).toBe("");
+    expect(screenshotsSection(1)).toBe("### Screenshots\n1 screenshot from the browser checks is in the Slack thread.");
+  });
+
+  it("explains a missing Slack scope for screenshots", () => {
+    expect(screenshotFailureLine("missing_scope")).toBe(
+      "Screenshots could not be posted: the Slack app needs the files:write scope (update the app from the admin page).",
+    );
+    expect(screenshotFailureLine("not_in_channel")).toBe("Screenshots could not be posted (not_in_channel).");
+    expect(screenshotFailureLine(undefined)).toBe("Screenshots could not be posted.");
+  });
+
+  it("describes a fix round on the pull request", () => {
+    expect(fixComment(1, { title: "Fix the type error", summary: "Typed the handler.", verification: "npm test: 42 passed" })).toBe(
+      "**Fixed failing checks (round 1):** Fix the type error\n\nTyped the handler.\n\n### Verification\nnpm test: 42 passed",
+    );
+    expect(fixComment(2, { title: "t", summary: "s", verification: "" })).toBe("**Fixed failing checks (round 2):** t\n\ns");
+  });
+
+  it("formats budgets", () => {
+    expect(usd(15)).toBe("$15");
+    expect(usd(3.2)).toBe("$3.20");
+  });
+});
+
+describe("taskPrompt", () => {
+  const base = {
+    userId: "U1",
+    instruction: "Fix the login button",
+    repo: "acme/web",
+    base: "main",
+    branch: "army/fix-login-abc123",
+    resumed: false,
+    attachments: 0,
+  };
+
+  it("states the request and where the team is", () => {
+    expect(taskPrompt(base)).toBe(
+      [
+        "Request from Slack (user U1):",
+        "Fix the login button",
+        "",
+        "Repository: acme/web. Base branch: main. You are on branch: army/fix-login-abc123.",
+        "This is a fresh branch off the base branch.",
+      ].join("\n"),
+    );
+  });
+
+  it("continues where a stopped run left off", () => {
+    const stopped = { reason: "Timed out after 50 minutes.", at: "2026-11-19T10:00:00.000Z" };
+    const prompt = taskPrompt({ ...base, instruction: "continue", resumed: true, stopped });
+    expect(prompt).toContain("already contains the team's earlier work");
+    expect(prompt).toContain("The previous run stopped early (Timed out after 50 minutes; at 2026-11-19T10:00:00.000Z)");
+    expect(prompt).toContain("git diff origin/main...HEAD");
+    expect(prompt).toMatch(/continue where it left off/);
+    // A fresh branch has none of that work.
+    expect(taskPrompt({ ...base, stopped })).not.toContain("stopped early");
+  });
+
+  it("says a review started the follow-up and adds the feedback and shared files", () => {
+    const prompt = taskPrompt({ ...base, resumed: true, trigger: "review", attachments: 2, feedback: "Feedback on pull request #12…" });
+    expect(prompt.startsWith("Request from GitHub (user U1):")).toBe(true);
+    expect(prompt).toContain("This follow-up was started by feedback on the pull request");
+    expect(prompt).toContain('The requester shared 2 file(s) for this task: see "Files shared for this task"');
+    expect(prompt.endsWith("\n\nFeedback on pull request #12…")).toBe(true);
+    expect(taskPrompt(base)).not.toContain("feedback on the pull request");
+  });
+});
+
+describe("time limits", () => {
+  const start = 1_000_000;
+  const min = 60_000;
+
+  it("ends everything 8 minutes before the job's own limit, when there is one", () => {
+    expect(jobDeadline(start, "60")).toBe(start + 52 * min);
+    expect(jobDeadline(start, undefined)).toBeUndefined();
+    expect(jobDeadline(start, "")).toBeUndefined();
+    expect(jobDeadline(start, "abc")).toBeUndefined();
+    expect(jobDeadline(start, "0")).toBeUndefined();
+  });
+
+  it("caps the first run by the deadline", () => {
+    expect(firstRunTimeoutMs(50, undefined, start)).toBe(50 * min);
+    expect(firstRunTimeoutMs(50, start + 52 * min, start)).toBe(50 * min);
+    expect(firstRunTimeoutMs(50, start + 30 * min, start)).toBe(30 * min);
+    expect(firstRunTimeoutMs(50, start - min, start)).toBe(min);
+  });
+
+  it("gives a fix round at most 25 minutes, leaves room for its checks, and starts none with under 10 minutes left", () => {
+    expect(fixRunTimeoutMs(undefined, start)).toBe(FIX_RUN_MAX_MS);
+    expect(fixRunTimeoutMs(start + 60 * min, start)).toBe(25 * min);
+    expect(fixRunTimeoutMs(start + 20 * min, start)).toBe(12 * min);
+    expect(fixRunTimeoutMs(start + 10 * min, start)).toBe(2 * min);
+    expect(fixRunTimeoutMs(start + 9 * min, start)).toBeNull();
+  });
+});
+
+describe("threadStateAfter", () => {
+  const run = { repo: "acme/web", branch: "army/x-1", userId: "U2", lastRunAt: "2026-11-19T12:00:00.000Z" };
+  const previous: ThreadState = {
+    repo: "acme/web",
+    branch: "army/x-1",
+    prUrl: "https://github.com/acme/web/pull/7",
+    prNumber: 7,
+    requester: "U1",
+    lastRunAt: "2026-11-18T12:00:00.000Z",
+    stopped: { reason: "Timed out after 50 minutes.", at: "2026-11-18T12:50:00.000Z" },
+  };
+
+  it("records a new pull request and who started the thread", () => {
+    expect(threadStateAfter(null, { ...run, pr: { url: "https://github.com/acme/web/pull/9", number: 9 } })).toEqual({
+      repo: "acme/web",
+      branch: "army/x-1",
+      prUrl: "https://github.com/acme/web/pull/9",
+      prNumber: 9,
+      requester: "U2",
+      lastRunAt: "2026-11-19T12:00:00.000Z",
+    });
+  });
+
+  it("keeps the stop for a draft of unfinished work and clears it once the work is published", () => {
+    const stopped = { reason: "Budget.", at: "2026-11-19T12:30:00.000Z" };
+    expect(threadStateAfter(previous, { ...run, pr: { url: previous.prUrl!, number: 7 }, stopped })?.stopped).toEqual(stopped);
+    const finished = threadStateAfter(previous, { ...run, pr: { url: previous.prUrl!, number: 7 } });
+    expect(finished).not.toHaveProperty("stopped");
+    expect(finished?.requester).toBe("U1");
+  });
+
+  it("only moves lastRunAt when the task published nothing", () => {
+    expect(threadStateAfter(previous, run)).toEqual({ ...previous, lastRunAt: run.lastRunAt });
+    expect(threadStateAfter({ repo: "acme/web", branch: "b" }, run)).toEqual({
+      repo: "acme/web",
+      branch: "b",
+      requester: "U2",
+      lastRunAt: run.lastRunAt,
+    });
+  });
+
+  it("leaves a thread about another repository, or without state, alone", () => {
+    expect(threadStateAfter({ ...previous, repo: "acme/api" }, run)).toBeNull();
+    expect(threadStateAfter(null, run)).toBeNull();
   });
 });
