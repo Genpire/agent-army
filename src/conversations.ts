@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import type { Spending } from "./budget.js";
 import type { Config, ConfigRepo } from "./config.js";
 import { KeyedQueue } from "./listen.js";
 import type {
@@ -382,6 +383,8 @@ export interface ConversationDeps {
   runner: Runner;
   brain: PointerBrain;
   usage?: UsageRepo;
+  /** The spending caps: checked before replies and repo tasks, alerts after spend. Absent = no caps (tests). */
+  spending?: Pick<Spending, "checkTask" | "checkChat" | "notify">;
   /** The concurrency limit Slack answers use; without it, answers run unlimited (tests). */
   brainSlot?: <T>(fn: () => Promise<T>) => Promise<T>;
   now?: () => Date;
@@ -391,7 +394,8 @@ export type SendResult = { ok: true; conversation: Conversation } | { ok: false;
 
 export type DirectTaskResult =
   | { ok: true; conversationId: string; taskId: string }
-  | { ok: false; status: 400 | 502; error: string; conversationId?: string };
+  /** 409: a spending cap is used up (no conversation is created). */
+  | { ok: false; status: 400 | 409 | 502; error: string; conversationId?: string };
 
 /** What the GitHub webhook needs to follow up in a console conversation (no Slack there). */
 export interface WebThreads {
@@ -539,6 +543,9 @@ export class ConversationService implements WebThreads {
     const config = await this.deps.configRepo.load();
     const checked = resolveTaskRepo(config, { repo });
     if (!checked.ok) return { ok: false, status: 400, error: checked.error };
+    // Before the conversation is created: a refused task leaves nothing behind (startTask checks again).
+    const allowed = (await this.deps.spending?.checkTask(checked.repo)) ?? { ok: true };
+    if (!allowed.ok) return { ok: false, status: 409, error: allowed.error };
     const now = this.iso();
     const c: Conversation = {
       id: newConversationId(this.now().getTime()),
@@ -586,7 +593,7 @@ export class ConversationService implements WebThreads {
     const ticket = input.ticket ?? (await this.tasksOf(conversation)).reverse().find((t) => t.ticket && t.repo.toLowerCase() === input.repo.toLowerCase())?.ticket;
     const config = await this.deps.configRepo.load();
     const started = await startThreadTask(
-      { tasks: this.deps.tasks, runner: this.deps.runner, redact: makeRedactor(configSecrets(config)) },
+      { tasks: this.deps.tasks, runner: this.deps.runner, redact: makeRedactor(configSecrets(config)), budget: this.deps.spending },
       {
         repo: input.repo,
         channel: WEB_CHANNEL,
@@ -673,6 +680,9 @@ export class ConversationService implements WebThreads {
     redact: (text: string) => string,
   ): Promise<{ text: string; costUsd?: number; isError: boolean }> {
     if (!config.anthropic.apiKey) return { text: NOT_CONNECTED, isError: true };
+    // The monthly cap: checked before any model call.
+    const allowed = (await this.deps.spending?.checkChat()) ?? { ok: true };
+    if (!allowed.ok) return { text: allowed.error, isError: true };
     const c = await this.repo.get(id);
     if (!c) return { text: NOT_FOUND, isError: true };
     const before = c.messages.slice(0, Math.max(0, c.messages.findIndex((m) => m.id === message.id)));
@@ -695,7 +705,10 @@ export class ConversationService implements WebThreads {
     };
     const slot = this.deps.brainSlot ?? (<T>(fn: () => Promise<T>) => fn());
     const answer = await slot(() => this.deps.brain.reply(req, ctx));
-    void this.deps.usage?.recordChat(answer.costUsd).catch((err: unknown) => console.error("[usage] chat cost not recorded:", errorText(err)));
+    void this.deps.usage
+      ?.recordChat(answer.costUsd)
+      .then(() => this.deps.spending?.notify())
+      .catch((err: unknown) => console.error("[usage] chat cost not recorded:", errorText(err)));
     const text = redact(answer.text.trim()) || "(no reply)";
     return { text, ...(answer.costUsd !== undefined ? { costUsd: answer.costUsd } : {}), isError: answer.isError };
   }

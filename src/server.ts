@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { AttachmentRepo } from "./attachments.js";
+import { Spending } from "./budget.js";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { z } from "zod";
 import {
@@ -70,6 +71,12 @@ const CONNECTION_ID = z.string().max(40).regex(/^gh-[0-9a-f]{6,}$/, "Connection 
 const MAX_EXTRA_GITHUB = 10;
 const CI_WAIT_ERROR = "The wait for checks is a whole number of minutes from 0 to 60.";
 const CI_FIX_ERROR = "Fix rounds are a whole number from 0 to 5.";
+const PREVIEW_CHECK_ERROR = 'The preview check is "off", "visible" or "always".';
+const CAP_ERROR = "Caps are amounts in USD from 0 (no cap) to 100,000.";
+const ALERT_PERCENT_ERROR = "The alert level is a whole percent from 10 to 100.";
+const CAP_USD = z.number(CAP_ERROR).min(0, CAP_ERROR).max(100_000, CAP_ERROR);
+/** Repositories with their own monthly cap; more is not a useful setting. */
+const MAX_REPO_CAPS = 200;
 /** GitHub event names, e.g. pull_request_review. */
 const GITHUB_EVENT = z.string().max(100).regex(/^[a-z_]+$/);
 /** The webhook secret pasted in GitHub and on the admin page: printable ASCII without spaces. "" removes it. */
@@ -161,9 +168,12 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
   const runner = overrides.runner ?? createRunner(() => maxParallel, env);
   const brain = overrides.brain ?? createPointerBrain({ configRepo, memory, notes, attachments });
   const usage = new UsageRepo(store, tasks);
+  const slackFactory = overrides.slack ?? slackClient;
+  // Spending caps for every start path (Slack, console, GitHub reviews) and chat; alerts in Slack.
+  const spending = new Spending({ store, usage, config: () => configRepo.load(), slack: slackFactory });
   // Console conversations: answered by the same brain, within the same limit as Slack answers.
-  const conversations = new ConversationService({ store, configRepo, tasks, runner, brain, usage, brainSlot: withBrainSlot });
-  const slackDeps: SlackDeps & { web: WebThreads } = {
+  const conversations = new ConversationService({ store, configRepo, tasks, runner, brain, usage, spending, brainSlot: withBrainSlot });
+  const slackDeps: SlackDeps & { web: WebThreads; spending: Spending } = {
     configRepo,
     tasks,
     runner,
@@ -171,8 +181,9 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
     attachments,
     usage,
     brain,
-    slack: overrides.slack ?? slackClient,
+    slack: slackFactory,
     web: conversations,
+    spending,
   };
 
   // The setup token creates the admin account on first run and resets its
@@ -633,6 +644,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
             progressEveryMin: z.number(),
             ciWaitMin: z.number().int(CI_WAIT_ERROR).min(0, CI_WAIT_ERROR).max(60, CI_WAIT_ERROR),
             ciFixRounds: z.number().int(CI_FIX_ERROR).min(0, CI_FIX_ERROR).max(5, CI_FIX_ERROR),
+            previewCheck: z.enum(["off", "visible", "always"], PREVIEW_CHECK_ERROR),
           })
           .partial()
           .optional(),
@@ -774,9 +786,53 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
     res.send(bytes);
   });
 
-  // Claude spend this calendar month (UTC): chat replies and repo tasks.
+  // Claude spend this calendar month (UTC): chat replies and repo tasks, with the caps and their alerts.
   app.get("/api/usage", requireAdmin, async (_req, res) => {
-    res.json(await usage.month());
+    res.json(await spending.view());
+  });
+
+  // Spending caps. Fields left out are kept; perRepoUsd replaces the whole list (0 or a missing repo = no cap).
+  app.post("/api/budget", requireAdmin, async (req, res) => {
+    const input = body(
+      z.object({
+        monthlyUsd: CAP_USD.optional(),
+        // Keys are checked below: a record's key error has no readable message.
+        perRepoUsd: z
+          .record(z.string(), CAP_USD)
+          .refine((caps) => Object.keys(caps).length <= MAX_REPO_CAPS, `At most ${MAX_REPO_CAPS} repositories can have their own cap.`)
+          .optional(),
+        alertPercent: z.number(ALERT_PERCENT_ERROR).int(ALERT_PERCENT_ERROR).min(10, ALERT_PERCENT_ERROR).max(100, ALERT_PERCENT_ERROR).optional(),
+        alertChannel: z
+          .string()
+          .trim()
+          .refine((c) => c === "" || CHANNEL_RE.test(c), "Channel IDs look like C012ABCDEF.")
+          .optional(),
+      }),
+      req,
+      res,
+    );
+    if (!input) return;
+    let perRepoUsd: Record<string, number> | undefined;
+    if (input.perRepoUsd) {
+      perRepoUsd = {};
+      const seen = new Set<string>();
+      for (const [repo, cap] of Object.entries(input.perRepoUsd)) {
+        if (repo.length > 200 || !REPO_RE.test(repo)) return void res.status(400).json({ error: "Repos look like owner/repo." });
+        const key = repo.toLowerCase();
+        if (seen.has(key)) return void res.status(400).json({ error: `${repo} is listed twice.` });
+        seen.add(key);
+        if (cap > 0) perRepoUsd[repo] = cap;
+      }
+    }
+    const updated = await configRepo.update((c) => {
+      if (input.monthlyUsd !== undefined) c.budget.monthlyUsd = input.monthlyUsd;
+      if (perRepoUsd) c.budget.perRepoUsd = perRepoUsd;
+      if (input.alertPercent !== undefined) c.budget.alertPercent = input.alertPercent;
+      if (input.alertChannel !== undefined) c.budget.alertChannel = input.alertChannel;
+    });
+    // A lower cap may already be reached: tell the alert channel now, not after the next task.
+    void spending.notify();
+    res.json({ ok: true, budget: publicView(updated).budget });
   });
 
   app.post("/api/team", requireAdmin, async (req, res) => {

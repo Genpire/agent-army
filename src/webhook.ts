@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
+import type { TaskBudgetCheck } from "./budget.js";
 import { type Config, REPO_RE } from "./config.js";
 import { BOT_MARKER, WRITE_ASSOCIATIONS } from "./github.js";
 import { connectionForRepo } from "./github-access.js";
@@ -208,6 +209,8 @@ export type WebhookDeps = Pick<SlackDeps, "configRepo" | "tasks" | "runner" | "s
   store?: Pick<Store, "get" | "put">;
   /** Test seam: the monday.com client for a token. */
   monday?: (token: string) => TicketClient;
+  /** The spending caps, checked before a follow-up starts (the console path checks them in startTask). */
+  spending?: TaskBudgetCheck;
 };
 
 // One delivery at a time per pull request, so two quick reviews cannot both start a task.
@@ -261,7 +264,7 @@ async function followUp(event: string, d: Start, config: Config, deps: WebhookDe
   const repo = thread && thread.repo.toLowerCase() === d.repo.toLowerCase() ? thread.repo : d.repo;
   const verb = d.kind === "changes_requested" ? "requested changes on" : d.kind === "commented" ? "commented on" : `asked ${config.team.pointer.name} on`;
   const started = await startThreadTask(
-    { tasks: deps.tasks, runner: deps.runner, slack, redact },
+    { tasks: deps.tasks, runner: deps.runner, slack, redact, budget: deps.spending },
     {
       repo,
       channel: ref.channel,

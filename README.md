@@ -22,7 +22,9 @@ Pointer, a self-hosted assistant for Slack and the web, leads a team of Claude a
 - **Ask where you already work.** In Slack (DMs, channels, threads) or in the console's Chat page. Pointer answers questions, researches the web, reads GitHub and the files you share, remembers what you tell it, and opens monday.com tickets.
 - **A team, not a single bot.** Pointer plans; a Coder builds; a Reviewer and QA check the work. Rename them, edit their instructions, add your own roles and pick a model and effort for each.
 - **Watch it work.** Every repo task shows its step (clone, setup, plan, build, verify, publish, checks), the plan as a checklist, what each agent did and for how long, the files and commands, and the result.
-- **It checks its own work.** Agents start your app and click through UI changes in a headless browser with screenshots, wait for CI and fix failing checks, and pick up review comments on the pull request.
+- **It checks its own work.** Agents start your app and click through UI changes in a headless browser with screenshots, wait for CI and fix failing checks, open the pull request's real preview deployment (Vercel, Netlify…), and pick up review comments on the pull request.
+- **Works from your tickets.** Move a monday.com ticket to "Ready for dev" and the team starts on it; the ticket follows along: Working on it, In review with the pull request, Done when it is merged.
+- **Spending under control.** A monthly cap and caps per repository, alerts in Slack before you hit them, and model routing that sends small tasks to a cheaper model.
 - **Humans stay in charge.** Agents only ever open pull requests; they never push to your branches or merge.
 - **Yours.** MIT licensed and self-hosted: your code, conversations and keys stay in your deployment. You pay only for the Claude API you use, with per-task budgets.
 
@@ -139,7 +141,7 @@ Workers run as child processes of the server (`RUNNER=local`). Slack needs to re
 1. **Admin account**: paste the setup token, choose a password.
 2. **Claude** (Integrations): an Anthropic API key. Use a dedicated key with a spend limit.
 3. **Slack** (Integrations, optional if you only use the console): click *Create Slack app* (the manifest is pre-filled with this deployment's URL and Pointer's name), install it to your workspace, paste the Bot User OAuth Token and Signing Secret. Invite Pointer to the channels where you want it.
-4. **GitHub** (Integrations): a fine-grained personal access token, ideally on a dedicated bot account, limited to the repos the agents may touch, with *Contents: read/write*, *Pull requests: read/write*, *Metadata: read*, and for the [CI checks](#ci-checks) loop *Checks: read*, *Commit statuses: read* and *Actions: read*. Optionally restrict it to owners or exact repos. For repos outside your organisation, add more tokens under *Other GitHub connections* (see [GitHub connections](#github-connections)). Without GitHub, Pointer still chats; GitHub questions and repo tasks say GitHub is not connected. Optionally add the webhook for [pull request reviews](#pull-request-reviews) on the same pane.
+4. **GitHub** (Integrations): a fine-grained personal access token, ideally on a dedicated bot account, limited to the repos the agents may touch, with *Contents: read/write*, *Pull requests: read/write*, *Metadata: read*, and for the [CI checks](#ci-checks) loop *Checks: read*, *Commit statuses: read* and *Actions: read*, and for [preview checks](#preview-checks) *Deployments: read*. Optionally restrict it to owners or exact repos. For repos outside your organisation, add more tokens under *Other GitHub connections* (see [GitHub connections](#github-connections)). Without GitHub, Pointer still chats; GitHub questions and repo tasks say GitHub is not connected. Optionally add the webhook for [pull request reviews](#pull-request-reviews) on the same pane.
 5. **monday.com** (Integrations, optional): an API token so Pointer can open and update tickets, a default board and the boards it may use. See [monday.com](#mondaycom).
 6. **Projects** and **Settings** (optional): channel → default repo and Pointer channels (Projects), who may talk to Pointer, budget and turn limits per task, how long to wait for CI checks and how many fix rounds to run (Settings). Per repo, **Projects → Repo setup** holds a setup command, how to start the app and environment variables (see [Repo setup](#repo-setup)).
 7. **Team** (optional): rename Pointer, give it extra instructions, edit or add agents.
@@ -269,6 +271,43 @@ After pushing, the worker waits for the pull request's checks: GitHub Actions ch
 
 A fine-grained token needs *Checks: read*, *Commit statuses: read* and *Actions: read* (for job logs) on top of *Contents* and *Pull requests* read/write. Editing an existing token's permissions on GitHub keeps its value, so nothing changes on the admin page. A classic token with the `repo` scope covers them.
 
+### Preview checks
+
+Most teams get a preview deployment for every pull request (Vercel, Netlify and others). After the pull request's [CI checks](#ci-checks), the worker finds that preview and has a verifying agent open the **real preview** in the headless browser (see [Browser checks](#browser-checks)): it walks through what the pull request changed, reads the browser console for errors, takes screenshots and reports whether it looks right.
+
+**When it runs** (**Settings**, `limits.previewCheck`):
+
+- `visible` (the default): only when the pull request changes what people see: markup and components (`.tsx`, `.jsx`, `.vue`, `.svelte`, `.astro`, `.html`, templates), styles (`.css`, `.scss`, `.less`, `styles/`, theme files, Tailwind config), public assets (`public/`, `static/`, `assets/`), and code in page, route, component, layout or view folders (not `api/`). Changes to tests, fixtures, mocks and stories alone do not count.
+- `always`: after every pull request the task opens or updates.
+- `off`: never.
+
+A check that is not needed costs nothing. The check also needs the worker's browser; without it (for example `BROWSER=off`), the task says the preview could not be opened.
+
+**How the preview is found.** For the pull request's head commit, the worker reads the commit's GitHub deployments, ignores production ones (Vercel names them `Production – <project>`), and takes the newest deployment whose latest status is a success with an environment URL. When a deployment is still building, it waits for it, up to 5 minutes and never past the task's deadline. In a monorepo with several previews (`Preview – web`, `Preview – docs`), the project whose folder the change touches comes first and the others are listed for the agent. When there is no deployment, or the token may not read them, the Vercel bot's comment on the pull request is used instead, if it says the preview is ready and was updated after the head commit.
+
+**The check** is one more round of the team, after the checks and any fix rounds:
+
+- It changes nothing: no code, commits or pushes. Problems are reported, not fixed, and no fix round starts on its own.
+- It spends what is left of the task's budget, at most $2, and does not start with less than $0.50 left. It may run for up to 12 minutes and needs at least 4 minutes before the task's deadline.
+- Screenshots are named `preview-…` and stored and posted like the other screenshots.
+
+**Where the result shows:**
+
+- a comment on the pull request: *Checked the preview at &lt;url&gt;: …* (or *… and found problems: …*), with what was checked and the number of screenshots;
+- a *Preview* line in the Slack result: looks right, problems found, or why it could not be checked;
+- in the admin console: a line on the task's card in Chat, a *Preview deployment* section in its timeline, and a *Preview* row in the task's details on the **Activity** page.
+
+When problems are found, reply in the thread (or comment on the pull request) with what to fix, and the team picks it up on the same branch.
+
+**GitHub token permissions.** A fine-grained token needs *Deployments: read* to find the preview, on top of the permissions in [CI checks](#ci-checks). Without it, GitHub answers 403: the worker falls back to the Vercel bot's comment (that needs *Pull requests: read*, which the token already has) and otherwise says the token needs *Deployments: read*. Editing an existing token's permissions on GitHub keeps its value. A classic token with the `repo` scope covers it; a GitHub App needs the *Deployments* read permission.
+
+**Protected previews (Vercel Deployment Protection).** When Vercel asks for a login on previews, give the worker the project's bypass secret:
+
+1. In the Vercel project, open **Settings → Deployment Protection** and, under **Protection Bypass for Automation**, create a secret (or copy the existing one).
+2. On the admin page, open **Projects → Repo setup** for the repository and add it as an environment variable: `VERCEL_AUTOMATION_BYPASS_SECRET=<the secret>`.
+
+The secret never goes into the team's prompt. For each check, the worker opens a redirect on `127.0.0.1` (a random port and path) that forwards the browser to the preview with Vercel's `x-vercel-protection-bypass` query parameter and `x-vercel-set-bypass-cookie=true`, so Vercel sets its bypass cookie and the agent then browses the preview normally. The agent is told only the redirect's address and, for commands such as `curl`, to pass the variable by name as the `x-vercel-protection-bypass` header without ever printing it. The secret is sent only to previews Vercel deployed, and it is redacted from everything the worker posts, comments and logs. Like every repo variable, it is readable from the agents' shell (see [Security model](#security-model)): use the bypass secret, never a Vercel token. Without the secret, an agent that meets Vercel's login page reports the check as not possible and says to add it.
+
 ### Pull request reviews
 
 With the GitHub webhook set up, feedback on a pull request the team opened starts a follow-up task in that task's Slack thread, on the same branch, as if someone had replied in the thread.
@@ -317,6 +356,55 @@ USER root
 RUN apt-get update && apt-get install -y golang && rm -rf /var/lib/apt/lists/*
 USER node
 ```
+
+## Spending
+
+Repo tasks are where the credit goes. Two settings keep it in check: **caps** stop new work once a budget is used up, and **model routing** runs small tasks on a cheaper model.
+
+### Caps
+
+On **Settings → Spending**:
+
+- **Monthly budget** (`budget.monthlyUsd`): what Claude may cost per calendar month (UTC), chat replies and repo tasks together. `0` (the default) is no cap.
+- **Caps per repository** (`budget.perRepoUsd`): what repo tasks on one repository may cost per month. Chat does not count toward them. A repository without a row has no cap of its own.
+- **Alert at** (`budget.alertPercent`, 80 by default) and **Alert channel** (`budget.alertChannel`, a Slack channel ID).
+
+What a cap does:
+
+- **New repo tasks are refused** once the monthly cap or the task's repository cap has less than $0.50 left, from every place a task starts: Slack, the console's chat and **New task**, and GitHub review follow-ups. Nothing is posted, saved or started; the refusal says how much was used, the cap, and that the owner can raise it under **Settings → Spending**. In Slack and in the console's chat, Pointer relays it; a review follow-up posts it in the task's thread.
+- **Chat replies are refused** once the monthly cap is used up, before any model call. Commands like `status` and `bind` still work.
+- **A task's budget never exceeds what is left.** The worker lowers the task's budget (**Budget per task**) to what is left of the caps that apply, and its fix rounds share that budget. The timeline says when it did.
+- **Running tasks are never stopped by a cap**: their own budget already bounds them. Tasks that run at the same time each see what was left when they started, so together they can go past a cap by up to their budgets.
+
+The spend counted is the one the Activity page shows: each chat reply's reported cost and each repo task's cost on its record, in the current UTC month.
+
+### Alerts
+
+When a cap reaches its alert level, and again when it is used up:
+
+- the **Overview** page shows a warning banner (alert level) or an error banner (used up), with the month's spend against every cap as progress bars;
+- with an **Alert channel** set, Pointer posts one message there per cap and level per month, after the task or chat reply that crossed it (invite the app to the channel first). A cap passed in one go gets only the "used up" message. Changing a cap or the alert level alerts again for the new values. A message Slack refused (for example `not_in_channel`) is tried again after the next spend.
+
+### Model routing
+
+On **Team → Model routing**, turn on **Route repo tasks by size**. Before each repo task, the worker asks Haiku 5.5 (`claude-haiku-5-5`) to call the request *small*, *medium* or *large*: one call without tools, one turn, a JSON answer, at most $0.05 (in practice a fraction of a cent, added to the task's cost). The task then runs with that size's model and effort:
+
+| Size | Meant for | Default model | Default effort |
+| --- | --- | --- | --- |
+| Small | A contained change with a clear location: a typo, copy, a config value, a small fix in one or two files | Sonnet 5.5 | low |
+| Medium | A feature or fix in one area: several files, new tests, or some investigation first | Sonnet 5.5 | medium |
+| Large | Work across many files or modules: a new subsystem, a migration, a broad refactor, a bug with an unknown cause | Claude default (the model on **Integrations → Claude**) | high |
+
+- The model applies to Pointer and to every agent without its own model; the effort replaces the repo task effort for Pointer and for every agent without its own effort. Agents with their own model or effort keep it.
+- If the estimate fails (no answer, an error, a timeout), the task is treated as medium. Routing never stops a task.
+- **Cost estimate.** The task records its size (`task.size`: size, model, effort, reason) and a cost range (`task.estimateUsd`): the 25th to 75th percentile of what earlier finished tasks of the same size cost, on the same repository once it has three of them, else on any repository, else a first guess ($0.25–$1.50 small, $1–$5 medium, $4–$15 large). The range never goes past the task's own budget. Slack's first progress line shows it (`small task · Sonnet 5.5, low effort · ~$0.40–$1.20`), and so does the task's timeline (a `routing` event) and its card in the console.
+- Off (the default): every task runs on the configured models with the repo task effort.
+
+Opus 5.5 costs $4 / $20 per million input / output tokens, Sonnet 5.5 $2 / $10, Haiku 5.5 $0.10 / $0.50.
+
+### Preview check
+
+**Settings → Repo task limits → Preview check** (`limits.previewCheck`): after the checks, the team opens the pull request's preview deployment (Vercel, Netlify… through GitHub deployments) in a browser and looks at the change: **Off**, **When the change is visible** (the default) or **Always**. Each look is a short extra run of the team, paid from the task's budget.
 
 ## Memory
 
@@ -367,6 +455,39 @@ Once connected, the pane offers:
 - **Default board for tickets**, picked from your most recently used boards (search finds others).
 - **Boards Pointer may use**: board ids, comma separated (the number in a board's URL, `…/boards/1234567890`). Empty means every board the token's user can see. When set, Pointer cannot read or change any other board, and the default board must be one of them.
 - **Disconnect**, which forgets the token and keeps the board settings.
+
+### Tickets that start repo tasks
+
+Optional, and off until you turn it on, board by board. When a ticket on an automated board moves to the board's start status (for example **Ready for dev**), the team starts on it, and the ticket shows the progress:
+
+| When | The ticket's status | The update posted on the ticket |
+| --- | --- | --- |
+| The task starts | the "working" label (default **Working on it**) | "The team started on this", with a link to the task's conversation in the console |
+| The pull request opens (or a follow-up updates it) | the "in review" label (**In review**) | the pull request's link and title |
+| The team stops early, fails or is blocked | the "stuck" label (**Stuck**) | the reason, and the draft pull request that keeps the unfinished work |
+| The team answers without changing code | the "in review" label | the answer, for a person to read |
+| The pull request is merged | the "done" label (**Done**) | "Merged: …" |
+| The pull request is closed without merging | unchanged | that it was closed |
+
+An empty label leaves the status as it is. Updates are signed by Pointer, and credentials are removed from them.
+
+The task runs in a new conversation on the **Chat** page, named after the ticket. Its instruction is the ticket's name, its description and first updates (oldest first) and its column values, in short. Files on the ticket are listed by name: ask Pointer in that conversation to attach them (its monday.com tools) and a follow-up task gets them. A follow-up in that conversation (a reply such as "continue", or review feedback on the pull request) keeps updating the same ticket.
+
+**Set it up** on **Integrations → monday.com → Ticket automation** (monday.com and GitHub connected):
+
+1. **Automate a board**: pick the board (one of the boards Pointer may use, when that list is set), the repository (allowed by a GitHub connection), the status column, the label that starts a task, and the labels the team sets. The labels are checked against the board; the start label must differ from the others, so a ticket cannot start itself again.
+2. Turn on **Start tasks from tickets**.
+3. **Connect webhook**: creates a webhook on each automated board (a change of its status column) pointing at `https://<your deployment>/monday/webhook/<secret>`. monday.com checks the address once when the webhook is created, so the deployment must be reachable from the internet. Connect again after adding a board.
+
+If the token's monday.com user cannot create webhooks (it needs the `webhooks:write` scope and edit rights on the board), the pane shows the address and how to add it by hand: on the board, open **Integrate**, search for **Webhooks**, choose **When a column changes, send a webhook**, pick the status column and paste the address.
+
+For **Done** on merge, the GitHub webhook (see [Pull request reviews](#pull-request-reviews)) must also send **Pull requests** events.
+
+**What is trusted.** monday.com does not sign webhooks created with an API token, so the secret in the address is the check: deliveries to a wrong address, or while the automation is off, get `404`. The delivery itself is not trusted beyond its board and item ids: Pointer reads the item again and starts a task only when its status is the start label now, its board is automated (and allowed), and no task is already working on that ticket. A ticket that started a task is not started again within five minutes. Ticket text is never logged; logs carry board, item and task ids and the outcome.
+
+Anyone who can change the status on an automated board can start a task on its repository, within the same limits as a request from Slack: allowed repositories only, the per-task budget, and a pull request a human must merge. Automate only boards whose members you would let ask for changes.
+
+Turning the automation off stops new tasks and makes the webhook address answer `404`; tasks already running keep updating their tickets.
 
 ## Updating an existing Slack app
 
@@ -445,17 +566,17 @@ Besides the admin API, the service takes `POST /slack/events` from Slack and `PO
 | `POST /api/monday` | `{ token?, defaultBoardId?, allowedBoardIds? }` | With `token`: verifies it and connects as its user. Board ids are digit strings (at most 100; `defaultBoardId: ""` clears the default, which must be among `allowedBoardIds` when those are set). Without a token, monday.com must already be connected. Returns `{ ok, userName?, accountName? }`. |
 | `POST /api/monday/disconnect` | | Forgets the token and its user; keeps the board settings. |
 | `GET /api/monday/boards` | `?search=` | `{ boards: [{ id, name, workspace? }] }`: up to 50 active boards, most recently used first, filtered by name. `400` when not connected or when monday.com fails. |
-| `POST /api/settings` | `{ orgName?, allowedUserIds?, allowedOwners?, bindings?, pointerChannels?, limits? }` | Partial update; `limits` (`maxTurns`, `maxBudgetUsd`, `maxParallel`, `progressEveryMin` 0-60, `ciWaitMin` 0-60, `ciFixRounds` 0-5) merges field by field. `allowedOwners` is the primary GitHub token's allow list (owners or exact repos). |
+| `POST /api/settings` | `{ orgName?, allowedUserIds?, allowedOwners?, bindings?, pointerChannels?, limits? }` | Partial update; `limits` (`maxTurns`, `maxBudgetUsd`, `maxParallel`, `progressEveryMin` 0-60, `ciWaitMin` 0-60, `ciFixRounds` 0-5, `previewCheck` `off` \| `visible` \| `always`) merges field by field. `allowedOwners` is the primary GitHub token's allow list (owners or exact repos). |
 | `POST /api/repo-setup` | `{ repo, setupCommand?, startCommand?, appUrl?, env? }` | Creates or updates a repo's setup; omitted fields are kept. `setupCommand` up to 2 000 characters, `startCommand` up to 500, `appUrl` empty or `http(s)://…`. `env` is `{ NAME: "value" \| null }`: a value sets the variable, `null` deletes it, names left out are kept (at most 100; reserved names are refused). Returns `{ ok, repoSetup }`: that repo's setup with variable names only. |
 | `POST /api/repo-setup/delete` | `{ repo }` | Removes a repo's setup and its variables (`404` if unknown). |
-| `POST /api/team` | `{ pointer, agents }` | Replaces the team. `pointer`: `{ name, instructions, budgetUsd, maxTurns, model?, effort?, taskEffort? }`; each agent: `{ id, name, role, emoji, description, instructions, access, model?, effort?, enabled }`. Effort is `low`, `medium`, `high`, `xhigh` or `max` (an agent's `""` follows the chat or task). |
+| `POST /api/team` | `{ pointer, agents }` | Replaces the team. `pointer`: `{ name, instructions, budgetUsd, maxTurns, model?, effort?, taskEffort?, routing? }`; `routing`: `{ enabled, small, medium, large }`, each size `{ model, effort }` (`model: ""` = the configured model). Each agent: `{ id, name, role, emoji, description, instructions, access, model?, effort?, enabled }`. Effort is `low`, `medium`, `high`, `xhigh` or `max` (an agent's `""` follows the chat or task). |
 | `GET /api/memory` | | `{ facts, max }` |
 | `POST /api/memory/delete` | `{ id }` | Deletes one fact (`404` if unknown). |
 | `GET /api/notes` | | `{ notes: [{ repo, updatedAt, chars }], max }`, newest first; `max` is 8 000. |
 | `GET /api/notes/:owner/:repo` | | `{ repo, text, updatedAt }`, or `404` when the repo has no notes. |
 | `POST /api/notes` | `{ repo, text }` | Replaces the repo's notes; empty text deletes them. `400` for a bad repo name or text over the limit. |
 | `GET /api/tasks` | | `{ tasks }`: the 30 most recent repo tasks; a running task carries `progress` (`now`, `plan`, `agents`, `recent`, `files`, `filesCount`, `startedAt`, `updatedAt`) and `stage` (`{ phase, text, at }`: cloning, setup, publishing, waiting for checks). A task may also have `channel` `web` (started from the console; `threadTs` is its conversation), `trigger` (`slack`, `web` or `review`), `report` (`{ title, summary, verification, risks }`), `notes` (other result lines), `ci` (`{ state, fixRounds, names, total }`, state `passed`, `failed`, `pending` or `none`), `fixRound` (`{ round, rounds, failing, at }`), `prDraft` and `screenshots` (how many were kept). |
-| `POST /api/tasks` | `{ repo, instruction }` | Starts a repo task directly (no Pointer reply) in a new conversation whose first message is the instruction (up to 8 000 characters). Same checks as Slack (GitHub connected, allow lists: `400`). `202` with `{ conversationId, taskId }`; `502` with `{ error, conversationId }` when the worker could not start. |
+| `POST /api/tasks` | `{ repo, instruction }` | Starts a repo task directly (no Pointer reply) in a new conversation whose first message is the instruction (up to 8 000 characters). Same checks as Slack (GitHub connected, allow lists: `400`). `409` when a spending cap is used up (no conversation is created). `202` with `{ conversationId, taskId }`; `502` with `{ error, conversationId }` when the worker could not start. |
 | `GET /api/tasks/:id/events` | | `{ timeline }`: the task's steps (`phases`: `clone`, `setup`, `plan`, `build`, `verify`, `publish`, `checks`, each `pending`, `active`, `done`, `skipped` or `failed`, with times), its last 300 events (`{ at, phase, kind, text, agent?, ms?, ok?, url? }`; kinds such as `phase`, `setup`, `agent-start`, `agent-done`, `edit`, `command`, `browser`, `screenshot`, `push`, `pr`, `checks`, `fix-round`, `end`), `dropped` (older events left out) and `checks` (`[{ name, state, url? }]`). `null` for tasks without one. Slack and console tasks alike. |
 | `GET /api/tasks/:id/screenshots` | | `{ screenshots: [{ name, size }] }`: the screenshots from the task's browser checks. |
 | `GET /api/tasks/:id/screenshots/:name` | | The image (`image/png`, `image/jpeg` or `image/webp`, `Cache-Control: private`). Names are checked (`400`); `404` when unknown. |
@@ -464,7 +585,12 @@ Besides the admin API, the service takes `POST /slack/events` from Slack and `PO
 | `GET /api/conversations/:id` | | `{ conversation, tasks, live? }`. `conversation`: `{ id, title, createdAt, updatedAt, pending, taskIds, messages: [{ id, role: "user" \| "pointer", text, at, costUsd?, isError?, activity?, tasks?, result? }] }` (Markdown text; `activity` is Pointer's steps, `tasks` the repo tasks started with that message, `result` marks a task milestone `{ taskId, milestone: "pr" \| "checks" \| "end" }`). `tasks`: its repo tasks, newest first, with progress. `live` while Pointer answers: `{ messageId, startedAt, text, activity, tasks }`. |
 | `POST /api/conversations/:id/messages` | `{ text }` | Sends a message (up to 8 000 characters); `409` while Pointer is still answering. `202` with `{ conversation }`. |
 | `POST /api/conversations/:id/delete` | | Deletes the conversation (`404` if unknown). Its repo tasks keep running. |
-| `GET /api/usage` | | Claude spend this calendar month (UTC): `{ month, chat: { usd, count }, tasks: { usd, count }, totalUsd, topTasks: [{ id, repo, instruction, costUsd, createdAt }] }`. Chat is tallied from each reply's reported cost; tasks from their records. The Overview and Activity pages and Slack's `status` show it. |
+| `GET /api/usage` | | Claude spend this calendar month (UTC) with the caps: `{ month, chat: { usd, count }, tasks: { usd, count }, totalUsd, topTasks: [{ id, repo, instruction, costUsd, createdAt }], repos: [{ repo, usd, count }], budget }`. `repos` is repo task spend per repository, highest first. `budget`: `{ monthly, repos, alertPercent, alertChannel, level, alerts }`, where `monthly` is `null` without a monthly cap or `{ capUsd, usedUsd, remainingUsd, percent, level }`, `repos` lists every repository with a cap the same way (with `repo`), `level` is the highest of `ok`, `alert` and `exceeded`, and `alerts` lists the caps at or past the alert level: `[{ key, scope: "monthly" \| "repo", repo?, level: "alert" \| "exceeded", capUsd, usedUsd, percent, notifiedAt? }]` (`notifiedAt`: when the alert channel was told). The Overview, Activity and Settings pages and Slack's `status` show it. |
+| `POST /api/budget` | `{ monthlyUsd?, perRepoUsd?, alertPercent?, alertChannel? }` | Spending caps. Fields left out are kept. `monthlyUsd` and each cap in `perRepoUsd` are USD from 0 (no cap) to 100 000; `perRepoUsd` (`{ "owner/repo": usd }`, at most 200) replaces the whole list, and entries of 0 are dropped; the same repository twice in different case is refused. `alertPercent` is a whole number from 10 to 100; `alertChannel` a Slack channel ID or `""` (no Slack alerts). Returns `{ ok, budget }`. Alerts a lowered cap has already reached are posted right away. |
+| `POST /api/monday/automation` | `{ enabled?, boards?: { "<boardId>": { repo, statusColumnId, startLabel, workingLabel?, reviewLabel?, doneLabel?, stuckLabel? } \| null } }` | Turns ticket automation on or off and adds, changes (`null` removes) automated boards. Boards must be among `allowedBoardIds` when that list is set; `repo` must be allowed by a GitHub connection; the start label must differ from the others. With monday.com connected (and `SKIP_VALIDATION` unset) the status column and every label are checked on the board, and saved in the board's spelling; labels left out default to Working on it, In review, Done and Stuck, and `""` leaves the status alone. Removing a board deletes the webhook created on it. Returns `{ ok, automation }` (`config.monday.automation`: `{ enabled, webhookConfigured, boards }`, never the secret). |
+| `POST /api/monday/automation/webhook` | | Makes the webhook secret on first use and creates a `change_specific_column_value` webhook on each automated board's status column, pointing at `<base>/monday/webhook/<secret>` (an earlier one for another address is replaced). The automation must be on. Returns `{ ok, url, created: [boardId], failed: [{ boardId, error }], manualSteps? }`; `manualSteps` says how to add the webhook by hand when some boards failed. |
+| `GET /api/monday/columns` | `?boardId=` | `{ board: { id, name }, columns: [{ id, title, labels }] }`: the board's status columns and their labels, for the pickers. `400` when not connected, the board is not allowed, or monday.com fails. |
+| `POST /monday/webhook/:secret` | monday.com's delivery | Not an admin route. `404` unless the automation is on and the secret matches (compared in constant time). Echoes `{ challenge }`; otherwise answers `200` at once, then reads the item again and starts the task (trigger `monday`, with `ticket`) when it qualifies. |
 
 ## Development
 

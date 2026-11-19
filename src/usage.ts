@@ -12,6 +12,12 @@ export interface UsageTotals {
   count: number;
 }
 
+/** One repository's repo tasks this month (chat is not counted per repository). */
+export interface RepoUsage extends UsageTotals {
+  /** As its most recent task spells it; repositories are matched without letter case. */
+  repo: string;
+}
+
 export interface MonthUsage {
   /** "2026-11", in UTC. */
   month: string;
@@ -20,6 +26,8 @@ export interface MonthUsage {
   totalUsd: number;
   /** The most expensive repo tasks this month, highest first. */
   topTasks: Pick<Task, "id" | "repo" | "instruction" | "costUsd" | "createdAt">[];
+  /** Repo task spend per repository this month, highest first (budget.ts checks the caps against it). */
+  repos: RepoUsage[];
 }
 
 export const monthKey = (d: Date): string => d.toISOString().slice(0, 7);
@@ -71,6 +79,7 @@ export class UsageRepo {
       tasks: { usd: taskUsd, count: tasks.length },
       totalUsd: chat.usd + taskUsd,
       topTasks,
+      repos: repoTotals(tasks),
     };
   }
 
@@ -85,6 +94,33 @@ export class UsageRepo {
     }
   }
 }
+
+/** Repo task totals per repository (matched without letter case), highest spend first. */
+export function repoTotals(tasks: Pick<Task, "id" | "repo" | "costUsd">[]): RepoUsage[] {
+  const byRepo = new Map<string, RepoUsage & { newest: string }>();
+  for (const t of tasks) {
+    const key = t.repo.toLowerCase();
+    const cost = validCost(t.costUsd) ? t.costUsd : 0;
+    const entry = byRepo.get(key);
+    if (!entry) {
+      byRepo.set(key, { repo: t.repo, usd: cost, count: 1, newest: t.id });
+      continue;
+    }
+    entry.usd += cost;
+    entry.count += 1;
+    if (t.id > entry.newest) {
+      entry.newest = t.id;
+      entry.repo = t.repo;
+    }
+  }
+  return [...byRepo.values()]
+    .map(({ repo, usd: total, count }) => ({ repo, usd: total, count }))
+    .sort((a, b) => b.usd - a.usd || a.repo.localeCompare(b.repo));
+}
+
+/** What repo tasks on `repo` cost this month (0 when none ran), matched without letter case. */
+export const repoSpend = (u: Pick<MonthUsage, "repos">, repo: string): number =>
+  u.repos.find((r) => r.repo.toLowerCase() === repo.toLowerCase())?.usd ?? 0;
 
 /** "$12.34". */
 export const usd = (n: number): string => `$${n.toFixed(2)}`;
