@@ -27,7 +27,21 @@ describe("team model", () => {
   it("seeds Pointer and five agents on a fresh config", async () => {
     const repo = new ConfigRepo(await tmpStore(), deriveKey("k"), 0);
     const c = await repo.load();
-    expect(c.team.pointer).toEqual({ name: "Pointer", instructions: "", budgetUsd: 1, maxTurns: 40, model: "", effort: "medium", taskEffort: "medium" });
+    expect(c.team.pointer).toEqual({
+      name: "Pointer",
+      instructions: "",
+      budgetUsd: 1,
+      maxTurns: 40,
+      model: "",
+      effort: "medium",
+      taskEffort: "medium",
+      routing: {
+        enabled: false,
+        small: { model: "claude-sonnet-5-5", effort: "low" },
+        medium: { model: "claude-sonnet-5-5", effort: "medium" },
+        large: { model: "", effort: "high" },
+      },
+    });
     expect(c.team.agents.map((a) => a.id)).toEqual(["coder", "reviewer", "qa", "researcher", "writer"]);
     expect(c.slack.pointerChannels).toEqual([]);
     expect(publicView(c).team.agents).toHaveLength(5);

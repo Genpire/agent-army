@@ -141,8 +141,11 @@ function AccessSection({ saved, pointer }: { saved: string[]; pointer: string })
 
 // ---------- Repo task limits ----------
 
+/** The limits that are numbers (previewCheck is a choice, set on its own). */
+type NumericLimit = { [K in keyof Limits]: Limits[K] extends number ? K : never }[keyof Limits];
+
 interface LimitField {
-  key: keyof Limits;
+  key: NumericLimit;
   label: string;
   description: string;
   min: number;

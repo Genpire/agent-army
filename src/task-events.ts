@@ -46,6 +46,12 @@ export type TaskEventKind =
   | "browser"
   /** Screenshots were saved (text: how many and their names). */
   | "screenshot"
+  /** The preview deployment was opened or could not be (url, ok; text: what was found). */
+  | "preview"
+  /** The monday.com ticket was updated (text: what changed, e.g. "Status set to In review"). */
+  | "ticket"
+  /** The task's size was estimated and its model chosen (text: size, model, effort). */
+  | "routing"
   /** The branch was pushed. */
   | "push"
   /** The pull request was opened or updated (url). */

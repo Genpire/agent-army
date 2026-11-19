@@ -49,6 +49,40 @@ export const RepoSetupSchema = z.object({
 });
 export type RepoSetup = z.infer<typeof RepoSetupSchema>;
 
+/** monday.com board ids are digit strings. */
+export const MONDAY_ID_RE = /^\d+$/;
+
+/**
+ * A monday.com board whose tickets start repo tasks (see monday-automation.ts):
+ * a ticket whose status becomes `startLabel` is worked on in `repo`, and the
+ * team moves the status as the work goes (an empty label leaves it alone).
+ */
+export const MondayBoardAutomationSchema = z.object({
+  repo: z.string().regex(REPO_RE, "Repositories look like owner/repo"),
+  /** The status column watched and updated, e.g. "status". */
+  statusColumnId: z.string().trim().min(1).max(100),
+  /** The status label that starts a task, e.g. "Ready for dev". */
+  startLabel: z.string().trim().min(1).max(100),
+  workingLabel: z.string().trim().max(100).default("Working on it"),
+  reviewLabel: z.string().trim().max(100).default("In review"),
+  doneLabel: z.string().trim().max(100).default("Done"),
+  stuckLabel: z.string().trim().max(100).default("Stuck"),
+});
+export type MondayBoardAutomation = z.infer<typeof MondayBoardAutomationSchema>;
+
+/** Spending caps for repo tasks and chat (see budget.ts). 0 = no cap. */
+export const BudgetSchema = z.object({
+  /** Claude spend allowed per calendar month (UTC), chat and repo tasks together. */
+  monthlyUsd: z.number().min(0).max(100_000).default(0),
+  /** Repo task spend allowed per repository per month. */
+  perRepoUsd: z.record(z.string().regex(REPO_RE), z.number().min(0).max(100_000)).default({}),
+  /** Warn when a cap is this far used, in percent. */
+  alertPercent: z.number().int().min(10).max(100).default(80),
+  /** Slack channel for spending alerts; empty = no Slack alert (the console still shows them). */
+  alertChannel: z.union([z.literal(""), z.string().regex(CHANNEL_RE, "Channel IDs look like C012ABCDEF")]).default(""),
+});
+export type Budget = z.infer<typeof BudgetSchema>;
+
 export const ConfigSchema = z.object({
   orgName: z.string().default(""),
   adminPasswordHash: z.string().optional(),
@@ -103,8 +137,17 @@ export const ConfigSchema = z.object({
       defaultBoardId: z.string().regex(/^\d+$/).optional(),
       /** Boards Pointer may read and write. Empty = every board the token can reach. */
       allowedBoardIds: z.array(z.string().regex(/^\d+$/)).default([]),
+      /** Tickets that start repo tasks: the boards watched, and the secret in the webhook's URL. */
+      automation: z
+        .object({
+          enabled: z.boolean().default(false),
+          /** Part of the webhook URL (/monday/webhook/<secret>): monday.com does not sign webhooks created with an API token. */
+          webhookSecret: z.string().min(20).max(200).optional(),
+          boards: z.record(z.string().regex(MONDAY_ID_RE), MondayBoardAutomationSchema).default({}),
+        })
+        .default({ enabled: false, boards: {} }),
     })
-    .default({ allowedBoardIds: [] }),
+    .default({ allowedBoardIds: [], automation: { enabled: false, boards: {} } }),
   /** Slack channel ID -> "owner/repo" default project for that channel. */
   bindings: z.record(z.string(), z.string().regex(REPO_RE)).default({}),
   limits: z
@@ -118,8 +161,14 @@ export const ConfigSchema = z.object({
       ciWaitMin: z.number().int().min(0).max(60).default(15),
       /** How many times the team tries to fix failing checks, within the task's budget; 0 = only report them. */
       ciFixRounds: z.number().int().min(0).max(5).default(2),
+      /**
+       * After the checks, open the pull request's preview deployment (Vercel, Netlify… via GitHub
+       * deployments) in the browser: off, only when the change touches what people see, or always.
+       */
+      previewCheck: z.enum(["off", "visible", "always"]).default("visible"),
     })
-    .default({ maxTurns: 200, maxBudgetUsd: 15, maxParallel: 3, progressEveryMin: 5, ciWaitMin: 15, ciFixRounds: 2 }),
+    .default({ maxTurns: 200, maxBudgetUsd: 15, maxParallel: 3, progressEveryMin: 5, ciWaitMin: 15, ciFixRounds: 2, previewCheck: "visible" }),
+  budget: BudgetSchema.default({ monthlyUsd: 0, perRepoUsd: {}, alertPercent: 80, alertChannel: "" }),
   /** "owner/repo" -> how repo tasks set up and run that repository. */
   repoSetup: z.record(z.string().regex(REPO_RE), RepoSetupSchema).default({}),
   /** Pointer and the agents it orchestrates (seeded with defaults on first load). */
@@ -225,7 +274,14 @@ export function publicView(c: Config) {
       accountName: c.monday.accountName ?? null,
       defaultBoardId: c.monday.defaultBoardId ?? null,
       allowedBoardIds: c.monday.allowedBoardIds,
+      /** Without the webhook secret: only whether one is set. */
+      automation: {
+        enabled: c.monday.automation.enabled,
+        webhookConfigured: Boolean(c.monday.automation.webhookSecret),
+        boards: c.monday.automation.boards,
+      },
     },
+    budget: c.budget,
     bindings: c.bindings,
     limits: c.limits,
     team: c.team,

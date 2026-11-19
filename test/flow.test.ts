@@ -213,23 +213,23 @@ describe("admin API and Slack events", () => {
   describe("settings", () => {
     it("merges partial limits field by field", async () => {
       expect((await post("/api/settings", { limits: { maxParallel: 5 } })).status).toBe(200);
-      expect((await state()).config.limits).toEqual({ maxTurns: 200, maxBudgetUsd: 15, maxParallel: 5, progressEveryMin: 5, ciWaitMin: 15, ciFixRounds: 2 });
+      expect((await state()).config.limits).toEqual({ maxTurns: 200, maxBudgetUsd: 15, maxParallel: 5, progressEveryMin: 5, ciWaitMin: 15, ciFixRounds: 2, previewCheck: "visible" });
 
       expect((await post("/api/settings", { limits: { maxBudgetUsd: 20, progressEveryMin: 0 } })).status).toBe(200);
-      expect((await state()).config.limits).toEqual({ maxTurns: 200, maxBudgetUsd: 20, maxParallel: 5, progressEveryMin: 0, ciWaitMin: 15, ciFixRounds: 2 });
+      expect((await state()).config.limits).toEqual({ maxTurns: 200, maxBudgetUsd: 20, maxParallel: 5, progressEveryMin: 0, ciWaitMin: 15, ciFixRounds: 2, previewCheck: "visible" });
 
       expect((await post("/api/settings", { limits: { maxParallel: 0 } })).status).toBe(400);
       expect((await post("/api/settings", { limits: { maxTurns: "lots" } })).status).toBe(400);
       expect((await post("/api/settings", { limits: { progressEveryMin: 61 } })).status).toBe(400);
       expect((await post("/api/settings", { limits: { progressEveryMin: 2.5 } })).status).toBe(400);
-      expect((await state()).config.limits).toEqual({ maxTurns: 200, maxBudgetUsd: 20, maxParallel: 5, progressEveryMin: 0, ciWaitMin: 15, ciFixRounds: 2 });
+      expect((await state()).config.limits).toEqual({ maxTurns: 200, maxBudgetUsd: 20, maxParallel: 5, progressEveryMin: 0, ciWaitMin: 15, ciFixRounds: 2, previewCheck: "visible" });
     });
 
     it("merges and validates the CI wait and fix rounds", async () => {
       expect((await post("/api/settings", { limits: { ciWaitMin: 30 } })).status).toBe(200);
-      expect((await state()).config.limits).toEqual({ maxTurns: 200, maxBudgetUsd: 20, maxParallel: 5, progressEveryMin: 0, ciWaitMin: 30, ciFixRounds: 2 });
+      expect((await state()).config.limits).toEqual({ maxTurns: 200, maxBudgetUsd: 20, maxParallel: 5, progressEveryMin: 0, ciWaitMin: 30, ciFixRounds: 2, previewCheck: "visible" });
       expect((await post("/api/settings", { limits: { ciWaitMin: 0, ciFixRounds: 5 } })).status).toBe(200);
-      expect((await state()).config.limits).toMatchObject({ maxParallel: 5, ciWaitMin: 0, ciFixRounds: 5 });
+      expect((await state()).config.limits).toMatchObject({ maxParallel: 5, ciWaitMin: 0, ciFixRounds: 5, previewCheck: "visible" });
 
       for (const limits of [{ ciWaitMin: 61 }, { ciWaitMin: -1 }, { ciWaitMin: 1.5 }]) {
         const res = await post("/api/settings", { limits });
@@ -242,10 +242,10 @@ describe("admin API and Slack events", () => {
         expect(await res.json()).toEqual({ error: "Fix rounds are a whole number from 0 to 5." });
       }
       expect((await post("/api/settings", { limits: { ciFixRounds: "2" } })).status).toBe(400);
-      expect((await state()).config.limits).toMatchObject({ ciWaitMin: 0, ciFixRounds: 5 });
+      expect((await state()).config.limits).toMatchObject({ ciWaitMin: 0, ciFixRounds: 5, previewCheck: "visible" });
 
       expect((await post("/api/settings", { limits: { ciWaitMin: 15, ciFixRounds: 2 } })).status).toBe(200);
-      expect((await state()).config.limits).toEqual({ maxTurns: 200, maxBudgetUsd: 20, maxParallel: 5, progressEveryMin: 0, ciWaitMin: 15, ciFixRounds: 2 });
+      expect((await state()).config.limits).toEqual({ maxTurns: 200, maxBudgetUsd: 20, maxParallel: 5, progressEveryMin: 0, ciWaitMin: 15, ciFixRounds: 2, previewCheck: "visible" });
     });
 
     it("saves Pointer channels and validates them", async () => {
@@ -628,7 +628,7 @@ describe("admin API and Slack events", () => {
     const monday = async () => (await state()).config.monday;
 
     it("needs a token before board settings, and lists no boards while disconnected", async () => {
-      expect(await monday()).toEqual({ connected: false, userName: null, accountName: null, defaultBoardId: null, allowedBoardIds: [] });
+      expect(await monday()).toEqual({ connected: false, userName: null, accountName: null, defaultBoardId: null, allowedBoardIds: [], automation: { enabled: false, webhookConfigured: false, boards: {} } });
 
       const settingsOnly = await post("/api/monday", { defaultBoardId: "123" });
       expect(settingsOnly.status).toBe(400);
@@ -644,12 +644,12 @@ describe("admin API and Slack events", () => {
       const res = await post("/api/monday", { token: ` ${TOKEN} `, allowedBoardIds: ["111", "222", "111"], defaultBoardId: "222" });
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ ok: true, userName: "test", accountName: "test" });
-      expect(await monday()).toEqual({ connected: true, userName: "test", accountName: "test", defaultBoardId: "222", allowedBoardIds: ["111", "222"] });
+      expect(await monday()).toEqual({ connected: true, userName: "test", accountName: "test", defaultBoardId: "222", allowedBoardIds: ["111", "222"], automation: { enabled: false, webhookConfigured: false, boards: {} } });
       expect(JSON.stringify(await state())).not.toContain(TOKEN.slice(-16));
 
       // Board settings alone keep the connection; empty values clear them.
       expect((await post("/api/monday", { defaultBoardId: "", allowedBoardIds: [] })).status).toBe(200);
-      expect(await monday()).toEqual({ connected: true, userName: "test", accountName: "test", defaultBoardId: null, allowedBoardIds: [] });
+      expect(await monday()).toEqual({ connected: true, userName: "test", accountName: "test", defaultBoardId: null, allowedBoardIds: [], automation: { enabled: false, webhookConfigured: false, boards: {} } });
       expect((await post("/api/monday", { defaultBoardId: "333" })).status).toBe(200);
       expect((await monday()).defaultBoardId).toBe("333");
     });
@@ -668,7 +668,7 @@ describe("admin API and Slack events", () => {
       });
       expect(await error({ token: "short" })).toEqual({ status: 400, error: "That doesn't look like a monday.com API token." });
 
-      expect(await monday()).toEqual({ connected: true, userName: "test", accountName: "test", defaultBoardId: "333", allowedBoardIds: [] });
+      expect(await monday()).toEqual({ connected: true, userName: "test", accountName: "test", defaultBoardId: "333", allowedBoardIds: [], automation: { enabled: false, webhookConfigured: false, boards: {} } });
     });
 
     it("lists boards through the monday.com API, with errors redacted", async () => {
@@ -718,7 +718,7 @@ describe("admin API and Slack events", () => {
       const res = await post("/api/monday/disconnect", {});
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ ok: true });
-      expect(await monday()).toEqual({ connected: false, userName: null, accountName: null, defaultBoardId: "111", allowedBoardIds: ["111"] });
+      expect(await monday()).toEqual({ connected: false, userName: null, accountName: null, defaultBoardId: "111", allowedBoardIds: ["111"], automation: { enabled: false, webhookConfigured: false, boards: {} } });
 
       expect((await get("/api/monday/boards")).status).toBe(400);
       expect((await post("/api/monday", { allowedBoardIds: [] })).status).toBe(400);

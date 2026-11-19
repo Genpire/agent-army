@@ -57,6 +57,33 @@ export const AgentSpecSchema = z.object({
 });
 export type AgentSpec = z.infer<typeof AgentSpecSchema>;
 
+/** Task sizes Pointer estimates before a repo task (see sizing.ts). */
+export const TASK_SIZES = ["small", "medium", "large"] as const;
+export type TaskSize = (typeof TASK_SIZES)[number];
+
+/** The model and effort a repo task of one size runs with. An empty model = the configured model. */
+export const RouteSchema = z.object({
+  model: z.string().trim().max(100).default(""),
+  effort: z.enum(EFFORT_LEVELS).default(DEFAULT_EFFORT),
+});
+export type Route = z.infer<typeof RouteSchema>;
+
+export const RoutingSchema = z.object({
+  /** Estimate each repo task's size first and pick its model and effort from that. */
+  enabled: z.boolean().default(false),
+  small: RouteSchema.default({ model: "claude-sonnet-5-5", effort: "low" }),
+  medium: RouteSchema.default({ model: "claude-sonnet-5-5", effort: "medium" }),
+  large: RouteSchema.default({ model: "", effort: "high" }),
+});
+export type Routing = z.infer<typeof RoutingSchema>;
+
+export const DEFAULT_ROUTING: Routing = {
+  enabled: false,
+  small: { model: "claude-sonnet-5-5", effort: "low" },
+  medium: { model: "claude-sonnet-5-5", effort: "medium" },
+  large: { model: "", effort: "high" },
+};
+
 export const PointerSpecSchema = z.object({
   name: z.string().trim().min(1).max(40).default("Pointer"),
   /** Extra instructions from the owner, appended to Pointer's built-in prompt. */
@@ -70,6 +97,8 @@ export const PointerSpecSchema = z.object({
   effort: z.enum(EFFORT_LEVELS).default(DEFAULT_EFFORT),
   /** Effort for repo tasks (Pointer leading the team in the worker). */
   taskEffort: z.enum(EFFORT_LEVELS).default(DEFAULT_EFFORT),
+  /** Model and effort by estimated task size, for repo tasks; off = taskEffort and the configured models. */
+  routing: RoutingSchema.default(DEFAULT_ROUTING),
 });
 export type PointerSpec = z.infer<typeof PointerSpecSchema>;
 
@@ -81,6 +110,7 @@ const DEFAULT_POINTER: PointerSpec = {
   model: "",
   effort: DEFAULT_EFFORT,
   taskEffort: DEFAULT_EFFORT,
+  routing: structuredClone(DEFAULT_ROUTING),
 };
 
 export const TeamSchema = z

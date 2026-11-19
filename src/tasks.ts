@@ -45,7 +45,7 @@ export interface Task {
   /** Live progress while the team works, saved by the worker; Pointer reads it for status questions. */
   progress?: ProgressSnapshot;
   /** What started the task: a Slack request (default), the admin console, or feedback on its pull request. */
-  trigger?: "slack" | "web" | "review";
+  trigger?: "slack" | "web" | "review" | "monday";
   /** The pull request's checks after the last push (see ci.ts), when the task waited for them. */
   ci?: CiSummary;
   /** Screenshots from browser checks posted in the thread and kept in the store (see screenshots.ts). */
@@ -60,9 +60,35 @@ export interface Task {
   prDraft?: boolean;
   /** The last round of fixing failing checks the team started. */
   fixRound?: { round: number; rounds: number; failing: string[]; at: string };
+  /** The monday.com ticket this task works on. */
+  ticket?: TaskTicket;
+  /** Estimated size (see sizing.ts) and the model and effort that size runs with. */
+  size?: { size: "small" | "medium" | "large"; model: string; effort: string; reason?: string };
+  /** Rough cost range from earlier tasks of the same size, in USD. */
+  estimateUsd?: { low: number; high: number };
+  /** The check of the pull request's preview deployment. */
+  preview?: PreviewResult;
 }
 
 /** Outcome of waiting for a pull request's checks. */
+/** The monday.com ticket a task works on (started from it, or linked to it). */
+export interface TaskTicket {
+  boardId: string;
+  itemId: string;
+  /** The ticket's name, for messages. */
+  name?: string;
+  url?: string;
+}
+
+/** What opening the pull request's preview deployment showed (see preview.ts). */
+export interface PreviewResult {
+  /** checked: opened and looked right; problems: opened and found issues; unavailable: no preview, or it could not be opened; skipped: not needed. */
+  state: "checked" | "problems" | "unavailable" | "skipped";
+  url?: string;
+  /** One or two sentences: what was checked or why not. */
+  note?: string;
+}
+
 export interface CiSummary {
   /** passed: every check succeeded; failed: at least one failed; pending: still running when the wait ended; none: the repo has no checks. */
   state: "passed" | "failed" | "pending" | "none";

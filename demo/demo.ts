@@ -90,6 +90,21 @@ async function seedConfig(): Promise<void> {
       accountName: "Acme",
       defaultBoardId: "4012345678",
       allowedBoardIds: ["4012345678", "4012345679"],
+      automation: {
+        enabled: true,
+        webhookSecret: "demo-monday-webhook-secret-not-real",
+        boards: {
+          "4012345678": {
+            repo: "acme/web",
+            statusColumnId: "status",
+            startLabel: "Ready for dev",
+            workingLabel: "Working on it",
+            reviewLabel: "In review",
+            doneLabel: "Done",
+            stuckLabel: "Stuck",
+          },
+        },
+      },
     };
     c.bindings = { C0ACMEWEB1: "acme/web", C0ACMEAPI1: "acme/api" };
     c.repoSetup = {
