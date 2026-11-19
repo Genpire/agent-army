@@ -79,7 +79,26 @@ export interface PointerRequest {
    * contents from PointerBrainDeps.attachments; repo tasks get them too.
    */
   attachments?: AttachmentInfo[];
+  /** Where the conversation happens: Slack (default) or the admin console's chat (channel "web"). */
+  surface?: "slack" | "web";
 }
+
+/** What a step Pointer takes is about, so the console can show an icon. */
+export type ActivityKind = "web" | "github" | "memory" | "notes" | "monday" | "task" | "agent" | "other";
+
+/**
+ * Live activity while Pointer answers (the admin console shows it; Slack does
+ * not ask for it): the answer text as it is written, and each step it takes.
+ */
+export type PointerActivity =
+  /** More of the answer text, as it is written. */
+  | { type: "text"; delta: string }
+  /** A new turn starts: the text so far was a note before using tools, not the answer. */
+  | { type: "turn" }
+  /** A tool use or a delegation started. `agent` is set when a team member took the step. */
+  | { type: "step"; id: string; label: string; kind: ActivityKind; agent?: string }
+  /** That step finished. */
+  | { type: "step-done"; id: string; isError: boolean };
 
 export interface PointerReply {
   /** Final answer, Markdown (the Slack layer converts it to mrkdwn). */
@@ -107,6 +126,8 @@ export interface PointerContext {
   taskStatus?: () => Promise<string>;
   /** Store a file in this conversation (e.g. a monday.com item's files) so Pointer and the team can use it. */
   addAttachment?: AddAttachment;
+  /** Live activity while answering (streamed text, tool uses, delegations); absent in Slack. Must not throw. */
+  onActivity?: (event: PointerActivity) => void;
 }
 
 export interface PointerBrain {

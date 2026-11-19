@@ -21,6 +21,8 @@ vi.mock("../src/dispatch.js", () => ({
     dispatched.push({ event, deps });
     return new Promise<void>(() => {});
   },
+  // Console chat answers share Slack's concurrency limit; unlimited here.
+  withBrainSlot: <T>(fn: () => Promise<T>) => fn(),
 }));
 
 const SIGNING_SECRET = "0123456789abcdef0123";

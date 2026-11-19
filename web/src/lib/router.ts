@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
 
 /**
- * Hash routes, so the server only ever serves index.html: `#/team`,
+ * Hash routes, so the server only ever serves index.html: `#/chat/<conversationId>`, `#/team`,
  * `#/integrations/github`, `#/activity/<taskId>`… The first segment is the
  * page, the rest is the page's own (a tab, a selected item).
  */
-export const PAGES = ["overview", "team", "integrations", "projects", "activity", "memory", "settings"] as const;
+export const PAGES = ["overview", "chat", "team", "integrations", "projects", "activity", "memory", "settings"] as const;
 export type Page = (typeof PAGES)[number];
 
 export interface Route {

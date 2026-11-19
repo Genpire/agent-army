@@ -40,6 +40,47 @@ export interface ProgressSnapshot {
   filesCount: number;
 }
 
+/**
+ * What the tracker saw, one step at a time, for a fuller timeline (see
+ * task-events.ts). Only reported when the tracker is given `onEvent`.
+ */
+export type TrackerEvent =
+  | { kind: "agent-start"; label: string; description: string }
+  | { kind: "agent-done"; label: string; ms: number; outcome?: string; isError: boolean; toolUses: number }
+  | { kind: "edit"; by: string; path: string }
+  | { kind: "command"; by: string; command: string }
+  | { kind: "browser"; by: string; action: string; detail?: string };
+
+const BROWSER_PREFIX = "mcp__browser__";
+
+/** A browser tool call in words: "Opened http://localhost:3000", "Took a screenshot: home.png". */
+export function browserAction(tool: string, input: Record<string, unknown>): { action: string; detail?: string } | undefined {
+  if (!tool.startsWith(BROWSER_PREFIX)) return undefined;
+  const name = tool.slice(BROWSER_PREFIX.length);
+  const target = oneLine(str(input.element) || str(input.ref) || "", 80) || undefined;
+  switch (name) {
+    case "browser_navigate":
+      return { action: "Opened", detail: oneLine(str(input.url), 120) || undefined };
+    case "browser_take_screenshot":
+      return { action: "Took a screenshot", detail: oneLine(str(input.filename), 80) || undefined };
+    case "browser_click":
+      return { action: "Clicked", detail: target };
+    case "browser_type":
+    case "browser_fill_form":
+      return { action: "Filled in", detail: target };
+    case "browser_snapshot":
+      return { action: "Read the page" };
+    case "browser_resize":
+      return { action: "Resized the window", detail: input.width && input.height ? `${String(input.width)}×${String(input.height)}` : undefined };
+    case "browser_console_messages":
+      return { action: "Read the console" };
+    case "browser_network_requests":
+      return { action: "Read the network requests" };
+    default:
+      return { action: name.replace(/^browser_/, "").replace(/_/g, " ") };
+  }
+}
+
 export const RECENT_SHOWN = 8;
 export const AGENTS_SHOWN = 6;
 export const PLAN_SHOWN = 12;
@@ -101,6 +142,8 @@ export class ProgressTracker {
       /** Absolute checkout path, stripped from file paths. */
       repoDir?: string;
       now?: () => number;
+      /** Every step the tracker sees, for a fuller timeline; Slack progress is the same with or without it. */
+      onEvent?: (event: TrackerEvent) => void;
     },
   ) {
     this.startedAt = this.now();
@@ -170,6 +213,31 @@ export class ProgressTracker {
     return false;
   }
 
+  private emit(event: TrackerEvent): void {
+    try {
+      this.opts.onEvent?.(event);
+    } catch {
+      // a listener must never break progress tracking
+    }
+  }
+
+  /** Edits, commands and browser steps, reported to onEvent only (Slack shows them as before). */
+  private reportStep(by: string, name: string, input: Record<string, unknown>): void {
+    if (!this.opts.onEvent) return;
+    if (EDIT_TOOLS.has(name)) {
+      const path = str(input.file_path) || str(input.notebook_path);
+      if (path) this.emit({ kind: "edit", by, path: this.relPath(path) });
+      return;
+    }
+    if (name === "Bash") {
+      const command = oneLine(str(input.command), 200);
+      if (command) this.emit({ kind: "command", by, command });
+      return;
+    }
+    const browser = browserAction(name, input);
+    if (browser) this.emit({ kind: "browser", by, ...browser });
+  }
+
   private leadTool(id: string, name: string, input: Record<string, unknown>): boolean {
     if (AGENT_TOOLS.has(name)) {
       const label = this.opts.label(str(input.subagent_type) || undefined);
@@ -178,8 +246,10 @@ export class ProgressTracker {
       this.order.push(id);
       this.phase = `${label} — ${description}`;
       this.event(`${label} started: ${description}`);
+      this.emit({ kind: "agent-start", label, description: oneLine(str(input.prompt) ? `${description}: ${str(input.prompt)}` : description, 300) });
       return true;
     }
+    this.reportStep(this.opts.lead, name, input);
     if (name === "TodoWrite" && Array.isArray(input.todos)) {
       this.plan = input.todos
         .filter(isRecord)
@@ -214,6 +284,7 @@ export class ProgressTracker {
     const run = this.runs.get(parentId);
     if (!run) return false;
     run.toolUses += 1;
+    this.reportStep(run.label, name, input);
     if (EDIT_TOOLS.has(name)) {
       const path = str(input.file_path) || str(input.notebook_path);
       if (!path) return false;
@@ -241,6 +312,14 @@ export class ProgressTracker {
     run.outcome = oneLine(text) || undefined;
     const mins = Math.max(1, Math.round((run.endedAt - run.startedAt) / 60_000));
     this.event(`${run.label} ${isError ? "stopped with an error" : "finished"} after ${mins} min${run.outcome ? `: ${run.outcome}` : ""}`);
+    this.emit({
+      kind: "agent-done",
+      label: run.label,
+      ms: run.endedAt - run.startedAt,
+      ...(run.outcome ? { outcome: run.outcome } : {}),
+      isError,
+      toolUses: run.toolUses,
+    });
     const working = this.order.map((id) => this.runs.get(id)!).filter((r) => r.endedAt === undefined);
     this.phase = working.length ? `${working.at(-1)!.label} — ${working.at(-1)!.description}` : `${this.opts.lead} is checking the results`;
     return true;
@@ -340,6 +419,9 @@ export function describeTask(t: Task, now = Date.now()): string {
   }
   if (t.status === "failed" && t.error) lines.push(`Error: ${oneLine(t.error, 400)}`);
   if (t.costUsd !== undefined) lines.push(`Cost: $${t.costUsd.toFixed(2)}`);
+  if ((t.status === "running" || t.status === "queued") && t.stage) lines.push(`Stage: ${t.stage.text}`);
+  if (t.status === "running" && t.prUrl) lines.push(`Pull request (open, checks pending): ${t.prUrl}`);
+  if (t.ci) lines.push(`Checks: ${t.ci.state}${t.ci.names.length ? ` (${t.ci.names.join(", ")})` : ""}${t.ci.fixRounds ? `, after ${t.ci.fixRounds} fix round(s)` : ""}`);
   const p = t.progress;
   if (p && (t.status === "running" || t.status === "queued")) {
     lines.push(`Progress (saved ${minutesSince(p.updatedAt, now)} min ago): ${p.now}`);
@@ -360,7 +442,7 @@ export function describeTask(t: Task, now = Date.now()): string {
     lines.push(
       started < 3
         ? "No progress saved yet: the team is starting (cloning and reading the repository)."
-        : "No live progress is saved for this task: it started before progress tracking was available, or the worker has not reported yet. Its result will be posted in its Slack thread.",
+        : `No live progress is saved for this task: it started before progress tracking was available, or the worker has not reported yet. Its result will be posted in ${t.channel === "web" ? "its conversation in the admin console" : "its Slack thread"}.`,
     );
   }
   return lines.join("\n");

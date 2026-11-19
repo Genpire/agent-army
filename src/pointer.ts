@@ -17,6 +17,7 @@ import { isRepoAllowedAnywhere } from "./github-access.js";
 import type { MemoryFact } from "./memory.js";
 import { MondayClient } from "./monday.js";
 import type { NotesRepo } from "./notes.js";
+import { ActivityMapper } from "./pointer-activity.js";
 import { createPointerToolServer, githubToolOptions } from "./pointer-tools.js";
 import type { PointerBrain, PointerBrainDeps, PointerReply, PointerRequest } from "./pointer-types.js";
 import { buildChatAgents, rosterText } from "./team.js";
@@ -97,7 +98,12 @@ export function buildPointerSystemPrompt({ config, facts, req, now, projectNotes
     day: "numeric",
     timeZone: "UTC",
   });
-  const where = req.channelType === "im" ? "a direct message" : "a Slack channel thread";
+  const web = req.surface === "web";
+  const where = web
+    ? "the admin console's chat, talking with the owner (signed in on the admin page, not in Slack)"
+    : req.channelType === "im"
+      ? "a direct message"
+      : "a Slack channel thread";
 
   const memory = facts.length
     ? facts.map((f) => `- ${f.id}: ${f.text}`).join("\n")
@@ -106,8 +112,15 @@ export function buildPointerSystemPrompt({ config, facts, req, now, projectNotes
   const repoLines = [
     req.channelRepo
       ? `- This channel's default repository: ${req.channelRepo}.`
-      : "- This channel has no default repository.",
+      : web
+        ? "- This conversation has no default repository: use the one the owner names, or ask which owner/repo."
+        : "- This channel has no default repository.",
   ];
+  if (web) {
+    repoLines.push(
+      "- There is no Slack thread here: repo tasks you start show their live progress, screenshots and result in this conversation, and open a pull request as usual.",
+    );
+  }
   if (req.thread) {
     const pr = req.thread.prUrl ? `, pull request ${req.thread.prUrl}` : "";
     repoLines.push(
@@ -140,7 +153,7 @@ export function buildPointerSystemPrompt({ config, facts, req, now, projectNotes
 ${mondayRule(monday)}
 - The team (agents, names, instructions, access) can only be changed by the owner on the admin page. You can describe it, not change it.
 - Here you cannot run commands or read files on the server.
-- Be concise. Use Slack-friendly Markdown: short paragraphs, short lists, bold, inline code and links. No tables and no headings.
+${web ? "- Be concise. Use Markdown: short paragraphs, short lists, bold, inline code, code blocks and links. Small tables are fine; no headings." : "- Be concise. Use Slack-friendly Markdown: short paragraphs, short lists, bold, inline code and links. No tables and no headings."}
 - If you cannot do something, say so plainly. Never invent facts, links, commit SHAs or results.`,
   );
   if (instructions.trim()) {
@@ -358,9 +371,22 @@ export function createPointerBrain(
             ANTHROPIC_API_KEY: apiKey,
             CLAUDE_AGENT_SDK_CLIENT_APP: "agent-army-pointer/0.2.0",
           },
+          // The console shows the answer as it is written; Slack posts it once.
+          ...(ctx.onActivity ? { includePartialMessages: true } : {}),
         };
+        const onActivity = ctx.onActivity;
+        const mapper = onActivity ? new ActivityMapper(team) : undefined;
         for await (const message of queryFn({ prompt, options })) {
           if (message.type === "result") reply = mapResult(message, team.pointer);
+          if (mapper && onActivity) {
+            for (const activity of mapper.feed(message)) {
+              try {
+                onActivity(activity);
+              } catch {
+                // the console's live view must never break the answer
+              }
+            }
+          }
         }
       } catch (err) {
         const why = redact(err instanceof Error ? err.message : String(err));

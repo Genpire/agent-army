@@ -16,16 +16,19 @@ import {
   resolveMasterKey,
 } from "./config.js";
 import { hashPassword, randomToken, safeEqual, signSession, verifyPassword, verifySession } from "./crypto.js";
-import { handleSlackEvent } from "./dispatch.js";
+import { CONVERSATION_ID_RE, ConversationService, MESSAGE_MAX_CHARS, type WebThreads } from "./conversations.js";
+import { handleSlackEvent, withBrainSlot } from "./dispatch.js";
 import { RecentSet } from "./listen.js";
 import { MEMORY_MAX_FACTS, MemoryRepo } from "./memory.js";
 import { MondayClient, MondayError, checkMonday } from "./monday.js";
 import { NOTES_MAX_CHARS, NotesRepo } from "./notes.js";
 import { createPointerBrain } from "./pointer.js";
-import type { SlackDeps, SlackMessageEvent } from "./pointer-types.js";
-import { createRunner } from "./runner.js";
+import type { PointerBrain, SlackDeps, SlackMessageEvent } from "./pointer-types.js";
+import { type Runner, createRunner } from "./runner.js";
+import { SCREENSHOT_NAME_RE, ScreenshotRepo, TASK_ID_RE, screenshotType } from "./screenshots.js";
 import { buildManifest, manifestCreateUrl, slackClient, verifySlackSignature } from "./slack.js";
 import { createStore } from "./store.js";
+import { readTimeline } from "./task-events.js";
 import { TaskRepo } from "./tasks.js";
 import { TeamSchema } from "./team.js";
 import { checkAnthropic, checkGithub, checkSlack } from "./validate.js";
@@ -110,7 +113,14 @@ async function checkRepoAccess(token: string, allowed: string[]): Promise<void> 
   }
 }
 
-export async function createApp(env: NodeJS.ProcessEnv = process.env) {
+/** Test seams: a fake brain, runner or Slack client instead of the real ones. */
+export interface AppOverrides {
+  brain?: PointerBrain;
+  runner?: Runner;
+  slack?: SlackDeps["slack"];
+}
+
+export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides: AppOverrides = {}) {
   const store = createStore(env);
   const masterKey = await resolveMasterKey(store, env);
   const configRepo = new ConfigRepo(store, masterKey);
@@ -118,12 +128,25 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env) {
   const memory = new MemoryRepo(store, masterKey);
   const notes = new NotesRepo(store, masterKey);
   const attachments = new AttachmentRepo(store, masterKey);
+  const screenshots = new ScreenshotRepo(store, masterKey);
 
   let maxParallel = (await configRepo.load()).limits.maxParallel;
-  const runner = createRunner(() => maxParallel, env);
-  const brain = createPointerBrain({ configRepo, memory, notes, attachments });
+  const runner = overrides.runner ?? createRunner(() => maxParallel, env);
+  const brain = overrides.brain ?? createPointerBrain({ configRepo, memory, notes, attachments });
   const usage = new UsageRepo(store, tasks);
-  const slackDeps: SlackDeps = { configRepo, tasks, runner, memory, attachments, usage, brain, slack: slackClient };
+  // Console conversations: answered by the same brain, within the same limit as Slack answers.
+  const conversations = new ConversationService({ store, configRepo, tasks, runner, brain, usage, brainSlot: withBrainSlot });
+  const slackDeps: SlackDeps & { web: WebThreads } = {
+    configRepo,
+    tasks,
+    runner,
+    memory,
+    attachments,
+    usage,
+    brain,
+    slack: overrides.slack ?? slackClient,
+    web: conversations,
+  };
 
   // First-run protection: the admin account can only be created by someone
   // holding the setup token (from the deploy output or the server log).
@@ -537,6 +560,119 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env) {
     res.json({ tasks: await tasks.recent(30) });
   });
 
+  // ---------- Chat: conversations with Pointer from the console ----------
+  // Pointer answers in the background (202); the page polls the conversation.
+  const MESSAGE_TEXT = z.object({
+    text: z
+      .string()
+      .trim()
+      .min(1, "Write a message first.")
+      .max(MESSAGE_MAX_CHARS, `Messages are limited to ${MESSAGE_MAX_CHARS} characters.`),
+  });
+  const CONVERSATION_NOT_FOUND = "Conversation not found.";
+  const conversationParam = (req: Request, res: Response): string | undefined => {
+    const id = String(req.params.id ?? "");
+    if (CONVERSATION_ID_RE.test(id)) return id;
+    res.status(404).json({ error: CONVERSATION_NOT_FOUND });
+    return undefined;
+  };
+
+  app.get("/api/conversations", requireAdmin, async (_req, res) => {
+    res.json({ conversations: await conversations.list() });
+  });
+
+  app.post("/api/conversations", requireAdmin, async (req, res) => {
+    const input = body(MESSAGE_TEXT, req, res);
+    if (!input) return;
+    const result = await conversations.create(input.text);
+    if (!result.ok) return void res.status(result.status).json({ error: result.error });
+    res.status(202).json({ conversation: result.conversation });
+  });
+
+  app.get("/api/conversations/:id", requireAdmin, async (req, res) => {
+    const id = conversationParam(req, res);
+    if (!id) return;
+    const view = await conversations.view(id);
+    if (!view) return void res.status(404).json({ error: CONVERSATION_NOT_FOUND });
+    res.json(view);
+  });
+
+  app.post("/api/conversations/:id/messages", requireAdmin, async (req, res) => {
+    const id = conversationParam(req, res);
+    if (!id) return;
+    const input = body(MESSAGE_TEXT, req, res);
+    if (!input) return;
+    const result = await conversations.send(id, input.text);
+    if (!result.ok) return void res.status(result.status).json({ error: result.error });
+    res.status(202).json({ conversation: result.conversation });
+  });
+
+  app.post("/api/conversations/:id/delete", requireAdmin, async (req, res) => {
+    const id = conversationParam(req, res);
+    if (!id) return;
+    if (!(await conversations.remove(id))) return void res.status(404).json({ error: CONVERSATION_NOT_FOUND });
+    res.json({ ok: true });
+  });
+
+  // A repo task straight from the console (no Pointer reply), in a new conversation.
+  app.post("/api/tasks", requireAdmin, async (req, res) => {
+    const input = body(
+      z.object({
+        repo: REPO_INPUT,
+        instruction: z
+          .string()
+          .trim()
+          .min(1, "Say what the team should do.")
+          .max(MESSAGE_MAX_CHARS, `Instructions are limited to ${MESSAGE_MAX_CHARS} characters.`),
+      }),
+      req,
+      res,
+    );
+    if (!input) return;
+    const result = await conversations.startDirectTask(input.repo, input.instruction);
+    if (!result.ok) {
+      return void res.status(result.status).json({ error: result.error, ...(result.conversationId ? { conversationId: result.conversationId } : {}) });
+    }
+    res.status(202).json({ conversationId: result.conversationId, taskId: result.taskId });
+  });
+
+  // ---------- A repo task's timeline and screenshots (Slack and console tasks) ----------
+  const TASK_NOT_FOUND = "Task not found.";
+  const taskParam = async (req: Request, res: Response): Promise<string | undefined> => {
+    const id = String(req.params.id ?? "");
+    if (TASK_ID_RE.test(id) && (await tasks.get(id))) return id;
+    res.status(404).json({ error: TASK_NOT_FOUND });
+    return undefined;
+  };
+
+  app.get("/api/tasks/:id/events", requireAdmin, async (req, res) => {
+    const id = await taskParam(req, res);
+    if (!id) return;
+    res.json({ timeline: await readTimeline(store, id) });
+  });
+
+  app.get("/api/tasks/:id/screenshots", requireAdmin, async (req, res) => {
+    const id = await taskParam(req, res);
+    if (!id) return;
+    const list = await screenshots.list(id);
+    res.json({ screenshots: list.map(({ name, size }) => ({ name, size })) });
+  });
+
+  app.get("/api/tasks/:id/screenshots/:name", requireAdmin, async (req, res) => {
+    const name = String(req.params.name ?? "");
+    if (!SCREENSHOT_NAME_RE.test(name) || name.includes("..")) return void res.status(400).json({ error: "Invalid screenshot name." });
+    const id = await taskParam(req, res);
+    if (!id) return;
+    const bytes = await screenshots.get(id, name);
+    const type = bytes && screenshotType(bytes);
+    if (!bytes || !type) return void res.status(404).json({ error: "Screenshot not found." });
+    res.setHeader("Content-Type", type);
+    res.setHeader("Cache-Control", "private, max-age=3600");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Content-Disposition", `inline; filename="${name}"`);
+    res.send(bytes);
+  });
+
   // Claude spend this calendar month (UTC): chat replies and repo tasks.
   app.get("/api/usage", requireAdmin, async (_req, res) => {
     res.json(await usage.month());
@@ -657,7 +793,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env) {
     res.status(500).json({ error: "Something went wrong on the server." });
   });
 
-  return { app, runner, store };
+  return { app, runner, store, conversations };
 }
 
 /** The stored key of a repo's setup: repo names are compared without letter case. */
