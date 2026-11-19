@@ -1,4 +1,4 @@
-import type { AgentDefinition } from "@anthropic-ai/claude-agent-sdk";
+import type { AgentDefinition, AgentMcpServerSpec } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import type { RepoTaskApps } from "./apps.js";
 import { BROWSER_SERVER, BROWSER_TOOLS, type BrowserServerConfig } from "./browser.js";
@@ -378,23 +378,35 @@ const skillsFor = (a: AgentSpec, skills: TeamSkills | undefined) => {
 /** Agents that can run commands can also start the app and drive the browser; "looks only" agents cannot. */
 const usesBrowser = (a: AgentSpec, opts: RepoAgentOptions) => Boolean(opts.browser) && a.access !== "read";
 
+/** The app servers an agent uses in a repo task: those it has at least one tool on (apps.ts decides which). */
+function appServersFor(a: AgentSpec, apps: RepoTaskApps | undefined): AgentMcpServerSpec[] {
+  if (!apps) return [];
+  const tools = apps.toolsFor(a.id);
+  return Object.entries(apps.servers)
+    .filter(([key]) => tools.some((t) => t.startsWith(`mcp__${key}__`)))
+    .map(([key, server]) => ({ [key]: server }));
+}
+
 /** Subagents for a repo task (worker). Only enabled agents; platform rules appended. */
 export function buildRepoAgents(team: Team, opts: RepoAgentOptions = {}): Record<string, AgentDefinition> {
   return Object.fromEntries(
-    enabledAgents(team).map((a) => [
-      a.id,
-      {
-        description: describeForSdk(a),
-        tools: [...repoToolsFor(a.access), ...(usesBrowser(a, opts) ? BROWSER_TOOLS : [])],
-        prompt: `${a.instructions}\n${REPO_RULES}`,
-        ...(a.model ? { model: a.model } : {}),
-        effort: a.effort || team.pointer.taskEffort,
-        background: false,
-        // Each agent that browses starts its own browser server, scoped to that agent.
-        ...(usesBrowser(a, opts) ? { mcpServers: [{ [BROWSER_SERVER]: opts.browser! }] } : {}),
-        ...skillsFor(a, opts.skills),
-      } satisfies AgentDefinition,
-    ]),
+    enabledAgents(team).map((a) => {
+      // Each agent starts its own servers (browser, apps), scoped to that agent.
+      const servers: AgentMcpServerSpec[] = [...(usesBrowser(a, opts) ? [{ [BROWSER_SERVER]: opts.browser! }] : []), ...appServersFor(a, opts.apps)];
+      return [
+        a.id,
+        {
+          description: describeForSdk(a),
+          tools: [...repoToolsFor(a.access), ...(usesBrowser(a, opts) ? BROWSER_TOOLS : []), ...(opts.apps?.toolsFor(a.id) ?? [])],
+          prompt: `${a.instructions}\n${REPO_RULES}`,
+          ...(a.model ? { model: a.model } : {}),
+          effort: a.effort || team.pointer.taskEffort,
+          background: false,
+          ...(servers.length ? { mcpServers: servers } : {}),
+          ...skillsFor(a, opts.skills),
+        } satisfies AgentDefinition,
+      ];
+    }),
   );
 }
 
@@ -407,6 +419,7 @@ export function repoAllowedTools(team: Team, opts: RepoAgentOptions = {}): strin
       ...agents.flatMap((a) => repoToolsFor(a.access)),
       ...(agents.some((a) => usesBrowser(a, opts)) ? BROWSER_TOOLS : []),
       ...(opts.skills?.skills.length ? [SKILL_TOOL] : []),
+      ...(opts.apps?.allToolNames ?? []),
     ]),
   ];
 }

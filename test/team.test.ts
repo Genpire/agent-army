@@ -2,6 +2,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import type { RepoTaskApps } from "../src/apps.js";
 import { ConfigRepo, isChatReady, publicView } from "../src/config.js";
 import { deriveKey } from "../src/crypto.js";
 import { MEMORY_MAX_CHARS, MEMORY_MAX_FACTS, MemoryRepo } from "../src/memory.js";
@@ -197,5 +198,36 @@ describe("effort", () => {
     expect(repo[team.agents[1]!.id]!.effort).toBe("max");
     expect(chat[team.agents[0]!.id]!.effort).toBe("low");
     expect(chat[team.agents[1]!.id]!.effort).toBe("max");
+  });
+});
+
+describe("apps in repo tasks", () => {
+  const server = (url: string) => ({ type: "http" as const, url, headers: { Authorization: "Bearer k" }, alwaysLoad: true });
+  const browser = { type: "stdio" as const, command: "npx", args: ["@playwright/mcp"] };
+  const apps: RepoTaskApps = {
+    servers: { "app-linear": server("https://mcp.linear.app/mcp"), "app-sentry": server("https://mcp.sentry.dev/mcp") },
+    toolsFor: (id) =>
+      id === "coder" ? ["mcp__app-linear__create_issue", "mcp__app-sentry__get_issue"] : id === "researcher" ? ["mcp__app-sentry__get_issue"] : [],
+    allToolNames: ["mcp__app-linear__create_issue", "mcp__app-sentry__get_issue"],
+    promptRule: "Apps…",
+  };
+
+  it("starts each app's server only for the agents that have tools on it, next to the browser", () => {
+    const agents = buildRepoAgents(defaultTeam(), { apps, browser });
+    expect(agents.coder!.mcpServers).toEqual([{ browser }, { "app-linear": apps.servers["app-linear"] }, { "app-sentry": apps.servers["app-sentry"] }]);
+    expect(agents.coder!.tools).toEqual(expect.arrayContaining(["Edit", "mcp__app-linear__create_issue", "mcp__app-sentry__get_issue"]));
+    // A looks-only agent has no browser, only its app.
+    expect(agents.researcher!.mcpServers).toEqual([{ "app-sentry": apps.servers["app-sentry"] }]);
+    expect(agents.researcher!.tools).toContain("mcp__app-sentry__get_issue");
+    expect(agents.qa!.mcpServers).toEqual([{ browser }]);
+    expect(agents.writer!.mcpServers).toBeUndefined();
+    expect(agents.writer!.tools!.some((t) => t.startsWith("mcp__app-"))).toBe(false);
+    expect(repoAllowedTools(defaultTeam(), { apps })).toEqual(expect.arrayContaining(apps.allToolNames));
+  });
+
+  it("is unchanged without apps", () => {
+    expect(buildRepoAgents(defaultTeam(), {})).toEqual(buildRepoAgents(defaultTeam()));
+    expect(buildRepoAgents(defaultTeam()).coder!.mcpServers).toBeUndefined();
+    expect(repoAllowedTools(defaultTeam()).some((t) => t.startsWith("mcp__app-"))).toBe(false);
   });
 });
