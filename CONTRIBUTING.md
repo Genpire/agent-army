@@ -43,7 +43,7 @@ npm test
 npm run build        # server and admin page
 ```
 
-Tests use [Vitest](https://vitest.dev) and live in `test/`. They never call Claude, Slack, GitHub or monday.com: those clients are faked. Add or update tests for any behaviour you change.
+Tests use [Vitest](https://vitest.dev) and live in `test/`, in the same folders as the code in `src/` they test (`test/integrations/jira/` for `src/integrations/jira/`). They never call Claude, Slack, GitHub or monday.com: those clients are faked. Add or update tests for any behaviour you change.
 
 ## Guidelines
 
@@ -52,7 +52,7 @@ Tests use [Vitest](https://vitest.dev) and live in `test/`. They never call Clau
 - **Keep the security model.** Agents only open pull requests; conversation tools stay read-only unless there is a clear reason, and new tools must respect the GitHub allow lists. Read [Security model](README.md#security-model) before touching `pointer-tools.ts`, `guard.ts` or `worker.ts`.
 - **Build the admin page with Astryx.** `web/` is a React app on [Astryx](https://github.com/meta/astryx), Meta's design system on StyleX. Follow `AGENTS.md`: start pages from an Astryx template, use its components (no raw `div`s, inline styles or hex values), and run `npx astryx doctor --built web` before opening a pull request. API shapes come from the server's own types (`web/src/lib/types.ts`), so never redefine them.
 - **Document what you change.** New settings, API routes or Slack commands go in the README (the [Admin API](README.md#admin-api) table lists every route).
-- **Match the surrounding code** in naming, comments and structure. Prefer small, focused files.
+- **Match the surrounding code** in naming, comments and structure. Prefer small, focused files, in the module they belong to (see the [layout](README.md#development)): a new integration gets its own folder in `src/integrations/` and its admin routes in `src/routes/`.
 
 ## Commits and pull requests
 

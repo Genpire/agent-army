@@ -4,20 +4,20 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { deriveKey } from "../src/crypto.js";
-import { MemoryRepo } from "../src/memory.js";
-import { MONDAY_API_URL } from "../src/monday.js";
-import { NOTES_MAX_CHARS } from "../src/notes.js";
-import type { SlackDeps, SlackMessageEvent } from "../src/pointer-types.js";
-import { REPO_FORMAT_HINT } from "../src/repo-id.js";
+import { deriveKey } from "../src/core/crypto.js";
+import { MemoryRepo } from "../src/chat/memory.js";
+import { MONDAY_API_URL } from "../src/integrations/monday/monday.js";
+import { NOTES_MAX_CHARS } from "../src/chat/notes.js";
+import type { SlackDeps, SlackMessageEvent } from "../src/chat/pointer-types.js";
+import { REPO_FORMAT_HINT } from "../src/integrations/code-hosts/repo-id.js";
 import { createApp } from "../src/server.js";
-import { FsStore } from "../src/store.js";
-import type { AgentSpec, Team } from "../src/team.js";
+import { FsStore } from "../src/core/store.js";
+import type { AgentSpec, Team } from "../src/team/team.js";
 
 // The real Slack layer would call Slack and Claude. Record what the server hands
 // it instead, and never settle, which proves /slack/events answers without waiting.
 const dispatched = vi.hoisted(() => [] as Array<{ event: SlackMessageEvent; deps: SlackDeps }>);
-vi.mock("../src/dispatch.js", () => ({
+vi.mock("../src/slack/dispatch.js", () => ({
   handleSlackEvent: (event: SlackMessageEvent, deps: SlackDeps) => {
     dispatched.push({ event, deps });
     return new Promise<void>(() => {});
@@ -138,7 +138,7 @@ describe("admin API and Slack events", () => {
       const saved = await team();
       expect(saved.pointer.name).toBe("Scout");
       expect(saved.agents.find((a) => a.id === "coder")?.name).toBe("Sara");
-      expect(saved.agents.at(-1)).toEqual({ ...designer, effort: "", skills: [], avatar: "", apps: [] });
+      expect(saved.agents.at(-1)).toEqual({ ...designer, effort: "", skills: [], avatar: "", apps: [], engine: "claude" });
 
       const { manifest } = await (await get("/api/slack/manifest")).json();
       expect(manifest.display_information.name).toBe("Scout");
@@ -536,6 +536,10 @@ describe("admin API and Slack events", () => {
       expect(await error({ repo: "../x" })).toEqual({ status: 400, error: REPO_FORMAT_HINT });
       expect(await error({ repo: "acme/web", env: { PATH: "/tmp" } })).toEqual({ status: 400, error: "PATH is reserved by the platform." });
       expect(await error({ repo: "acme/web", env: { ANTHROPIC_API_KEY: "x" } })).toEqual({ status: 400, error: "ANTHROPIC_API_KEY is reserved by the platform." });
+      // Names that would send Claude Code's requests, and the platform's key, elsewhere.
+      for (const name of ["ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "AWS_SECRET_ACCESS_KEY", "https_proxy", "NODE_EXTRA_CA_CERTS"]) {
+        expect(await error({ repo: "acme/web", env: { [name]: "x" } })).toEqual({ status: 400, error: `${name} is reserved by the platform.` });
+      }
       expect(await error({ repo: "acme/web", env: { EMPTY: "" } })).toEqual({
         status: 400,
         error: "Empty values are not allowed; send null to delete a variable.",

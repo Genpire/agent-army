@@ -6,7 +6,7 @@
  */
 import type { PublicConfig } from "../../../lib/types";
 import { type AppCategory, type AppView, type CatalogApp, matchesQuery } from "../apps/apps";
-import { type IntegrationId, type IntegrationSummary, hasCodeHost, isIntegrationId } from "../catalog";
+import { type IntegrationId, type IntegrationSummary, aiReady, hasCodeHost, isIntegrationId } from "../catalog";
 
 /** The integrations built into the console: everything but the apps, which are tiles of their own. */
 export type NativeId = Exclude<IntegrationId, "apps">;
@@ -18,6 +18,8 @@ export const isNative = (row: IntegrationSummary): row is NativeSummary => isNat
 /** Where each built-in integration sits among the catalog's categories, so one filter covers both. */
 export const NATIVE_CATEGORY: Record<NativeId, AppCategory> = {
   claude: "AI & search",
+  codex: "AI & search",
+  gemini: "AI & search",
   slack: "Communication",
   github: "Developer tools",
   gitlab: "Developer tools",
@@ -29,7 +31,31 @@ export const NATIVE_CATEGORY: Record<NativeId, AppCategory> = {
 
 /** More words a search finds each one by, beyond its name, category and what it enables. */
 const NATIVE_KEYWORDS: Record<NativeId, string[]> = {
-  claude: ["anthropic", "model", "api key", "llm"],
+  claude: [
+    "claude",
+    "anthropic",
+    "model",
+    "api key",
+    "llm",
+    "provider",
+    "bedrock",
+    "vertex",
+    "google cloud",
+    "foundry",
+    "azure",
+    "deepseek",
+    "qwen",
+    "alibaba",
+    "kimi",
+    "moonshot",
+    "glm",
+    "z.ai",
+    "openrouter",
+    "litellm",
+    "gateway",
+  ],
+  codex: ["openai", "gpt", "coding agent", "cli", "engine"],
+  gemini: ["google", "coding agent", "cli", "engine"],
   slack: ["chat", "messages", "bot", "channels"],
   github: ["git", "repos", "pull requests", "code host"],
   gitlab: ["git", "repos", "merge requests", "code host"],
@@ -98,7 +124,7 @@ export function listText(items: string[]): string {
 
 /** The header's one line: "Claude, Slack and GitHub connected · 4 apps". */
 export function connectedLine(rows: IntegrationSummary[], appCount: number): string {
-  const names = rows.filter((r) => isNative(r) && r.connected).map((r) => r.name);
+  const names = rows.filter((r) => isNative(r) && r.connected).map((r) => r.listName ?? r.name);
   const apps = appCount ? `${appCount} ${appCount === 1 ? "app" : "apps"}` : "";
   if (!names.length) return apps ? `${apps} connected` : "Nothing connected yet";
   return [`${listText(names)} connected`, apps].filter(Boolean).join(" · ");
@@ -114,10 +140,17 @@ export interface MissingIntegration {
   name: string;
 }
 
-/** What still needs connecting before the team can work: Claude, Slack and one code host (App.tsx counts the same three). */
+/**
+ * What still needs connecting before the team can work: the AI model (the
+ * providers chat and repo tasks run on), Slack and one code host (App.tsx
+ * counts the same three).
+ */
 export function missingRequired(config: PublicConfig): MissingIntegration[] {
   const missing: MissingIntegration[] = [];
-  if (!config.anthropic.connected) missing.push({ id: "claude", label: "Claude", name: "Claude" });
+  if (!aiReady(config)) {
+    const claude = config.ai.chat.provider === "anthropic" && config.ai.task.provider === "anthropic";
+    missing.push(claude ? { id: "claude", label: "Claude", name: "Claude" } : { id: "claude", label: "the AI model", name: "the AI model" });
+  }
   if (!config.slack.connected) missing.push({ id: "slack", label: "Slack", name: "Slack" });
   if (!hasCodeHost(config)) missing.push({ id: "github", label: "a code host", name: "GitHub" });
   return missing;

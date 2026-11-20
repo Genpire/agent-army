@@ -17,6 +17,7 @@ import { TextInput } from "@astryxdesign/core/TextInput";
 import { VStack } from "@astryxdesign/core/VStack";
 import { type ReactNode, useMemo, useState } from "react";
 import { ConfirmButton } from "../../components/ConfirmButton";
+import { type AgentEngine, ENGINE_NAME, type EngineId, isAgentEngine } from "../../lib/engines";
 import { href } from "../../lib/router";
 import { useConfig } from "../../lib/state";
 import { ACCESS_OPTIONS, type AgentSpec } from "../../lib/types";
@@ -27,6 +28,8 @@ import { AgentEmoji } from "./AgentEmoji";
 import {
   ACCESS_INFO,
   AGENT_EFFORT_SELECT_OPTIONS,
+  CLAUDE_CHOICES,
+  type ModelChoices,
   accessDescription,
   type AgentDraft,
   NEW_AGENT,
@@ -51,6 +54,8 @@ export interface AgentDrawerProps {
   takenIds: ReadonlySet<string>;
   /** Pointer's name, as the owner set it. */
   lead: string;
+  /** The repo task provider's models for the model picker; Claude's when absent. */
+  models?: ModelChoices;
   onClose: () => void;
   /** Saves the agent (added or replaced by id); throws the server's error. */
   onSave: (spec: AgentSpec, isNew: boolean) => Promise<void>;
@@ -58,7 +63,7 @@ export interface AgentDrawerProps {
 }
 
 /** The agent editor: DrawerForm (header, scrolling fields, pinned Cancel and Save). */
-export function AgentDrawer({ isOpen, target, takenIds, lead, onClose, onSave, onDelete }: AgentDrawerProps) {
+export function AgentDrawer({ isOpen, target, takenIds, lead, models, onClose, onSave, onDelete }: AgentDrawerProps) {
   const title = target?.kind === "edit" ? `Edit ${target.agent.name}` : "New agent";
   return (
     <Drawer
@@ -75,6 +80,7 @@ export function AgentDrawer({ isOpen, target, takenIds, lead, onClose, onSave, o
           target={target}
           takenIds={takenIds}
           lead={lead}
+          models={models}
           onClose={onClose}
           onSave={onSave}
           onDelete={onDelete}
@@ -145,6 +151,40 @@ function SkillsField({ value, onChange, lead }: { value: string[]; onChange: (sk
   );
 }
 
+/** Claude, or a connected coding agent CLI. A CLI that is not connected is offered only when the agent is already set to it. */
+function EngineField({ value, onChange }: { value: AgentEngine; onChange: (engine: AgentEngine) => void }) {
+  const { config } = useConfig();
+  const cli = (id: EngineId, what: string) => {
+    const connected = config.engines[id].connected;
+    return {
+      value: id,
+      label: ENGINE_NAME[id],
+      description: connected ? what : value === id ? "Not connected: works as Claude until it is" : "Not connected: connect it on Integrations",
+      disabled: !connected && value !== id,
+    };
+  };
+  const options = [
+    { value: "claude", label: ENGINE_NAME.claude, description: "The team's model" },
+    cli("codex", "OpenAI's coding agent CLI"),
+    cli("gemini", "Google's coding agent CLI"),
+  ];
+  const missing = (["codex", "gemini"] as const).filter((id) => !config.engines[id].connected).map((id) => ENGINE_NAME[id]);
+  return (
+    <VStack gap={2}>
+      <Selector label="Engine" isLabelHidden options={options} value={value} onChange={(v) => isAgentEngine(v) && onChange(v)} width="100%" />
+      {missing.length > 0 && (
+        <Text type="supporting">
+          Connect {missing.join(" or ")} on the{" "}
+          <Link href={href("integrations")} isStandalone>
+            Integrations page
+          </Link>
+          .
+        </Text>
+      )}
+    </VStack>
+  );
+}
+
 /** The connected apps (Integrations, Apps) this agent may use. Apps that are off are listed but marked. */
 function AppsField({ value, onChange, lead }: { value: string[]; onChange: (apps: string[]) => void; lead: string }) {
   const { config } = useConfig();
@@ -178,7 +218,7 @@ function AppsField({ value, onChange, lead }: { value: string[]; onChange: (apps
   );
 }
 
-function AgentForm({ target, takenIds, lead, onClose, onSave, onDelete }: Omit<AgentDrawerProps, "isOpen" | "target"> & { target: AgentTarget }) {
+function AgentForm({ target, takenIds, lead, models = CLAUDE_CHOICES, onClose, onSave, onDelete }: Omit<AgentDrawerProps, "isOpen" | "target"> & { target: AgentTarget }) {
   const existing = target.kind === "edit" ? target.agent : undefined;
   const [draft, setDraft] = useState<AgentDraft>(() => (existing ? { ...existing } : { ...NEW_AGENT }));
   const [triedSave, setTriedSave] = useState(false);
@@ -291,14 +331,23 @@ function AgentForm({ target, takenIds, lead, onClose, onSave, onDelete }: Omit<A
             </FormSection>
 
             <Divider />
+            <FormSection title="Engine" description="Who does its work in repo tasks. With Codex or Gemini CLI, the agent hands its assignment to that coding agent, which works in the checkout, and checks what it did. In chat it works like any other agent.">
+              <EngineField value={draft.engine} onChange={set("engine")} />
+            </FormSection>
+
+            <Divider />
             <FormSection title="Model and effort">
               <Grid columns={{ minWidth: 200, max: 2 }} gap={4} align="end">
                 <Selector
                   label="Model"
-                  options={agentModelOptions(draft.model, lead)}
+                  options={agentModelOptions(draft.model, lead, models)}
                   value={draft.model}
                   onChange={set("model")}
-                  description="Sonnet 5.5 costs half as much as Opus 5.5; Haiku 5.5 is far cheaper for simple lookups."
+                  description={
+                    models.isClaude
+                      ? "Sonnet 5.5 costs half as much as Opus 5.5; Haiku 5.5 is far cheaper for simple lookups."
+                      : `Repo tasks run on ${models.name}; a Claude model runs on ${models.name}'s model of the same size.`
+                  }
                 />
                 <Selector
                   label="Effort"

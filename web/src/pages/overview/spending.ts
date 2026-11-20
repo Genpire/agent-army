@@ -2,7 +2,7 @@
  * This month's spend with the caps (GET /api/usage), shared by the Overview
  * page and Settings → Spending. Types come from the server (type-only).
  */
-import type { BudgetView, CapLevel, CapStatus, UsageView } from "../../../../src/budget.js";
+import type { BudgetView, CapLevel, CapStatus, UsageView } from "../../../../src/spending/budget.js";
 import { usd } from "../../lib/format";
 import { type Polled, USAGE_EVERY_MS, usePolled } from "../activity/usePolled";
 

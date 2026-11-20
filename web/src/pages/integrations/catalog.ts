@@ -6,7 +6,7 @@
 import { plural } from "../../lib/format";
 import type { PublicConfig } from "../../lib/types";
 
-export const INTEGRATION_IDS = ["claude", "slack", "github", "gitlab", "bitbucket", "monday", "jira", "miro", "apps"] as const;
+export const INTEGRATION_IDS = ["claude", "codex", "gemini", "slack", "github", "gitlab", "bitbucket", "monday", "jira", "miro", "apps"] as const;
 export type IntegrationId = (typeof INTEGRATION_IDS)[number];
 
 export const isIntegrationId = (s: string | undefined): s is IntegrationId => (INTEGRATION_IDS as readonly string[]).includes(s ?? "");
@@ -15,16 +15,18 @@ export const isIntegrationId = (s: string | undefined): s is IntegrationId => (I
 export type StatusTone = "success" | "warning" | "neutral";
 
 /** What kind of integration each is, in order (the hub files them under the catalog's categories: hub/model.ts). */
-export const INTEGRATION_GROUPS = ["Essentials", "Code", "Work tracking", "Boards", "Apps"] as const;
+export const INTEGRATION_GROUPS = ["Essentials", "AI", "Code", "Work tracking", "Boards", "Apps"] as const;
 export type IntegrationGroup = (typeof INTEGRATION_GROUPS)[number];
 
 export interface IntegrationSummary {
   id: IntegrationId;
   name: string;
+  /** How a list of what is connected names it, when not by `name`: the AI model row says its provider ("Claude"). */
+  listName?: string;
   group: IntegrationGroup;
   /** One line: what it enables. */
   enables: string;
-  /** Needed before the team can work (Claude, Slack, and one code host). */
+  /** Needed before the team can work (the AI model, Slack, and one code host). */
   required: boolean;
   connected: boolean;
   /** "Connected as octocat", "Not connected", "Optional"… */
@@ -36,9 +38,23 @@ export interface IntegrationSummary {
 export const hasCodeHost = (config: PublicConfig): boolean =>
   config.github.connected || config.github.extra.length > 0 || config.gitlab.connected || config.bitbucket.connected;
 
+/**
+ * The AI model row's status: "Claude" when chat and repo tasks run on it,
+ * "Claude · tasks on Kimi" when they differ, what is missing otherwise.
+ */
+export function aiStatus(config: PublicConfig): string {
+  const { chat, task } = config.ai;
+  if (!chat.ready) return chat.provider === "anthropic" ? "Not connected" : `${chat.name} for chat is not set up`;
+  if (!task.ready) return `${chat.name} · ${task.name} for tasks is not set up`;
+  return chat.provider === task.provider ? chat.name : `${chat.name} · tasks on ${task.name}`;
+}
+
+/** The providers chat and repo tasks run on are both connected and complete. */
+export const aiReady = (config: PublicConfig): boolean => config.ai.chat.ready && config.ai.task.ready;
+
 export function summarize(config: PublicConfig): IntegrationSummary[] {
   const name = config.team.pointer.name;
-  const { anthropic, slack, github, gitlab, bitbucket, monday, jira, miro, apps } = config;
+  const { ai, slack, github, gitlab, bitbucket, monday, jira, miro, apps } = config;
   const extra = github.extra.length;
   const githubConnected = github.connected || extra > 0;
   const githubStatus = github.connected
@@ -54,12 +70,37 @@ export function summarize(config: PublicConfig): IntegrationSummary[] {
   const rows: Omit<IntegrationSummary, "tone">[] = [
     {
       id: "claude",
-      name: "Claude",
-      group: "Essentials",
-      enables: `The model ${name} and the agents think with.`,
+      name: "AI model",
+      group: "AI",
+      enables: `The models ${name} and the agents think with: Claude, or another provider's.`,
+      listName: ai.chat.name,
       required: true,
-      connected: anthropic.connected,
-      status: anthropic.connected ? `Connected${anthropic.key ? ` · key ${anthropic.key}` : ""}` : "Not connected",
+      connected: aiReady(config),
+      status: aiStatus(config),
+    },
+    {
+      id: "codex",
+      name: "Codex",
+      group: "AI",
+      enables: "OpenAI's coding agent as a team member: agents set to Codex hand their repo work to it.",
+      required: false,
+      connected: config.engines.codex.connected,
+      status: optional(config.engines.codex.connected, `Connected${config.engines.codex.model ? ` · ${config.engines.codex.model}` : ""}`),
+    },
+    {
+      id: "gemini",
+      name: "Gemini CLI",
+      group: "AI",
+      enables: "Google's coding agent as a team member: agents set to Gemini hand their repo work to it.",
+      required: false,
+      connected: config.engines.gemini.connected,
+      // Gemini CLI has no sandbox in the task container: it runs only once the owner allows that.
+      status: optional(
+        config.engines.gemini.connected,
+        config.engines.gemini.allowUnsandboxed
+          ? `Connected${config.engines.gemini.model ? ` · ${config.engines.gemini.model}` : ""}`
+          : "Connected · not allowed to run yet",
+      ),
     },
     {
       id: "slack",
@@ -146,7 +187,7 @@ export const parseList = (s: string): string[] =>
     .map((x) => x.trim())
     .filter(Boolean);
 
-// Mirror ALLOW_LIST in src/server.ts and REPO_RE in src/config.ts.
+// Mirror ALLOW_LIST in src/server.ts and REPO_RE in src/core/config.ts.
 const OWNER_RE = /^[A-Za-z0-9-]+$/;
 const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 

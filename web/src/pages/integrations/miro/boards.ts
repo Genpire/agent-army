@@ -4,7 +4,7 @@
  * server checks them again).
  */
 import type { SearchableItem } from "@astryxdesign/core/Typeahead";
-import type { MiroBoardSummary } from "../../../../../src/miro.js";
+import type { MiroBoardSummary } from "../../../../../src/integrations/miro/miro.js";
 import { api } from "../../../lib/api";
 
 export type { MiroBoardSummary };
@@ -19,7 +19,7 @@ export async function fetchBoards(query: string): Promise<MiroBoardSummary[]> {
   return boards;
 }
 
-// Mirrors MIRO_BOARD_ID_RE in src/config.ts and parseBoardRef in src/miro.ts.
+// Mirrors MIRO_BOARD_ID_RE in src/core/config.ts and parseBoardRef in src/integrations/miro/miro.ts.
 const BOARD_ID_RE = /^[A-Za-z0-9_=-]{4,64}$/;
 const BOARD_LINK_RE = /^(?:https?:\/\/)?(?:[a-z0-9-]+\.)*miro\.com\/app\/(?:board|live-embed|embed)\/([^/?#\s]+)/i;
 

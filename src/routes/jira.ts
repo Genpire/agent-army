@@ -7,10 +7,10 @@
  */
 import express, { type Request, type Response, Router } from "express";
 import { z } from "zod";
-import { type Config, JIRA_KEY_RE, type JiraProjectAutomation, JiraProjectAutomationSchema, REPO_RE, publicView } from "../config.js";
-import { randomToken, safeEqual } from "../crypto.js";
-import { repoAccessError } from "../code-host-access.js";
-import { JiraError, checkJira, jiraClientFor } from "../jira.js";
+import { type Config, JIRA_KEY_RE, type JiraProjectAutomation, JiraProjectAutomationSchema, REPO_RE, publicView } from "../core/config.js";
+import { randomToken, safeEqual } from "../core/crypto.js";
+import { repoAccessError } from "../integrations/code-hosts/code-host-access.js";
+import { JiraError, checkJira, jiraClientFor } from "../integrations/jira/jira.js";
 import {
   JiraAutomation,
   checkProjectAutomation,
@@ -20,11 +20,11 @@ import {
   statusConflict,
   verifyJiraSignature,
   webhookJql,
-} from "../jira-automation.js";
-import { RecentSet } from "../listen.js";
-import { REPO_FORMAT_HINT } from "../repo-id.js";
-import { rememberConsoleUrl } from "../ticket-sync.js";
-import { configSecrets, makeRedactor } from "../worker.js";
+} from "../integrations/jira/jira-automation.js";
+import { RecentSet } from "../slack/listen.js";
+import { REPO_FORMAT_HINT } from "../integrations/code-hosts/repo-id.js";
+import { rememberConsoleUrl } from "../integrations/tickets/ticket-sync.js";
+import { configSecrets, makeRedactor } from "../tasks/worker.js";
 import type { IntegrationRouteDeps } from "./types.js";
 
 const PROJECT_KEY = z.string().trim().toUpperCase().max(50).regex(JIRA_KEY_RE, "Project keys look like ACME: capital letters, digits or _, starting with a letter.");

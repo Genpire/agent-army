@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { AttachmentRepo } from "./attachments.js";
-import { Spending } from "./budget.js";
+import { AttachmentRepo } from "./chat/attachments.js";
+import { Spending } from "./spending/budget.js";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { z } from "zod";
 import {
@@ -17,16 +17,16 @@ import {
   isReady,
   publicView,
   resolveMasterKey,
-} from "./config.js";
-import { hashPassword, randomToken, safeEqual, sessionKey, signSession, verifyPassword, verifySession } from "./crypto.js";
-import { repoAccessError } from "./code-host-access.js";
-import { GITHUB_REPO_RE, REPO_FORMAT_HINT, REPO_ID_MAX, isRepoId } from "./repo-id.js";
-import { CONVERSATION_ID_RE, ConversationService, MESSAGE_MAX_CHARS, type WebThreads } from "./conversations.js";
-import { handleSlackEvent, withBrainSlot } from "./dispatch.js";
-import { HrService, PROPOSAL_ID_RE, REVIEW_ID_RE } from "./hr.js";
-import { RecentSet } from "./listen.js";
-import { MEMORY_MAX_FACTS, MemoryRepo } from "./memory.js";
-import { MondayClient, MondayError, checkMonday, statusColumns } from "./monday.js";
+} from "./core/config.js";
+import { hashPassword, randomToken, safeEqual, sessionKey, signSession, verifyPassword, verifySession } from "./core/crypto.js";
+import { repoAccessError } from "./integrations/code-hosts/code-host-access.js";
+import { GITHUB_REPO_RE, REPO_FORMAT_HINT, REPO_ID_MAX, isRepoId } from "./integrations/code-hosts/repo-id.js";
+import { CONVERSATION_ID_RE, ConversationService, MAX_FILES_PER_MESSAGE, MESSAGE_MAX_CHARS, type WebThreads } from "./chat/conversations.js";
+import { handleSlackEvent, withBrainSlot } from "./slack/dispatch.js";
+import { HrService, PROPOSAL_ID_RE, REVIEW_ID_RE } from "./team/hr.js";
+import { RecentSet } from "./slack/listen.js";
+import { MEMORY_MAX_FACTS, MemoryRepo } from "./chat/memory.js";
+import { MondayClient, MondayError, checkMonday, statusColumns } from "./integrations/monday/monday.js";
 import {
   TicketAutomation,
   checkBoardAutomation,
@@ -36,27 +36,31 @@ import {
   removeWebhook,
   webhookChallenge,
   webhookIds,
-} from "./monday-automation.js";
-import { NOTES_MAX_CHARS, NotesRepo } from "./notes.js";
-import { loadOffice } from "./office.js";
-import { type QueryFn, createPointerBrain } from "./pointer.js";
-import type { PointerBrain, SlackDeps, SlackMessageEvent } from "./pointer-types.js";
-import { type Runner, createRunner } from "./runner.js";
-import { SCREENSHOT_NAME_RE, ScreenshotRepo, TASK_ID_RE, screenshotType } from "./screenshots.js";
-import { SCOUT_NEED_MAX_CHARS, findSkills } from "./skill-scout.js";
-import { type FetchLike, SKILL_LIMITS, SkillLibrary, SkillsPluginCache, skillView } from "./skills.js";
-import { buildManifest, manifestCreateUrl, slackClient, verifySlackSignature } from "./slack.js";
-import { createStore } from "./store.js";
-import { readTimeline } from "./task-events.js";
-import { TaskRepo } from "./tasks.js";
-import { SKILL_NAME_RE, TeamSchema } from "./team.js";
-import { rememberConsoleUrl } from "./ticket-sync.js";
-import { checkAnthropic, checkGithub, checkSlack } from "./validate.js";
-import { UsageRepo } from "./usage.js";
-import { handleGithubWebhook, parseGithubPayload, verifyGithubSignature } from "./webhook.js";
-import { configSecrets, makeRedactor } from "./worker.js";
+} from "./integrations/monday/monday-automation.js";
+import { NOTES_MAX_CHARS, NotesRepo } from "./chat/notes.js";
+import { loadOffice } from "./team/office.js";
+import { type QueryFn, createPointerBrain } from "./chat/pointer.js";
+import type { PointerBrain, SlackDeps, SlackMessageEvent } from "./chat/pointer-types.js";
+import { type Runner, createRunner } from "./tasks/runner.js";
+import { SCREENSHOT_NAME_RE, ScreenshotRepo, TASK_ID_RE, screenshotType } from "./tasks/screenshots.js";
+import { SCOUT_NEED_MAX_CHARS, findSkills } from "./skills/skill-scout.js";
+import { type FetchLike, SKILL_LIMITS, SkillLibrary, SkillsPluginCache, skillView } from "./skills/skills.js";
+import { buildManifest, manifestCreateUrl, slackClient, verifySlackSignature } from "./slack/slack.js";
+import { createStore } from "./core/store.js";
+import { readTimeline } from "./tasks/task-events.js";
+import { TaskRepo } from "./tasks/tasks.js";
+import { SKILL_NAME_RE, TeamSchema } from "./team/team.js";
+import { rememberConsoleUrl } from "./integrations/tickets/ticket-sync.js";
+import { checkAnthropic, checkGithub, checkSlack } from "./core/validate.js";
+import { UsageRepo } from "./spending/usage.js";
+import { handleGithubWebhook, parseGithubPayload, verifyGithubSignature } from "./integrations/code-hosts/webhook.js";
+import { configSecrets, makeRedactor } from "./tasks/worker.js";
+import { removeStaleCredentialFolders } from "./ai/ai-providers.js";
+import { aiRoutes } from "./routes/ai.js";
 import { appsRoutes } from "./routes/apps.js";
 import { bitbucketRoutes } from "./routes/bitbucket.js";
+import { chatRoutes } from "./routes/chat.js";
+import { enginesRoutes } from "./routes/engines.js";
 import { gitlabRoutes } from "./routes/gitlab.js";
 import { jiraRoutes } from "./routes/jira.js";
 import { miroRoutes } from "./routes/miro.js";
@@ -206,7 +210,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
   // Spending caps for every start path (Slack, console, GitHub reviews) and chat; alerts in Slack.
   const spending = new Spending({ store, usage, config: () => configRepo.load(), slack: slackFactory });
   // Console conversations: answered by the same brain, within the same limit as Slack answers.
-  const conversations = new ConversationService({ store, configRepo, tasks, runner, brain, usage, spending, brainSlot: withBrainSlot });
+  const conversations = new ConversationService({ store, configRepo, tasks, runner, brain, usage, spending, brainSlot: withBrainSlot, attachments });
   const slackDeps: SlackDeps & { web: WebThreads; spending: Spending } = {
     configRepo,
     tasks,
@@ -720,13 +724,20 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
 
   // ---------- Chat: conversations with Pointer from the console ----------
   // Pointer answers in the background (202); the page polls the conversation.
-  const MESSAGE_TEXT = z.object({
-    text: z
-      .string()
-      .trim()
-      .min(1, "Write a message first.")
-      .max(MESSAGE_MAX_CHARS, `Messages are limited to ${MESSAGE_MAX_CHARS} characters.`),
+  // Files and voice messages are uploaded first (src/routes/chat.ts), then sent by id with a message.
+  const MESSAGE_BODY = z.object({
+    text: z.string().trim().max(MESSAGE_MAX_CHARS, `Messages are limited to ${MESSAGE_MAX_CHARS} characters.`).default(""),
+    attachmentIds: z
+      .array(z.string().max(20).regex(/^a-[0-9a-f]{8}$/, "A file you attached is no longer here. Remove it and attach it again."))
+      .max(MAX_FILES_PER_MESSAGE, `A message can carry ${MAX_FILES_PER_MESSAGE} files.`)
+      .default([]),
   });
+  const hasContent = (m: { text: string; attachmentIds: string[] }) => m.text !== "" || m.attachmentIds.length > 0;
+  const MESSAGE_TEXT = MESSAGE_BODY.refine(hasContent, "Write a message first.");
+  /** POST /api/conversations: with files, the draft id their upload answered. */
+  const FIRST_MESSAGE = MESSAGE_BODY.extend({
+    conversationId: z.string().max(40).regex(CONVERSATION_ID_RE, "The files you attached are no longer waiting here. Attach them again.").optional(),
+  }).refine(hasContent, "Write a message first.");
   const CONVERSATION_NOT_FOUND = "Conversation not found.";
   const conversationParam = (req: Request, res: Response): string | undefined => {
     const id = String(req.params.id ?? "");
@@ -740,9 +751,12 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
   });
 
   app.post("/api/conversations", requireAdmin, async (req, res) => {
-    const input = body(MESSAGE_TEXT, req, res);
+    const input = body(FIRST_MESSAGE, req, res);
     if (!input) return;
-    const result = await conversations.create(input.text);
+    const result = await conversations.create(input.text, {
+      attachmentIds: input.attachmentIds,
+      ...(input.conversationId ? { draftId: input.conversationId } : {}),
+    });
     if (!result.ok) return void res.status(result.status).json({ error: result.error });
     res.status(202).json({ conversation: result.conversation });
   });
@@ -760,7 +774,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
     if (!id) return;
     const input = body(MESSAGE_TEXT, req, res);
     if (!input) return;
-    const result = await conversations.send(id, input.text);
+    const result = await conversations.send(id, input.text, { attachmentIds: input.attachmentIds });
     if (!result.ok) return void res.status(result.status).json({ error: result.error });
     res.status(202).json({ conversation: result.conversation });
   });
@@ -1275,6 +1289,9 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
   app.use(jiraRoutes(routeDeps));
   app.use(miroRoutes(routeDeps));
   app.use(appsRoutes(routeDeps));
+  app.use(enginesRoutes(routeDeps));
+  app.use(aiRoutes(routeDeps));
+  app.use(chatRoutes({ ...routeDeps, conversations }));
 
   app.use(express.static(fileURLToPath(new URL("../public", import.meta.url)), { index: "index.html" }));
 
@@ -1310,6 +1327,7 @@ function agentIdAt(input: unknown, index: number): string | undefined {
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  void removeStaleCredentialFolders(); // Google key files left by processes that died (ai-providers.ts)
   const port = Number(process.env.PORT ?? 8080);
   const { app, runner, store } = await createApp();
   app.listen(port, () => {

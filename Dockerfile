@@ -17,6 +17,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && corepack enable \
     && mkdir -p /data && chown node:node /data
+# Coding agent CLIs the team can hand repo work to (src/ai/engines.ts), pinned.
+# ENGINES says which: "codex gemini" (the default), one of them, or "" for
+# neither (an engine whose CLI is missing is left out of tasks, with a note).
+# Codex adds about 420 MB (a native binary), Gemini CLI about 100 MB.
+ARG ENGINES="codex gemini"
+ARG CODEX_VERSION=0.171.0
+ARG GEMINI_CLI_VERSION=0.70.0
+RUN set -e; pkgs=""; \
+    for engine in $ENGINES; do \
+      case "$engine" in \
+        codex) pkgs="$pkgs @openai/codex@${CODEX_VERSION}" ;; \
+        gemini) pkgs="$pkgs @google/gemini-cli@${GEMINI_CLI_VERSION}" ;; \
+        *) echo "Unknown engine in ENGINES: $engine" >&2; exit 1 ;; \
+      esac; \
+    done; \
+    if [ -n "$pkgs" ]; then npm install -g --ignore-scripts --no-audit --no-fund $pkgs && npm cache clean --force; fi
 WORKDIR /app
 COPY --from=build /app/node_modules ./node_modules
 # Headless Chromium for browser checks in repo tasks (the Playwright MCP server).
@@ -28,6 +44,14 @@ RUN node node_modules/playwright/cli.js install --with-deps chromium \
     && rm -rf /var/lib/apt/lists/* \
     && chmod -R a+rX /ms-playwright
 COPY --from=build /app/dist ./dist
+# Gemini CLI's system settings (src/ai/gemini-settings.ts): merged after a
+# repository's own .gemini/settings.json, so they win. Gemini CLI reads the
+# file only when it and every folder above it are root's and not writable by
+# others, so it is written here, as root; a task checks it before Gemini runs.
+# coreutils (timeout, which enforces each CLI run's deadline) is in the base image.
+RUN mkdir -p /etc/gemini-cli \
+    && node --input-type=module -e 'import { GEMINI_SYSTEM_SETTINGS as s } from "/app/dist/ai/gemini-settings.js"; process.stdout.write(JSON.stringify(s, null, 2) + "\n");' > /etc/gemini-cli/settings.json \
+    && chmod 755 /etc/gemini-cli && chmod 644 /etc/gemini-cli/settings.json
 COPY package.json ./
 COPY --from=build /app/public ./public
 ENV NODE_ENV=production PORT=8080 DATA_DIR=/data HOME=/home/node

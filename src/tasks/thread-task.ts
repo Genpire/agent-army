@@ -1,0 +1,118 @@
+import type { WebClient } from "@slack/web-api";
+import { refreshAppsForTask } from "../integrations/apps/apps.js";
+import type { TaskBudgetCheck } from "../spending/budget.js";
+import type { Config, ConfigRepo } from "../core/config.js";
+import { repoAccessError } from "../integrations/code-hosts/code-host-access.js";
+import { REPO_FORMAT_HINT } from "../integrations/code-hosts/repo-id.js";
+import type { Runner } from "./runner.js";
+import { repoFromToken, resolveRepo } from "../slack/targeting.js";
+import { type Task, type TaskRepo, type TaskTicket, WEB_CHANNEL, newTaskId } from "./tasks.js";
+
+export interface ThreadTaskDeps {
+  tasks: TaskRepo;
+  runner: Runner;
+  /** A Slack client for the installed bot token; not needed for console (web) tasks. */
+  slack?: WebClient;
+  /** Removes credentials from error text before it is stored or returned. */
+  redact?: (text: string) => string;
+  /** The spending caps (see budget.ts), checked before anything is posted or saved. Every caller passes it. */
+  budget?: TaskBudgetCheck;
+  /** Renews the sign-ins of the team's apps before the worker starts (the worker never renews them; see apps.ts). */
+  configRepo?: ConfigRepo;
+}
+
+export interface ThreadTaskInput {
+  repo: string;
+  /** A Slack channel, or WEB_CHANNEL for a console conversation (then threadTs is the conversation id). */
+  channel: string;
+  threadTs: string;
+  /** Slack user the task reports to ("admin" for console tasks). */
+  userId: string;
+  instruction: string;
+  /** Posted in the Slack thread first; that message becomes the task's live progress message. Not posted for web tasks. */
+  ackText: string;
+  /** What started the task; "slack" when omitted. */
+  trigger?: Task["trigger"];
+  /** The monday.com ticket the task works on; its status follows the task (see ticket-sync.ts). */
+  ticket?: TaskTicket;
+}
+
+export type ThreadTaskResult = { ok: true; taskId: string } | { ok: false; error: string };
+
+/**
+ * Starts a repo task in a Slack thread or a console conversation: for Slack,
+ * posts the acknowledgement (its ts is the progress message the worker
+ * edits); then saves the task as queued and launches the worker. A launch
+ * failure marks the task failed. A spending cap that is used up refuses the
+ * task first, with nothing posted or saved. Never throws.
+ */
+export async function startThreadTask(deps: ThreadTaskDeps, input: ThreadTaskInput): Promise<ThreadTaskResult> {
+  const redact = deps.redact ?? ((text: string) => text);
+  let task: Task | undefined;
+  try {
+    if (deps.budget) {
+      const allowed = await deps.budget.checkTask(input.repo);
+      if (!allowed.ok) return { ok: false, error: allowed.error };
+    }
+    const web = input.channel === WEB_CHANNEL;
+    let progressTs: string | undefined;
+    if (!web) {
+      if (!deps.slack) return { ok: false, error: "Could not start the task: Slack is not connected." };
+      const ack = await deps.slack.chat.postMessage({ channel: input.channel, thread_ts: input.threadTs, text: input.ackText });
+      progressTs = ack.ts;
+    }
+    const now = new Date().toISOString();
+    task = {
+      id: newTaskId(),
+      createdAt: now,
+      updatedAt: now,
+      status: "queued",
+      repo: input.repo,
+      channel: input.channel,
+      threadTs: input.threadTs,
+      ...(progressTs ? { progressTs } : {}),
+      userId: input.userId,
+      instruction: input.instruction.trim(),
+      trigger: input.trigger ?? "slack",
+      ...(input.ticket ? { ticket: input.ticket } : {}),
+    };
+    await deps.tasks.save(task);
+  } catch (err) {
+    return { ok: false, error: `Could not start the task: ${redact(errorText(err))}` };
+  }
+
+  try {
+    if (deps.configRepo) await refreshAppsForTask(deps.configRepo, { redact });
+    await deps.runner.launch(task.id);
+  } catch (err) {
+    const error = `Could not start a worker: ${redact(errorText(err))}`;
+    task.status = "failed";
+    task.error = error;
+    await deps.tasks.save(task).catch(() => undefined);
+    return { ok: false, error };
+  }
+  return { ok: true, taskId: task.id };
+}
+
+/**
+ * The repository a new task works on, with the same checks for Slack and the
+ * console: the named repo (owner/repo, gitlab:group/project or
+ * bitbucket:workspace/repo), else the thread's, else the channel's default;
+ * its code host connected and allowed to work on it (repoAccessError, the same
+ * rule the worker's codeHostFor applies). Errors are written for Pointer and
+ * the person.
+ */
+export function resolveTaskRepo(
+  config: Config,
+  opts: { repo?: string; threadRepo?: string; channelRepo?: string },
+): { ok: true; repo: string } | { ok: false; error: string } {
+  const named = opts.repo?.trim() ? repoFromToken(opts.repo.trim()) : undefined;
+  if (named === null) return { ok: false, error: `"${opts.repo}" is not a repository. ${REPO_FORMAT_HINT}` };
+  const target = resolveRepo({ override: named, threadRepo: opts.threadRepo, channelRepo: opts.channelRepo });
+  if (!target) return { ok: false, error: "No repository: ask the user which repository to use (owner/repo, gitlab:group/project or bitbucket:workspace/repo)." };
+  const denied = repoAccessError(config, target);
+  if (denied) return { ok: false, error: denied };
+  return { ok: true, repo: target };
+}
+
+const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));

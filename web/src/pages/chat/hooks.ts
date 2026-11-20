@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, api, errorMessage } from "../../lib/api";
 import type { ConversationList, ConversationSummary, ConversationView, ScreenshotList, Task, TaskEventsView, TaskTimeline } from "../../lib/types";
+import { type ChatOptions, DEFAULT_OPTIONS, loadChatOptions } from "./files";
 import { isActiveTask } from "./labels";
 
 /**
@@ -148,6 +149,23 @@ export function useScreenshots(taskId: string, count: number | undefined) {
     };
   }, [taskId, count]);
   return shots;
+}
+
+/** GET /api/chat/options: the file limits and the voice transcription service, read once per mount. */
+export function useChatOptions(): ChatOptions {
+  const [options, setOptions] = useState<ChatOptions>(DEFAULT_OPTIONS);
+  useEffect(() => {
+    let cancelled = false;
+    loadChatOptions()
+      .then((data) => {
+        if (!cancelled) setOptions(data);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  return options;
 }
 
 /** Recent tasks (GET /api/tasks), for repository suggestions. Loaded once when asked for. */

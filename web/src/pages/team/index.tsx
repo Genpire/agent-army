@@ -11,6 +11,7 @@ import { VStack } from "@astryxdesign/core/VStack";
 import { PlusIcon, UserGroupIcon } from "@heroicons/react/24/outline";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { PageFrame } from "../../components/PageFrame";
+import { providerById, useAiProviders } from "../../lib/aiProviders";
 import { href, navigate, useRoute } from "../../lib/router";
 import { useConfig } from "../../lib/state";
 import type { AgentSpec, PointerSpec } from "../../lib/types";
@@ -18,7 +19,7 @@ import { AgentDrawer, type AgentTarget } from "./AgentDrawer";
 import { AgentsTable } from "./AgentsTable";
 import { HrSection } from "./HrSection";
 import { PointerSettings, SettingsRow } from "./PointerSettings";
-import { MAX_AGENTS } from "./team";
+import { CLAUDE_CHOICES, MAX_AGENTS, providerChoices } from "./team";
 import { useTeamSave } from "./useTeamSave";
 import { WorkFlow } from "./WorkFlow";
 
@@ -51,6 +52,17 @@ export default function TeamPage() {
   const close = useCallback(() => navigate("team"), []);
 
   const takenIds = useMemo(() => new Set(team.agents.map((a) => a.id)), [team.agents]);
+
+  // The model pickers offer the models of the providers chat and repo tasks run on (Claude's on Anthropic, without a request).
+  const onClaude = config.ai.chatProvider === "anthropic" && config.ai.taskProvider === "anthropic";
+  const providers = useAiProviders(!onClaude);
+  const choices = useMemo(
+    () => ({
+      chat: config.ai.chatProvider === "anthropic" ? CLAUDE_CHOICES : providerChoices(providerById(providers.view, config.ai.chatProvider)),
+      task: config.ai.taskProvider === "anthropic" ? CLAUDE_CHOICES : providerChoices(providerById(providers.view, config.ai.taskProvider)),
+    }),
+    [config.ai.chatProvider, config.ai.taskProvider, providers.view],
+  );
 
   const saveAgent = (spec: AgentSpec, isNew: boolean) =>
     saveTeam((t) => {
@@ -123,10 +135,25 @@ export default function TeamPage() {
 
         <Divider />
 
-        <PointerSettings pointer={team.pointer} claudeModel={config.anthropic.model ?? ""} onSave={savePointer} />
+        <PointerSettings
+          pointer={team.pointer}
+          claudeModel={config.anthropic.model ?? ""}
+          chatModels={choices.chat}
+          taskModels={choices.task}
+          onSave={savePointer}
+        />
       </VStack>
 
-      <AgentDrawer isOpen={routed !== undefined} target={target} takenIds={takenIds} lead={team.pointer.name} onClose={close} onSave={saveAgent} onDelete={deleteAgent} />
+      <AgentDrawer
+        isOpen={routed !== undefined}
+        target={target}
+        takenIds={takenIds}
+        lead={team.pointer.name}
+        models={choices.task}
+        onClose={close}
+        onSave={saveAgent}
+        onDelete={deleteAgent}
+      />
     </PageFrame>
   );
 }

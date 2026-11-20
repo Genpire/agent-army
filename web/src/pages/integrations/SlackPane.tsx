@@ -13,7 +13,7 @@ import { Text } from "@astryxdesign/core/Text";
 import { VStack } from "@astryxdesign/core/VStack";
 import { ChatBubbleLeftRightIcon } from "@heroicons/react/24/outline";
 import { useEffect, useState } from "react";
-import type { buildManifest } from "../../../../src/slack.js";
+import type { buildManifest } from "../../../../src/slack/slack.js";
 import { CopyField } from "../../components/CopyField";
 import { SecretField } from "../../components/SecretField";
 import { api, errorMessage } from "../../lib/api";
@@ -33,11 +33,13 @@ interface ManifestResponse {
 /** What each bot scope in the manifest is for. A scope missing here is still listed, without a reason. */
 const SCOPE_USES: Record<string, string> = {
   "app_mentions:read": "See @mentions",
-  "chat:write": "Post replies and progress",
+  "chat:write": "Post replies and progress, and messages you ask it to send",
   "channels:history": "Read messages in public channels it is in",
   "groups:history": "Read messages in private channels it is in",
   "im:history": "Read direct messages",
-  "users:read": "Look up who is asking",
+  "users:read": "Look up who is asking, and find people to message",
+  "channels:read": "Find a public channel by name to post in",
+  "groups:read": "Find a private channel it is in by name",
   "reactions:write": "React to messages while it works",
   "files:read": "Read files people share",
   "files:write": "Post screenshots from browser checks",

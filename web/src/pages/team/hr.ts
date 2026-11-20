@@ -1,19 +1,19 @@
 /**
  * The HR recommendations' vocabulary: proposal kinds and statuses as tokens,
  * the agent fields a change can touch, and the API calls. The shapes come
- * from src/hr.ts (type-only), so the page and the API cannot drift apart.
+ * from src/team/hr.ts (type-only), so the page and the API cannot drift apart.
  */
 import type { TokenColor } from "@astryxdesign/core/Token";
-import type { ChangeField, DecisionResult, HrProposal, HrReview, ProposalKind, ProposalStatus } from "../../../../src/hr.js";
+import type { ChangeField, DecisionResult, HrProposal, HrReview, ProposalKind, ProposalStatus } from "../../../../src/team/hr.js";
 import { api } from "../../lib/api";
 import type { Access } from "../../lib/types";
 
-export type { AgentChanges, ChangeField, HrProposal, HrReview } from "../../../../src/hr.js";
+export type { AgentChanges, ChangeField, HrProposal, HrReview } from "../../../../src/team/hr.js";
 
-/** Mirrors HR_AGENT_ID in src/hr.ts: the HR agent of the default team. */
+/** Mirrors HR_AGENT_ID in src/team/hr.ts: the HR agent of the default team. */
 export const HR_AGENT_ID = "hr";
 
-/** What a review costs at most (HR_BUDGET_USD in src/hr.ts). */
+/** What a review costs at most (HR_BUDGET_USD in src/team/hr.ts). */
 export const REVIEW_BUDGET = "$0.50";
 
 export const KIND_INFO: Record<ProposalKind, { label: string; color: TokenColor; description: string }> = {

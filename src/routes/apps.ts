@@ -10,8 +10,8 @@
 import { randomBytes } from "node:crypto";
 import { type Request, type Response, Router } from "express";
 import { z } from "zod";
-import { APP_CATALOG, APP_CATEGORIES, catalogApp } from "../apps-catalog.js";
-import { appUrlProblem, assertPublicUrl } from "../apps-net.js";
+import { APP_CATALOG, APP_CATEGORIES, catalogApp } from "../integrations/apps/apps-catalog.js";
+import { appUrlProblem, assertPublicUrl } from "../integrations/apps/apps-net.js";
 import {
   OAUTH_CALLBACK_PATH,
   OAUTH_CLIENT_METADATA_PATH,
@@ -22,11 +22,11 @@ import {
   completeAppSignIn,
   oauthRedirectUrl,
   startAppSignIn,
-} from "../apps-oauth.js";
-import { REGISTRY_MIN_QUERY, searchRegistry } from "../apps-registry.js";
-import { listAppTools, removeApp, setAppAgents } from "../apps.js";
-import { APP_HEADER_RE, APP_ID_RE, type AppAuth, type AppConnection, AppConnectionSchema, type Config, MAX_APPS, publicView } from "../config.js";
-import { configSecrets, makeRedactor } from "../worker.js";
+} from "../integrations/apps/apps-oauth.js";
+import { REGISTRY_MIN_QUERY, searchRegistry } from "../integrations/apps/apps-registry.js";
+import { listAppTools, removeApp, setAppAgents } from "../integrations/apps/apps.js";
+import { APP_HEADER_RE, APP_ID_RE, type AppAuth, type AppConnection, AppConnectionSchema, type Config, MAX_APPS, publicView } from "../core/config.js";
+import { configSecrets, makeRedactor } from "../tasks/worker.js";
 import type { IntegrationRouteDeps } from "./types.js";
 
 const HEADER_NAME = z.string().regex(APP_HEADER_RE, "Header names use letters, digits and dashes.");

@@ -24,7 +24,7 @@ import {
 } from "@heroicons/react/24/outline";
 import type { ComponentType } from "react";
 import { api } from "./lib/api";
-import { hasCodeHost } from "./pages/integrations/catalog";
+import { aiReady, hasCodeHost } from "./pages/integrations/catalog";
 import { type Page, href, useRoute } from "./lib/router";
 import { useAppState } from "./lib/state";
 import type { PublicConfig } from "./lib/types";
@@ -65,9 +65,9 @@ const NAV: { page: Page; label: string; icon: typeof Squares2X2Icon }[] = [
   { page: "memory", label: "Memory", icon: LightBulbIcon },
 ];
 
-/** How many of the core integrations (Claude, Slack, a code host) still need connecting. */
+/** How many of the core integrations (the AI model, Slack, a code host) still need connecting. */
 function missingIntegrations(config: PublicConfig): number {
-  return [config.anthropic.connected, config.slack.connected, hasCodeHost(config)].filter((c) => !c).length;
+  return [aiReady(config), config.slack.connected, hasCodeHost(config)].filter((c) => !c).length;
 }
 
 export function App() {
