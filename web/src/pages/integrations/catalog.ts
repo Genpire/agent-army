@@ -14,7 +14,7 @@ export const isIntegrationId = (s: string | undefined): s is IntegrationId => (I
 /** success = connected, warning = required and missing, neutral = optional and missing. */
 export type StatusTone = "success" | "warning" | "neutral";
 
-/** The list's sections, in order. */
+/** What kind of integration each is, in order (the hub files them under the catalog's categories: hub/model.ts). */
 export const INTEGRATION_GROUPS = ["Essentials", "Code", "Work tracking", "Boards", "Apps"] as const;
 export type IntegrationGroup = (typeof INTEGRATION_GROUPS)[number];
 
@@ -135,11 +135,6 @@ export function summarize(config: PublicConfig): IntegrationSummary[] {
     },
   ];
   return rows.map((r) => ({ ...r, tone: r.connected ? "success" : r.required ? "warning" : "neutral" }));
-}
-
-/** The integration to show when none is selected: the first required one still missing, else Claude. */
-export function defaultIntegration(rows: IntegrationSummary[]): IntegrationId {
-  return rows.find((r) => r.required && !r.connected)?.id ?? "claude";
 }
 
 // ---------- Input helpers (the server validates again) ----------

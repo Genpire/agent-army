@@ -1,7 +1,7 @@
 /**
  * Apps connected through their MCP servers: the shapes the console uses, the
- * catalog (fetched once per page load, then filtered in the browser), the
- * MCP Registry search, and how a connected app's status reads.
+ * catalog (fetched once per page load, kept in memory, filtered in the
+ * browser), the MCP Registry search, and how a connected app's status reads.
  */
 import { useEffect, useState } from "react";
 import type { AppAuthKind, AppCategory, CatalogApp, CatalogUrlField } from "../../../../../src/apps-catalog.js";
@@ -34,20 +34,31 @@ export interface AddAppResult {
   signInUrl?: string;
 }
 
-// The catalog is static: fetched once per page load and shared by every component that shows it.
+// The catalog is static: fetched once per page load, then kept in memory and
+// shared by every component that shows it, so coming back to a page shows it at once.
 let catalogRequest: Promise<AppCatalogData> | undefined;
+let catalogData: AppCatalogData | undefined;
+
+/** Starts fetching the catalog, once; a failed fetch is tried again on the next call. */
+export function loadAppCatalog(): Promise<AppCatalogData> {
+  catalogRequest ??= api.get<AppCatalogData>("/api/apps/catalog").then(
+    (data) => (catalogData = data),
+    (err: unknown) => {
+      catalogRequest = undefined;
+      throw err;
+    },
+  );
+  return catalogRequest;
+}
 
 export function useAppCatalog(): { data?: AppCatalogData; error?: string } {
-  const [state, setState] = useState<{ data?: AppCatalogData; error?: string }>({});
+  const [state, setState] = useState<{ data?: AppCatalogData; error?: string }>(() => (catalogData ? { data: catalogData } : {}));
   useEffect(() => {
+    if (catalogData) return;
     let live = true;
-    catalogRequest ??= api.get<AppCatalogData>("/api/apps/catalog");
-    catalogRequest.then(
+    loadAppCatalog().then(
       (data) => live && setState({ data }),
-      (err: unknown) => {
-        catalogRequest = undefined;
-        if (live) setState({ error: errorMessage(err) });
-      },
+      (err: unknown) => live && setState({ error: errorMessage(err) }),
     );
     return () => {
       live = false;
@@ -142,6 +153,19 @@ export function appStatus(app: AppView): { tone: StatusTone; text: string } {
   const usable = allowedTools(app).length;
   if (!usable) return { tone: "warning", text: "No tools allowed" };
   return { tone: "success", text: `${plural(usable, "tool")} · ${app.access === "write" ? "can change things" : "looks only"}` };
+}
+
+/**
+ * How a connected app reads on its tile: how it signs in, then how many tools
+ * it may use and what it may do. "Signed in · 12 tools · read only",
+ * "Sign-in expired" (signed out after its tools were listed), "Off".
+ */
+export function appTileStatus(app: AppView): { tone: StatusTone; text: string } {
+  if (app.enabled && isSignedOut(app)) return { tone: "warning", text: app.checkedAt ? "Sign-in expired" : "Not signed in" };
+  const status = appStatus(app);
+  if (status.tone !== "success") return status;
+  const parts = [app.auth.type === "oauth" ? "Signed in" : "", plural(allowedTools(app).length, "tool"), app.access === "write" ? "can change things" : "read only"];
+  return { tone: "success", text: parts.filter(Boolean).join(" · ") };
 }
 
 /** The catalog entry an app was added from. */
