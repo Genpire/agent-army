@@ -45,7 +45,19 @@ const AUTH_INPUT = z.discriminatedUnion(
       type: z.literal("headers"),
       headers: z.record(HEADER_NAME, z.string().trim().max(10_000)).refine((h) => Object.keys(h).length >= 1 && Object.keys(h).length <= 10, "Give between 1 and 10 headers."),
     }),
-    z.object({ type: z.literal("oauth"), clientId: z.string().trim().max(500).optional(), clientSecret: z.string().trim().max(2000).optional() }),
+    z.object({
+      type: z.literal("oauth"),
+      clientId: z
+        .string()
+        .trim()
+        .max(500)
+        // A browser's autofill puts the owner's email here; no OAuth client id looks like one.
+        .refine((id) => !/^[^\s@/:]+@[^\s@/:]+\.[^\s@/:]+$/.test(id), "That is an email address, not a client ID. Copy the client ID from the OAuth app you registered.")
+        .optional(),
+      clientSecret: z.string().trim().max(2000).optional(),
+      /** Forget the owner's own OAuth client (and its sign-in): the next sign-in registers automatically. */
+      automatic: z.literal(true).optional(),
+    }),
   ],
   { error: "Choose how the app signs in: none, bearer, headers or oauth." },
 );
@@ -130,6 +142,7 @@ function buildAuth(input: AuthInput, current: AppAuth | undefined): AppAuth | st
     }
     case "oauth": {
       const previous = current?.type === "oauth" ? current.oauth : {};
+      if (input.automatic) return { type: "oauth", oauth: {} };
       if (!input.clientId) return { type: "oauth", oauth: previous };
       const savedSecret = previous.clientInformation?.client_id === input.clientId ? previous.clientInformation.client_secret : undefined;
       const secret = input.clientSecret || (typeof savedSecret === "string" ? savedSecret : undefined);

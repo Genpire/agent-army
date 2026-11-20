@@ -47,22 +47,53 @@ interface HeaderRow {
   value: string;
 }
 
-const choiceOf = (kind: AppAuthKind): AuthChoice => (kind === "bearer" ? "bearer" : kind === "none" ? "none" : kind.startsWith("header:") ? "headers" : "oauth");
+const choiceOf = (kind: AppAuthKind): AuthChoice =>
+  kind === "bearer"
+    ? "bearer"
+    : kind === "none"
+      ? "none"
+      : kind.startsWith("header:")
+        ? "headers"
+        : "oauth";
 const ALL_CHOICES: AuthChoice[] = ["oauth", "bearer", "headers", "none"];
-const CHOICE_TEXT: Record<AuthChoice, { label: string; description: string }> = {
-  oauth: { label: "Sign in (OAuth)", description: "You sign in at the app in this browser; the console keeps the sign-in and renews it." },
-  bearer: { label: "API key", description: "Sent as Authorization: Bearer <key>." },
-  headers: { label: "API key in a header", description: "Sent in the header the app names, e.g. X-API-Key." },
-  none: { label: "No sign-in", description: "A public server, e.g. documentation search." },
-};
+const CHOICE_TEXT: Record<AuthChoice, { label: string; description: string }> =
+  {
+    oauth: {
+      label: "Sign in (OAuth)",
+      description:
+        "You sign in at the app in this browser; the console keeps the sign-in and renews it.",
+    },
+    bearer: {
+      label: "API key",
+      description: "Sent as Authorization: Bearer <key>.",
+    },
+    headers: {
+      label: "API key in a header",
+      description: "Sent in the header the app names, e.g. X-API-Key.",
+    },
+    none: {
+      label: "No sign-in",
+      description: "A public server, e.g. documentation search.",
+    },
+  };
 
 /** The sign-ins a catalog entry offers, first its main one; any of them for registry and custom apps. */
 const choicesFor = (preset: CatalogApp | undefined): AuthChoice[] =>
-  preset ? [...new Set([choiceOf(preset.auth), ...(preset.altAuth ? [choiceOf(preset.altAuth)] : [])])] : ALL_CHOICES;
+  preset
+    ? [
+        ...new Set([
+          choiceOf(preset.auth),
+          ...(preset.altAuth ? [choiceOf(preset.altAuth)] : []),
+        ]),
+      ]
+    : ALL_CHOICES;
 
 /** The header a catalog sign-in names, for the chosen way to sign in. */
 const presetHeader = (preset: CatalogApp | undefined): string | undefined =>
-  preset ? (headerOf(preset.auth) ?? (preset.altAuth ? headerOf(preset.altAuth) : undefined)) : undefined;
+  preset
+    ? (headerOf(preset.auth) ??
+      (preset.altAuth ? headerOf(preset.altAuth) : undefined))
+    : undefined;
 
 export interface AddAppDrawerProps {
   isOpen: boolean;
@@ -80,13 +111,33 @@ export interface AddAppDrawerProps {
  * custom one. OAuth apps are added and the browser goes to the vendor's
  * sign-in; apps with a key are checked by listing their tools first.
  */
-export function AddAppDrawer({ isOpen, source, redirectUrl, onOpenChange, onAdded }: AddAppDrawerProps) {
-  const title = !source || source.kind === "custom" ? "Custom app" : `Connect ${source.app.name}`;
+export function AddAppDrawer({
+  isOpen,
+  source,
+  redirectUrl,
+  onOpenChange,
+  onAdded,
+}: AddAppDrawerProps) {
+  const title =
+    !source || source.kind === "custom"
+      ? "Custom app"
+      : `Connect ${source.app.name}`;
   return (
-    <Drawer isOpen={isOpen} onOpenChange={onOpenChange} label={title} purpose="form" width={600} experimental={{ isFullWidthOnMobile: true }}>
+    <Drawer
+      isOpen={isOpen}
+      onOpenChange={onOpenChange}
+      label={title}
+      purpose="form"
+      width={600}
+      experimental={{ isFullWidthOnMobile: true }}
+    >
       {source && (
         <AddAppForm
-          key={source.kind === "custom" ? "custom" : `${source.kind}:${source.app.id}`}
+          key={
+            source.kind === "custom"
+              ? "custom"
+              : `${source.kind}:${source.app.id}`
+          }
           source={source}
           title={title}
           redirectUrl={redirectUrl}
@@ -99,12 +150,30 @@ export function AddAppDrawer({ isOpen, source, redirectUrl, onOpenChange, onAdde
 }
 
 function initialHeaders(source: AppSource): HeaderRow[] {
-  if (source.kind === "registry" && source.app.headerNames) return source.app.headerNames.map((name) => ({ name, value: "" }));
-  const named = source.kind === "catalog" ? presetHeader(source.app) : source.kind === "registry" ? headerOf(source.app.auth) : undefined;
+  if (source.kind === "registry" && source.app.headerNames)
+    return source.app.headerNames.map((name) => ({ name, value: "" }));
+  const named =
+    source.kind === "catalog"
+      ? presetHeader(source.app)
+      : source.kind === "registry"
+        ? headerOf(source.app.auth)
+        : undefined;
   return [{ name: named ?? "", value: "" }];
 }
 
-function AddAppForm({ source, title, redirectUrl, onClose, onAdded }: { source: AppSource; title: string; redirectUrl: string; onClose: () => void; onAdded?: (app: AppView) => void }) {
+function AddAppForm({
+  source,
+  title,
+  redirectUrl,
+  onClose,
+  onAdded,
+}: {
+  source: AppSource;
+  title: string;
+  redirectUrl: string;
+  onClose: () => void;
+  onAdded?: (app: AppView) => void;
+}) {
   const { config, refresh } = useConfig();
   const lead = config.team.pointer.name;
   const preset = source.kind === "catalog" ? source.app : undefined;
@@ -115,11 +184,19 @@ function AddAppForm({ source, title, redirectUrl, onClose, onAdded }: { source: 
   const [name, setName] = useState(found?.name ?? "");
   const [url, setUrl] = useState(found?.url ?? "");
   const [urlValues, setUrlValues] = useState<Record<string, string>>({});
-  const [transport, setTransport] = useState<"http" | "sse">(found?.transport ?? "http");
-  const [choice, setChoice] = useState<AuthChoice>(found ? choiceOf(found.auth) : "oauth");
+  const [transport, setTransport] = useState<"http" | "sse">(
+    found?.transport ?? "http",
+  );
+  const [choice, setChoice] = useState<AuthChoice>(
+    found ? choiceOf(found.auth) : "oauth",
+  );
   const [token, setToken] = useState("");
-  const [headers, setHeaders] = useState<HeaderRow[]>(() => initialHeaders(source));
+  const [headers, setHeaders] = useState<HeaderRow[]>(() =>
+    initialHeaders(source),
+  );
   const [clientId, setClientId] = useState("");
+  /** The owner chose to use an OAuth app they registered (always so when the app has no automatic registration). */
+  const [ownClient, setOwnClient] = useState(false);
   const [clientSecret, setClientSecret] = useState("");
   const [access, setAccess] = useState<"read" | "write">("read");
   const [agentIds, setAgentIds] = useState<string[]>([]);
@@ -135,8 +212,11 @@ function AddAppForm({ source, title, redirectUrl, onClose, onAdded }: { source: 
   const problems = {
     name: name.trim() ? undefined : "Give the app a name.",
     url: urlFields.length ? undefined : urlError(url),
-    urlValues: Object.fromEntries(urlFields.map((f) => [f.key, urlValueError(urlValues[f.key] ?? "")])) as Record<string, string | undefined>,
-    token: choice === "bearer" && !token.trim() ? "Paste the API key." : undefined,
+    urlValues: Object.fromEntries(
+      urlFields.map((f) => [f.key, urlValueError(urlValues[f.key] ?? "")]),
+    ) as Record<string, string | undefined>,
+    token:
+      choice === "bearer" && !token.trim() ? "Paste the API key." : undefined,
     headers:
       choice !== "headers"
         ? undefined
@@ -147,18 +227,35 @@ function AddAppForm({ source, title, redirectUrl, onClose, onAdded }: { source: 
               ? "Paste the API key."
               : "Fill in every header."
             : undefined,
-    clientId: choice === "oauth" && manualClient && !clientId.trim() ? `Paste the client ID of the OAuth app you registered with ${name.trim() || "the app"}.` : undefined,
+    clientId:
+      choice === "oauth" && (manualClient || ownClient)
+        ? !clientId.trim()
+          ? `Paste the client ID of the OAuth app you registered with ${name.trim() || "the app"}.`
+          : looksLikeEmail(clientId)
+            ? "That is an email address, not a client ID. Copy the client ID from the OAuth app you registered."
+            : undefined
+        : undefined,
   };
   const invalid =
-    Boolean(problems.name || problems.url || problems.token || problems.headers || problems.clientId) || Object.values(problems.urlValues).some(Boolean);
-  const status = (message: string | undefined) => (tried && message ? { type: "error" as const, message } : undefined);
+    Boolean(
+      problems.name ||
+      problems.url ||
+      problems.token ||
+      problems.headers ||
+      problems.clientId,
+    ) || Object.values(problems.urlValues).some(Boolean);
+  const status = (message: string | undefined) =>
+    tried && message ? { type: "error" as const, message } : undefined;
   const edit =
     <T,>(set: (v: T) => void) =>
     (v: T) => {
       set(v);
       setError(undefined);
     };
-  const setHeader = (i: number, patch: Partial<HeaderRow>) => setHeaders((rows) => rows.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+  const setHeader = (i: number, patch: Partial<HeaderRow>) =>
+    setHeaders((rows) =>
+      rows.map((r, j) => (j === i ? { ...r, ...patch } : r)),
+    );
 
   const submit = async () => {
     setTried(true);
@@ -167,9 +264,28 @@ function AddAppForm({ source, title, redirectUrl, onClose, onAdded }: { source: 
       choice === "bearer"
         ? { type: "bearer", token: token.trim() }
         : choice === "headers"
-          ? { type: "headers", headers: Object.fromEntries(headers.map((h) => [h.name.trim(), headerValue(template, h.value.trim())])) }
+          ? {
+              type: "headers",
+              headers: Object.fromEntries(
+                headers.map((h) => [
+                  h.name.trim(),
+                  headerValue(template, h.value.trim()),
+                ]),
+              ),
+            }
           : choice === "oauth"
-            ? { type: "oauth", ...(clientId.trim() ? { clientId: clientId.trim(), ...(clientSecret.trim() ? { clientSecret: clientSecret.trim() } : {}) } : {}) }
+            ? {
+                type: "oauth",
+                // Only an OAuth app the owner chose to use: anything else signs in with automatic registration.
+                ...((manualClient || ownClient) && clientId.trim()
+                  ? {
+                      clientId: clientId.trim(),
+                      ...(clientSecret.trim()
+                        ? { clientSecret: clientSecret.trim() }
+                        : {}),
+                    }
+                  : {}),
+              }
             : { type: "none" };
     let failure: string | undefined;
     let leaving = false;
@@ -201,7 +317,10 @@ function AddAppForm({ source, title, redirectUrl, onClose, onAdded }: { source: 
     if (!leaving) onClose();
   };
 
-  const primaryLabel = choice === "oauth" ? `Sign in with ${name.trim() || "the app"}` : "Check and add";
+  const primaryLabel =
+    choice === "oauth"
+      ? `Sign in with ${name.trim() || "the app"}`
+      : "Check and add";
   const keyLabel = fixedHeader ? "API key" : "Value";
 
   return (
@@ -209,8 +328,16 @@ function AddAppForm({ source, title, redirectUrl, onClose, onAdded }: { source: 
       header={
         <DrawerHeader
           title={title}
-          subtitle={source.kind === "registry" ? `From the MCP Registry · ${source.app.publisher}` : preset ? preset.category : "Any app with a remote MCP server"}
-          startContent={found && <BrandLogo id={preset?.id} name={found.name} size="md" />}
+          subtitle={
+            source.kind === "registry"
+              ? `From the MCP Registry · ${source.app.publisher}`
+              : preset
+                ? preset.category
+                : "Any app with a remote MCP server"
+          }
+          startContent={
+            found && <BrandLogo id={preset?.id} name={found.name} size="md" />
+          }
           onOpenChange={(open) => !open && onClose()}
         />
       }
@@ -221,7 +348,8 @@ function AddAppForm({ source, title, redirectUrl, onClose, onAdded }: { source: 
               <VStack gap={2}>
                 <Text>{preset.description}</Text>
                 <Text type="supporting" color="secondary">
-                  For example: {preset.examples.map((e) => `“${e}”`).join(", ")}.{" "}
+                  For example: {preset.examples.map((e) => `“${e}”`).join(", ")}
+                  .{" "}
                   <Link href={preset.docsUrl} isExternalLink>
                     {preset.name}'s guide
                   </Link>
@@ -231,14 +359,28 @@ function AddAppForm({ source, title, redirectUrl, onClose, onAdded }: { source: 
             {source.kind === "registry" && (
               <Banner
                 status="info"
-                title={source.app.onPublisherDomain ? `Published by ${source.app.publisher}, on its own domain` : "Published by someone else"}
+                title={
+                  source.app.onPublisherDomain
+                    ? `Published by ${source.app.publisher}, on its own domain`
+                    : "Published by someone else"
+                }
                 description={`${source.app.publisher} published this server in the MCP Registry. Connect it only if you trust them: ${lead} sends it what you ask about.`}
                 collapsible={false}
               />
             )}
-            {preset?.notes && <Banner status="info" title={preset.notes} collapsible={false} />}
+            {preset?.notes && (
+              <Banner status="info" title={preset.notes} collapsible={false} />
+            )}
 
-            <TextInput label="Name" value={name} onChange={edit(setName)} placeholder="Linear" description={`How ${lead} and the agents call it.`} status={status(problems.name)} isRequired />
+            <TextInput
+              label="Name"
+              value={name}
+              onChange={edit(setName)}
+              placeholder="Linear"
+              description={`How ${lead} and the agents call it.`}
+              status={status(problems.name)}
+              isRequired
+            />
             {urlFields.length ? (
               <VStack gap={3}>
                 {urlFields.map((f) => (
@@ -246,7 +388,9 @@ function AddAppForm({ source, title, redirectUrl, onClose, onAdded }: { source: 
                     key={f.key}
                     label={f.label}
                     value={urlValues[f.key] ?? ""}
-                    onChange={edit((v: string) => setUrlValues((vals) => ({ ...vals, [f.key]: v })))}
+                    onChange={edit((v: string) =>
+                      setUrlValues((vals) => ({ ...vals, [f.key]: v })),
+                    )}
                     placeholder={f.placeholder}
                     description={f.help}
                     status={status(problems.urlValues[f.key])}
@@ -267,7 +411,12 @@ function AddAppForm({ source, title, redirectUrl, onClose, onAdded }: { source: 
                 value={url}
                 onChange={edit(setUrl)}
                 placeholder="https://mcp.example.com/mcp"
-                description={preset?.urlHint ?? (preset ? undefined : "The server's remote (Streamable HTTP or SSE) endpoint, from the app's documentation.")}
+                description={
+                  preset?.urlHint ??
+                  (preset
+                    ? undefined
+                    : "The server's remote (Streamable HTTP or SSE) endpoint, from the app's documentation.")
+                }
                 status={status(problems.url)}
                 autoCapitalize="off"
                 hasAutoCorrect={false}
@@ -279,8 +428,18 @@ function AddAppForm({ source, title, redirectUrl, onClose, onAdded }: { source: 
               <Selector
                 label="Transport"
                 options={[
-                  { value: "http", label: "Streamable HTTP", description: "Most servers; the address often ends in /mcp." },
-                  { value: "sse", label: "SSE", description: "Older servers; the address often ends in /sse." },
+                  {
+                    value: "http",
+                    label: "Streamable HTTP",
+                    description:
+                      "Most servers; the address often ends in /mcp.",
+                  },
+                  {
+                    value: "sse",
+                    label: "SSE",
+                    description:
+                      "Older servers; the address often ends in /sse.",
+                  },
                 ]}
                 value={transport}
                 onChange={(v) => setTransport(v === "sse" ? "sse" : "http")}
@@ -291,12 +450,21 @@ function AddAppForm({ source, title, redirectUrl, onClose, onAdded }: { source: 
             <VStack gap={3}>
               <Text weight="semibold">How it signs in</Text>
               {choices.length > 1 ? (
-                <RadioList label="How it signs in" isLabelHidden value={choice} onChange={(v) => edit(setChoice)(v as AuthChoice)}>
+                <RadioList
+                  label="How it signs in"
+                  isLabelHidden
+                  value={choice}
+                  onChange={(v) => edit(setChoice)(v as AuthChoice)}
+                >
                   {choices.map((c) => (
                     <RadioListItem
                       key={c}
                       value={c}
-                      label={c === "oauth" ? authLabel("oauth", name.trim() || "the app") : CHOICE_TEXT[c].label}
+                      label={
+                        c === "oauth"
+                          ? authLabel("oauth", name.trim() || "the app")
+                          : CHOICE_TEXT[c].label
+                      }
                       description={CHOICE_TEXT[c].description}
                       align="first-line"
                     />
@@ -306,14 +474,29 @@ function AddAppForm({ source, title, redirectUrl, onClose, onAdded }: { source: 
                 <Text color="secondary">{CHOICE_TEXT[choice].description}</Text>
               )}
 
-              {choice === "bearer" && <SecretField label="API key" value={token} onChange={edit(setToken)} description={preset?.keyHelp} isRequired />}
-              {choice === "bearer" && status(problems.token) && <FormError message={problems.token} />}
+              {choice === "bearer" && (
+                <SecretField
+                  label="API key"
+                  value={token}
+                  onChange={edit(setToken)}
+                  description={preset?.keyHelp}
+                  isRequired
+                />
+              )}
+              {choice === "bearer" && status(problems.token) && (
+                <FormError message={problems.token} />
+              )}
 
               {choice === "headers" && (
                 <VStack gap={3}>
                   {fixedHeader && (
                     <Text type="supporting" color="secondary">
-                      {[preset?.keyHelp, `Sent as ${fixedHeader}: ${headerValue(template, "<key>")}.`].filter(Boolean).join(" ")}
+                      {[
+                        preset?.keyHelp,
+                        `Sent as ${fixedHeader}: ${headerValue(template, "<key>")}.`,
+                      ]
+                        .filter(Boolean)
+                        .join(" ")}
                     </Text>
                   )}
                   {headers.map((h, i) => (
@@ -323,7 +506,9 @@ function AddAppForm({ source, title, redirectUrl, onClose, onAdded }: { source: 
                           <TextInput
                             label="Header"
                             value={h.name}
-                            onChange={edit((v: string) => setHeader(i, { name: v }))}
+                            onChange={edit((v: string) =>
+                              setHeader(i, { name: v }),
+                            )}
                             placeholder="X-API-Key"
                             autoCapitalize="off"
                             hasAutoCorrect={false}
@@ -332,19 +517,46 @@ function AddAppForm({ source, title, redirectUrl, onClose, onAdded }: { source: 
                         </StackItem>
                       )}
                       <StackItem size="fill">
-                        <SecretField label={keyLabel} value={h.value} onChange={edit((v: string) => setHeader(i, { value: v }))} isRequired />
+                        <SecretField
+                          label={keyLabel}
+                          value={h.value}
+                          onChange={edit((v: string) =>
+                            setHeader(i, { value: v }),
+                          )}
+                          isRequired
+                        />
                       </StackItem>
                       {!fixedHeader && headers.length > 1 && (
-                        <IconButton label={`Remove the ${h.name || "header"} header`} variant="ghost" icon={<Icon icon={XMarkIcon} />} onClick={() => setHeaders((rows) => rows.filter((_, j) => j !== i))} />
+                        <IconButton
+                          label={`Remove the ${h.name || "header"} header`}
+                          variant="ghost"
+                          icon={<Icon icon={XMarkIcon} />}
+                          onClick={() =>
+                            setHeaders((rows) => rows.filter((_, j) => j !== i))
+                          }
+                        />
                       )}
                     </HStack>
                   ))}
                   {!fixedHeader && headers.length < 10 && (
                     <HStack>
-                      <Button label="Add a header" variant="ghost" size="sm" icon={<Icon icon={PlusIcon} size="sm" />} onClick={() => setHeaders((rows) => [...rows, { name: "", value: "" }])} />
+                      <Button
+                        label="Add a header"
+                        variant="ghost"
+                        size="sm"
+                        icon={<Icon icon={PlusIcon} size="sm" />}
+                        onClick={() =>
+                          setHeaders((rows) => [
+                            ...rows,
+                            { name: "", value: "" },
+                          ])
+                        }
+                      />
                     </HStack>
                   )}
-                  {status(problems.headers) && <FormError message={problems.headers} />}
+                  {status(problems.headers) && (
+                    <FormError message={problems.headers} />
+                  )}
                 </VStack>
               )}
 
@@ -360,22 +572,42 @@ function AddAppForm({ source, title, redirectUrl, onClose, onAdded }: { source: 
                     error={status(problems.clientId)?.message}
                   />
                 ) : (
-                  <Collapsible trigger={<Text type="supporting">Use an OAuth app you registered yourself</Text>} defaultIsOpen={false}>
-                    <ClientFields
-                      appName={name.trim() || "the app"}
-                      redirectUrl={redirectUrl}
-                      clientId={clientId}
-                      clientSecret={clientSecret}
-                      onClientId={edit(setClientId)}
-                      onClientSecret={edit(setClientSecret)}
-                    />
+                  <Collapsible
+                    trigger={
+                      <Text type="supporting">
+                        Use an OAuth app you registered yourself
+                      </Text>
+                    }
+                    isOpen={ownClient}
+                    onOpenChange={setOwnClient}
+                  >
+                    {ownClient && (
+                      <ClientFields
+                        appName={name.trim() || "the app"}
+                        redirectUrl={redirectUrl}
+                        clientId={clientId}
+                        clientSecret={clientSecret}
+                        onClientId={edit(setClientId)}
+                        onClientSecret={edit(setClientSecret)}
+                      />
+                    )}
                   </Collapsible>
                 ))}
             </VStack>
 
             <Divider />
-            <AccessField value={access} onChange={setAccess} appName={name.trim() || "the app"} lead={lead} />
-            <AgentsField value={agentIds} onChange={setAgentIds} agents={config.team.agents} lead={lead} />
+            <AccessField
+              value={access}
+              onChange={setAccess}
+              appName={name.trim() || "the app"}
+              lead={lead}
+            />
+            <AgentsField
+              value={agentIds}
+              onChange={setAgentIds}
+              agents={config.team.agents}
+              lead={lead}
+            />
             <Text type="supporting" color="secondary">
               {choice === "oauth"
                 ? "After you sign in, its tools are listed and you can turn any of them off."
@@ -389,7 +621,12 @@ function AddAppForm({ source, title, redirectUrl, onClose, onAdded }: { source: 
         <LayoutFooter hasDivider>
           <HStack gap={2} hAlign="end" vAlign="center" wrap="wrap">
             <Button label="Cancel" variant="secondary" onClick={onClose} />
-            <Button label={primaryLabel} variant="primary" isLoading={pending} clickAction={submit} />
+            <Button
+              label={primaryLabel}
+              variant="primary"
+              isLoading={pending}
+              clickAction={submit}
+            />
           </HStack>
         </LayoutFooter>
       }
@@ -410,20 +647,45 @@ export interface ClientFieldsProps {
 }
 
 /** A client registered by hand with the vendor (when it has no automatic registration), and the redirect address it must allow. */
-export function ClientFields({ appName, redirectUrl, clientId, clientSecret, onClientId, onClientSecret, savedSecret, error }: ClientFieldsProps) {
+export function ClientFields({
+  appName,
+  redirectUrl,
+  clientId,
+  clientSecret,
+  onClientId,
+  onClientSecret,
+  savedSecret,
+  error,
+}: ClientFieldsProps) {
   return (
     <VStack gap={3}>
-      <CopyField label="Redirect address" value={redirectUrl} description={`Allow this address in the OAuth app you register with ${appName}.`} />
+      <CopyField
+        label="Redirect address"
+        value={redirectUrl}
+        description={`Allow this address in the OAuth app you register with ${appName}.`}
+      />
       <TextInput
         label="Client ID"
         value={clientId}
         onChange={onClientId}
+        // Not a user name: a browser must never fill in a saved email here.
+        autoComplete="off"
         status={error ? { type: "error", message: error } : undefined}
         autoCapitalize="off"
         hasAutoCorrect={false}
         hasSpellCheck={false}
       />
-      <SecretField label="Client secret" value={clientSecret} onChange={onClientSecret} saved={savedSecret} description="Leave empty for a public client (PKCE only)." />
+      <SecretField
+        label="Client secret"
+        value={clientSecret}
+        onChange={onClientSecret}
+        saved={savedSecret}
+        description="Leave empty for a public client (PKCE only)."
+      />
     </VStack>
   );
 }
+
+/** A client ID is never an email address; a browser's autofill puts one there. */
+export const looksLikeEmail = (value: string): boolean =>
+  /^[^\s@/:]+@[^\s@/:]+\.[^\s@/:]+$/.test(value.trim());

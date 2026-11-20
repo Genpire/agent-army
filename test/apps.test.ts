@@ -896,6 +896,24 @@ describe("apps admin API", () => {
     expect((await post("/api/apps/NOT-AN-ID", {})).status).toBe(404);
   });
 
+  it("refuses an email as a client id, and forgets an own client for automatic sign-in", async () => {
+    const email = await post("/api/apps", { name: "Payments", url: "https://mcp.example.com/oauth-mcp", auth: { type: "oauth", clientId: "someone@example.com" } });
+    expect(email.status).toBe(400);
+    expect((await email.json()).error).toMatch(/email address, not a client ID/);
+
+    const own = await post("/api/apps", { name: "Payments", url: "https://mcp.example.com/oauth-mcp", auth: { type: "oauth", clientId: "owner-client-1" } });
+    expect(own.status).toBe(200);
+    expect((await own.json()).app.auth).toEqual({ type: "oauth", signedIn: false, ownClient: true });
+
+    const reset = await post("/api/apps/app-payments", { auth: { type: "oauth", automatic: true } });
+    expect(reset.status).toBe(200);
+    expect((await reset.json()).app.auth).toEqual({ type: "oauth", signedIn: false, ownClient: false });
+    // The next sign-in registers a client instead of using the owner's.
+    const start = await (await post("/api/apps/app-payments/oauth/start", {})).json();
+    expect(new URL(start.url).searchParams.get("client_id")).toBe("client-1");
+    expect((await post("/api/apps/app-payments/delete", {})).status).toBe(200);
+  });
+
   it("signs in with OAuth: start, callback with a single-use state, tools listed with the new token", async () => {
     const res = await post("/api/apps", { name: "Tracker", url: "https://mcp.example.com/oauth-mcp", auth: { type: "oauth" }, agentIds: ["coder"] });
     expect(res.status).toBe(200);
@@ -914,7 +932,7 @@ describe("apps admin API", () => {
     expect(again.headers.get("location")).toBe("/#/integrations/apps?signin=error&reason=invalid");
 
     const view = ((await config()).apps as { id: string; auth: unknown; tools: unknown[] }[]).find((a) => a.id === "app-tracker")!;
-    expect(view.auth).toEqual({ type: "oauth", signedIn: true });
+    expect(view.auth).toEqual({ type: "oauth", signedIn: true, ownClient: false });
     expect(view.tools).toHaveLength(4);
     const raw = JSON.stringify(await config());
     expect(raw).not.toContain("access-token-1");
@@ -942,3 +960,4 @@ describe("apps admin API", () => {
     expect(newAppId("Ünïcode!! Server", new Set())).toBe("app-n-code-server");
   });
 });
+
