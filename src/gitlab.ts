@@ -11,10 +11,15 @@
  * - A draft is a title prefix ("Draft: "): the API has no draft field to set.
  * - Roles map to GitHub's author_association (Developer = MEMBER, Maintainer
  *   and Owner = OWNER), so isHumanFeedback and WRITE_ASSOCIATIONS keep one rule.
+ * - Every title, description and comment it posts has its quick actions
+ *   neutralised (agents write them; GitLab would run "/merge" as the token's user).
+ * - With an allow list (GitLabOptions.allowed), a project is checked by the
+ *   path GitLab gives it, since GitLab follows renamed and moved projects.
  * - Errors read "GitLab <METHOD> <path> failed (HTTP <status>): …", the shape
  *   ci.ts and preview.ts read the status from. They never contain the token.
  */
 import type { CodeHost, HostViewer } from "./code-host.js";
+import { matchesPathAllowList } from "./code-host-access.js";
 import {
   type Annotation,
   BOT_MARKER,
@@ -46,6 +51,12 @@ export interface GitLabOptions {
   token: string;
   /** https://gitlab.com (default) or a self-managed instance's address, without /api/v4. */
   baseUrl?: string;
+  /**
+   * The connection's allow list (groups and projects, see matchesPathAllowList).
+   * When set, every project is looked up before it is used, and refused when
+   * it moved or GitLab's own path for it is not covered. Repo tasks set it.
+   */
+  allowed?: string[];
 }
 
 /** GitLab's roles as access levels. */
@@ -83,6 +94,24 @@ export function stripDraft(title: string): string {
 
 /** The title of a draft merge request. */
 export const draftTitle = (title: string): string => `Draft: ${stripDraft(title)}`;
+
+/** A slash that starts a line, after any spaces or tabs. */
+const LINE_START_SLASH_RE = /(^|[\r\n])([^\S\r\n]*)\//g;
+
+/**
+ * GitLab runs quick actions (/merge, /approve, /close, /target_branch…) that
+ * start a line of a description or comment, as the token's user. Agents write
+ * these texts from requests, tickets and files, so every slash that starts a
+ * line gets a zero-width space before it: the text reads the same and nothing
+ * runs. GitLab does not document that code blocks are exempt, so lines inside
+ * them are treated the same. Applying it twice changes nothing more.
+ */
+export function neutralizeQuickActions(text: string): string {
+  return text.replace(LINE_START_SLASH_RE, "$1$2​/");
+}
+
+/** A title on one line, which cannot start with a quick action either. */
+const safeTitle = (title: string): string => neutralizeQuickActions(title.replace(/[^\S\r\n]*[\r\n]+[^\S\r\n]*/g, " ").trim());
 
 /** A merge request's web address on an instance, from a stored id or a project path. */
 export function mergeRequestWebUrl(baseUrl: string, repo: string, iid: number): string {
@@ -360,9 +389,47 @@ export class GitLab implements CodeHost {
     return path;
   }
 
-  /** The project id in API paths: its path, URL-encoded as a whole. */
-  private project(repo: string): string {
-    return encodeURIComponent(this.projectPath(repo));
+  /** The project id in API paths: its path (as GitLab names it, when checked), URL-encoded as a whole. */
+  private async project(repo: string): Promise<string> {
+    return encodeURIComponent(await this.checkedPath(repo));
+  }
+
+  /** Projects that passed the allow-list check, by lowercased requested path: GitLab's own spelling. */
+  private readonly cleared = new Map<string, string>();
+  /** Checks under way, so concurrent calls for one project share one lookup. */
+  private readonly checking = new Map<string, Promise<string>>();
+
+  /**
+   * With an allow list (options.allowed), the project as GitLab names it now,
+   * looked up once. GitLab follows renamed and transferred projects, so a
+   * typed path could reach a project the list does not cover: a project that
+   * moved is refused (its new path must be used, and allowed), and so is one
+   * the list does not cover. Without an allow list, the path as given.
+   */
+  private async checkedPath(repo: string): Promise<string> {
+    const path = this.projectPath(repo);
+    const allowed = this.options.allowed;
+    if (!allowed) return path;
+    const key = path.toLowerCase();
+    const done = this.cleared.get(key);
+    if (done) return done;
+    let pending = this.checking.get(key);
+    if (!pending) {
+      pending = (async () => {
+        const project = await this.call<{ path_with_namespace?: string }>("GET", `/projects/${encodeURIComponent(path)}`);
+        const actual = project.path_with_namespace ?? "";
+        if (actual.toLowerCase() !== key) {
+          throw new Error(`The GitLab project ${path} has moved to ${actual}. Use gitlab:${actual} instead, if the allow list covers it.`);
+        }
+        if (!matchesPathAllowList(actual, allowed)) {
+          throw new Error(`Not allowed to work on gitlab:${actual}: GitLab's allow list is ${allowed.join(", ")}.`);
+        }
+        this.cleared.set(key, actual);
+        return actual;
+      })().finally(() => this.checking.delete(key));
+      this.checking.set(key, pending);
+    }
+    return pending;
   }
 
   /** A merge request's web address. */
@@ -372,8 +439,17 @@ export class GitLab implements CodeHost {
 
   // ---------- git ----------
 
+  /**
+   * The project's HTTPS clone URL. With an allow list, only for a project
+   * already checked (any project call does it, e.g. defaultBranch, which the
+   * worker makes before cloning), with GitLab's spelling of its path.
+   */
   cloneUrl(repo: string): string {
-    return `${this.baseUrl}/${this.projectPath(repo)}.git`;
+    const path = this.projectPath(repo);
+    if (!this.options.allowed) return `${this.baseUrl}/${path}.git`;
+    const checked = this.cleared.get(path.toLowerCase());
+    if (!checked) throw new Error(`The GitLab project ${path} must be checked against the allow list before it is cloned.`);
+    return `${this.baseUrl}/${checked}.git`;
   }
 
   /** The Basic value git sends: GitLab takes any non-blank user name with an access token as the password ("oauth2" by convention). */
@@ -413,7 +489,7 @@ export class GitLab implements CodeHost {
   }
 
   async defaultBranch(repo: string): Promise<string> {
-    const p = await this.call<{ default_branch?: string | null }>("GET", `/projects/${this.project(repo)}`);
+    const p = await this.call<{ default_branch?: string | null }>("GET", `/projects/${await this.project(repo)}`);
     if (!p.default_branch) throw new Error(`GitLab project ${this.projectPath(repo)} has no default branch (is it empty?)`);
     return p.default_branch;
   }
@@ -424,51 +500,59 @@ export class GitLab implements CodeHost {
   async findOpenPr(repo: string, branch: string): Promise<PrRef | null> {
     const mrs = await this.call<GlMergeRequest[]>(
       "GET",
-      `/projects/${this.project(repo)}/merge_requests?state=opened&source_branch=${encodeURIComponent(branch)}&per_page=20`,
+      `/projects/${await this.project(repo)}/merge_requests?state=opened&source_branch=${encodeURIComponent(branch)}&per_page=20`,
     );
     const mr = mrs.find((m) => m.source_project_id === undefined || m.source_project_id === m.project_id);
     return mr ? prRef(mr) : null;
   }
 
-  /** Opens a merge request; `draft` prefixes its title with "Draft: ". */
+  /**
+   * Opens a merge request; `draft` prefixes its title with "Draft: ". The
+   * title and description are written by agents: their quick actions are
+   * neutralised (see neutralizeQuickActions), as in every text this client posts.
+   */
   async createPr(repo: string, opts: { title: string; body: string; head: string; base: string; draft?: boolean }): Promise<PrRef> {
-    const mr = await this.call<GlMergeRequest>("POST", `/projects/${this.project(repo)}/merge_requests`, {
+    const title = safeTitle(opts.title);
+    const mr = await this.call<GlMergeRequest>("POST", `/projects/${await this.project(repo)}/merge_requests`, {
       source_branch: opts.head,
       target_branch: opts.base,
-      title: opts.draft ? draftTitle(opts.title) : opts.title,
-      description: opts.body,
+      title: opts.draft ? draftTitle(title) : title,
+      description: neutralizeQuickActions(opts.body),
     });
     return prRef(mr);
   }
 
   /** A comment (note) on the merge request, with the platform's marker so it is never read back as feedback. */
   async commentOnPr(repo: string, number: number, body: string): Promise<void> {
-    await this.call("POST", `/projects/${this.project(repo)}/merge_requests/${number}/notes`, { body: `${body}\n\n${BOT_MARKER}` });
+    await this.call("POST", `/projects/${await this.project(repo)}/merge_requests/${number}/notes`, {
+      body: `${neutralizeQuickActions(body)}\n\n${BOT_MARKER}`,
+    });
   }
 
   /** Changes the title and/or description. A draft keeps its prefix: the title alone decides whether it is a draft. */
   async updatePr(repo: string, number: number, patch: { title?: string; body?: string }): Promise<void> {
     const update: { title?: string; description?: string } = {};
-    if (patch.body !== undefined) update.description = patch.body;
+    if (patch.body !== undefined) update.description = neutralizeQuickActions(patch.body);
     if (patch.title !== undefined) {
-      const current = await this.call<GlMergeRequest>("GET", `/projects/${this.project(repo)}/merge_requests/${number}`);
-      update.title = isDraft(current) ? draftTitle(patch.title) : patch.title;
+      const current = await this.call<GlMergeRequest>("GET", `/projects/${await this.project(repo)}/merge_requests/${number}`);
+      const title = safeTitle(patch.title);
+      update.title = isDraft(current) ? draftTitle(title) : title;
     }
     if (update.title === undefined && update.description === undefined) return;
-    await this.call("PUT", `/projects/${this.project(repo)}/merge_requests/${number}`, update);
+    await this.call("PUT", `/projects/${await this.project(repo)}/merge_requests/${number}`, update);
   }
 
   /** Removes the draft prefixes from the title, which marks the merge request ready. */
   async markReady(repo: string, pr: PrRef): Promise<void> {
-    const path = `/projects/${this.project(repo)}/merge_requests/${pr.number}`;
+    const path = `/projects/${await this.project(repo)}/merge_requests/${pr.number}`;
     const current = await this.call<GlMergeRequest>("GET", path);
     if (!isDraft(current)) return;
-    const updated = await this.call<GlMergeRequest>("PUT", path, { title: stripDraft(current.title) });
+    const updated = await this.call<GlMergeRequest>("PUT", path, { title: safeTitle(stripDraft(current.title)) });
     if (isDraft(updated)) throw new Error(`GitLab kept merge request !${pr.number} as a draft after its title was changed`);
   }
 
   async getPull(repo: string, number: number): Promise<PullDetail> {
-    const m = await this.call<GlMergeRequest>("GET", `/projects/${this.project(repo)}/merge_requests/${number}`);
+    const m = await this.call<GlMergeRequest>("GET", `/projects/${await this.project(repo)}/merge_requests/${number}`);
     return {
       number: m.iid,
       state: pullState(m.state),
@@ -488,7 +572,7 @@ export class GitLab implements CodeHost {
   /** A user's role on the project, inherited and invited memberships included; undefined when not a member. */
   async memberAccess(repo: string, userId: number): Promise<number | undefined> {
     try {
-      const m = await this.call<{ access_level?: number }>("GET", `/projects/${this.project(repo)}/members/all/${Math.trunc(userId)}`);
+      const m = await this.call<{ access_level?: number }>("GET", `/projects/${await this.project(repo)}/members/all/${Math.trunc(userId)}`);
       return typeof m.access_level === "number" ? m.access_level : undefined;
     } catch (err) {
       if (gitlabStatus(err) === 404) return undefined;
@@ -504,7 +588,7 @@ export class GitLab implements CodeHost {
    */
   async prFeedback(repo: string, number: number): Promise<PrFeedback[]> {
     const discussions = await this.list<{ notes?: GlNote[] }>(
-      `/projects/${this.project(repo)}/merge_requests/${number}/discussions?per_page=100`,
+      `/projects/${await this.project(repo)}/merge_requests/${number}/discussions?per_page=100`,
     );
     const notes = discussions.flatMap((d) => d.notes ?? []);
     const mrUrl = this.mergeRequestUrl(repo, number);
@@ -550,7 +634,7 @@ export class GitLab implements CodeHost {
   /** The merge request's general comments (not diff comments or system notes), oldest first: previews posted by bots, e.g. Vercel's. */
   async issueComments(repo: string, number: number): Promise<IssueComment[]> {
     const notes = await this.list<GlNote>(
-      `/projects/${this.project(repo)}/merge_requests/${number}/notes?sort=asc&order_by=created_at&per_page=100`,
+      `/projects/${await this.project(repo)}/merge_requests/${number}/notes?sort=asc&order_by=created_at&per_page=100`,
     );
     return notes
       .filter((n) => !n.system && n.type !== "DiffNote")
@@ -573,7 +657,7 @@ export class GitLab implements CodeHost {
    * Pipelines of a merge result (another commit) are not included.
    */
   async checksFor(repo: string, sha: string): Promise<{ checks: CheckInfo[]; statuses: StatusInfo[] }> {
-    const p = this.project(repo);
+    const p = await this.project(repo);
     const ref = encodeURIComponent(sha);
     const [pipelines, statuses] = await Promise.all([
       this.call<GlPipeline[]>("GET", `/projects/${p}/pipelines?sha=${ref}&order_by=id&sort=desc&per_page=20`),
@@ -610,7 +694,7 @@ export class GitLab implements CodeHost {
   /** The end of a GitLab CI job's log (its trace), at most LOG_MAX_CHARS; undefined for statuses from elsewhere. */
   async jobLog(repo: string, check: CheckInfo): Promise<string | undefined> {
     if (check.app !== "gitlab-ci") return undefined;
-    const res = await this.request("GET", `/projects/${this.project(repo)}/jobs/${Math.trunc(check.id)}/trace`, undefined, "text/plain");
+    const res = await this.request("GET", `/projects/${await this.project(repo)}/jobs/${Math.trunc(check.id)}/trace`, undefined, "text/plain");
     const text = await readTail(res, LOG_MAX_CHARS * 4);
     return text.length > LOG_MAX_CHARS ? text.slice(-LOG_MAX_CHARS) : text;
   }
@@ -620,7 +704,7 @@ export class GitLab implements CodeHost {
   /** The project's recent deployments (environments) of this commit. */
   async deploymentsFor(repo: string, sha: string): Promise<DeploymentInfo[]> {
     // The deployments API has no commit filter: read the newest and keep this commit's.
-    const data = await this.call<GlDeployment[]>("GET", `/projects/${this.project(repo)}/deployments?order_by=id&sort=desc&per_page=50`);
+    const data = await this.call<GlDeployment[]>("GET", `/projects/${await this.project(repo)}/deployments?order_by=id&sort=desc&per_page=50`);
     return data
       .filter((d) => d.sha === sha)
       .slice(0, 30)
@@ -638,7 +722,7 @@ export class GitLab implements CodeHost {
 
   /** A GitLab deployment has one status at a time: it, with the environment's URL. */
   async deploymentStatuses(repo: string, deploymentId: number): Promise<DeploymentStatusInfo[]> {
-    const d = await this.call<GlDeployment>("GET", `/projects/${this.project(repo)}/deployments/${Math.trunc(deploymentId)}`);
+    const d = await this.call<GlDeployment>("GET", `/projects/${await this.project(repo)}/deployments/${Math.trunc(deploymentId)}`);
     return [
       {
         id: d.id,
@@ -685,7 +769,7 @@ export class GitLab implements CodeHost {
     if (opts.branch) params.set("ref_name", opts.branch);
     const data = await this.call<
       { id: string; author_name?: string | null; authored_date?: string | null; committed_date?: string | null; message: string }[]
-    >("GET", `/projects/${this.project(repo)}/repository/commits?${params}`);
+    >("GET", `/projects/${await this.project(repo)}/repository/commits?${params}`);
     return data.map((c) => ({
       sha: c.id,
       author: c.author_name ?? "unknown",
@@ -697,11 +781,9 @@ export class GitLab implements CodeHost {
   /** Merge requests, most recently updated first. "closed" includes merged ones, as on GitHub. */
   async listPulls(repo: string, opts: { state?: ItemState; limit?: number } = {}): Promise<PullInfo[]> {
     const limit = clampLimit(opts.limit);
+    const p = await this.project(repo);
     const fetchState = (state: string) =>
-      this.call<GlMergeRequest[]>(
-        "GET",
-        `/projects/${this.project(repo)}/merge_requests?state=${state}&order_by=updated_at&sort=desc&per_page=${limit}`,
-      );
+      this.call<GlMergeRequest[]>("GET", `/projects/${p}/merge_requests?state=${state}&order_by=updated_at&sort=desc&per_page=${limit}`);
     const state = opts.state ?? "open";
     const data =
       state === "closed"
@@ -734,7 +816,7 @@ export class GitLab implements CodeHost {
         web_url: string;
         updated_at: string;
       }[]
-    >("GET", `/projects/${this.project(repo)}/issues?state=${state}&order_by=updated_at&sort=desc&per_page=${clampLimit(opts.limit)}`);
+    >("GET", `/projects/${await this.project(repo)}/issues?state=${state}&order_by=updated_at&sort=desc&per_page=${clampLimit(opts.limit)}`);
     return data.map((i) => ({
       number: i.iid,
       title: i.title,
@@ -749,7 +831,7 @@ export class GitLab implements CodeHost {
 
   /** A file's text (capped at FILE_MAX_CHARS) or, for a directory or an empty path, its listing. */
   async readFile(repo: string, path: string, ref?: string): Promise<FileContent> {
-    const p = this.project(repo);
+    const p = await this.project(repo);
     const clean = path.split("/").filter(Boolean).join("/");
     if (clean) encodePath(clean); // refuses "." and ".." segments
     const refQuery = ref ? `?ref=${encodeURIComponent(ref)}` : "";
@@ -793,12 +875,14 @@ export class GitLab implements CodeHost {
     const q = `scope=blobs&search=${encodeURIComponent(query)}&per_page=${MAX_ITEMS * 2}`;
     type Hit = { path: string; ref: string; startline?: number; project_id: number };
     const hits = repo
-      ? await this.call<Hit[]>("GET", `/projects/${this.project(repo)}/search?${q}`)
+      ? await this.call<Hit[]>("GET", `/projects/${await this.project(repo)}/search?${q}`)
       : await this.call<Hit[]>("GET", `/search?${q}`);
     // Global hits carry only a project id: look each project's path up once.
     const paths = new Map<number, string | undefined>();
-    if (repo) for (const h of hits) paths.set(h.project_id, this.projectPath(repo));
-    else {
+    if (repo) {
+      const own = await this.checkedPath(repo);
+      for (const h of hits) paths.set(h.project_id, own);
+    } else {
       const ids = [...new Set(hits.map((h) => h.project_id))].slice(0, MAX_ITEMS);
       const found = await Promise.all(
         ids.map((id) =>
@@ -875,7 +959,7 @@ export class GitLab implements CodeHost {
    * `secret` as its secret token. Needs the Maintainer role.
    */
   async installWebhook(repo: string, url: string, secret: string): Promise<"created" | "updated"> {
-    const p = this.project(repo);
+    const p = await this.project(repo);
     const hooks = await this.call<{ id: number; url: string }[]>("GET", `/projects/${p}/hooks?per_page=100`);
     const settings = {
       url,

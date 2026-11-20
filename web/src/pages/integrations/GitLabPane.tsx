@@ -28,7 +28,11 @@ interface ScopeRow extends Record<string, unknown> {
 const SCOPES: ScopeRow[] = [
   { scope: "api", kind: "Scope", use: "Open and update merge requests, comment, read pipelines and job logs; also covers Git clone and push" },
   { scope: "write_repository", kind: "Scope", use: "Push branches over Git (api already includes it; tick it too so the token's purpose is plain)" },
-  { scope: "Developer", kind: "Role on each project", use: "Push branches and open merge requests. Maintainer also lets the platform add the webhook for you" },
+  {
+    scope: "Developer",
+    kind: "Role on each project",
+    use: "Push branches and open merge requests. Keep it at Developer and protect the default branch so only Maintainers merge: the token can then never merge. Adding the webhook for you needs Maintainer; otherwise add it by hand",
+  },
 ];
 
 export function GitLabPane({ summary, onBack }: { summary: IntegrationSummary; onBack?: () => void }) {

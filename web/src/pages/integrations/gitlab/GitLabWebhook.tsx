@@ -80,7 +80,7 @@ export function GitLabWebhook() {
         steps={[
           <>
             Make a secret token below. To have {name} add the webhook for you, tick <Strong>Add it to the allowed projects</Strong> first: the token's user needs the
-            Maintainer role on each project.
+            Maintainer role on each project. A bot user with the Developer role (recommended, so it can never merge) adds it by hand instead.
           </>,
           <>
             Otherwise open the project's <Strong>Settings → Webhooks → Add new webhook</Strong>. A group's webhooks (GitLab Premium) cover all its projects.
