@@ -395,9 +395,10 @@ function jiraConfig(configure?: (c: Config) => void): Config {
 const jiraTask = (over: Partial<Task> = {}) =>
   task({ trigger: "jira", ticket: { provider: "jira", boardId: "ACME", itemId: ISSUE, name: "Login redirect", url: `${JIRA_SITE}/browse/${ISSUE}` }, ...over });
 
-function fakeJira() {
+function fakeJira(where: { key: string; projectKey: string } = { key: ISSUE, projectKey: "ACME" }) {
   const calls: { op: "move" | "comment"; key: string; status?: string; text?: string }[] = [];
   const jira = {
+    issueProject: async () => where,
     transitionTo: async (key: string, status: string) => {
       calls.push({ op: "move", key, status });
       return { status, changed: true };
@@ -451,12 +452,31 @@ describe("ticket sync for Jira issues", () => {
     expect(events).toEqual([{ kind: "ticket", ok: false, text: 'Ticket "Login redirect" not updated: Jira is not connected' }]);
   });
 
+  it("leaves an issue alone once it moved to a project Pointer may not use, and follows a move within allowed ones", async () => {
+    const logs = vi.spyOn(console, "log").mockImplementation(() => {});
+    const moved = fakeJira({ key: "OTHER-9", projectKey: "OTHER" });
+    const events: TicketEvent[] = [];
+    const scoped = jiraConfig((c) => void (c.jira.allowedProjectKeys = ["ACME"]));
+    await ticketStarted({ config: scoped, jira: moved.jira, record: (e) => void events.push(e) }, jiraTask());
+    expect(moved.calls).toEqual([]);
+    expect(events).toEqual([
+      { kind: "ticket", ok: false, text: 'Ticket "Login redirect" not updated: the issue is now in project OTHER, which Pointer may not use', url: `${JIRA_SITE}/browse/${ISSUE}` },
+    ]);
+    expect(logs.mock.calls.map((c) => String(c[0]))).toContain(`[ticket] issue ${ISSUE}: started: skipped, the issue is now in project OTHER, which Pointer may not use`);
+
+    // With every project allowed, the issue is updated under its new key.
+    const renamed = fakeJira({ key: "WEB-4", projectKey: "WEB" });
+    await ticketStarted({ config: jiraConfig(), jira: renamed.jira }, jiraTask());
+    expect(renamed.calls.map((c) => c.key)).toEqual(["WEB-4", "WEB-4"]);
+  });
+
   it("uses Jira's REST API from the configuration: the transition to the status, and the comment in ADF", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const requests: { method: string; path: string; body?: unknown }[] = [];
     vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
       const url = new URL(String(input));
       requests.push({ method: init?.method ?? "GET", path: url.pathname, ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}) });
+      if (url.pathname === `/rest/api/3/issue/${ISSUE}`) return Response.json({ key: ISSUE, fields: { project: { key: "ACME" } } });
       if (url.pathname.endsWith("/transitions") && init?.method === "GET") {
         return Response.json({ transitions: [{ id: "11", name: "Start", to: { name: "In Progress" } }] });
       }
@@ -466,6 +486,7 @@ describe("ticket sync for Jira issues", () => {
     const events: TicketEvent[] = [];
     await ticketStarted({ config: jiraConfig(), record: (e) => void events.push(e), consoleUrl: CONSOLE }, jiraTask());
     expect(requests).toEqual([
+      { method: "GET", path: `/rest/api/3/issue/${ISSUE}` },
       { method: "GET", path: `/rest/api/3/issue/${ISSUE}/transitions` },
       { method: "POST", path: `/rest/api/3/issue/${ISSUE}/transitions`, body: { transition: { id: "11" } } },
       { method: "POST", path: `/rest/api/3/issue/${ISSUE}/comment`, body: { body: textToAdf(`The team started on this: ${CONSOLE}${SIGNATURE}`) } },
@@ -489,6 +510,7 @@ describe("ticket sync for Jira issues", () => {
     vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
       const url = new URL(String(input));
       requests.push(`${init?.method ?? "GET"} ${url.pathname}`);
+      if (url.pathname === `/rest/api/3/issue/${ISSUE}`) return Response.json({ key: ISSUE, fields: { project: { key: "ACME" } } });
       if (url.pathname.endsWith("/transitions") && init?.method === "GET") return Response.json({ transitions: [{ id: "31", name: "Done", to: { name: "Done" } }] });
       if (url.pathname.endsWith("/transitions")) return new Response(null, { status: 204 });
       return Response.json({ id: "100" }, { status: 201 });
@@ -496,7 +518,12 @@ describe("ticket sync for Jira issues", () => {
     const logs = vi.spyOn(console, "log").mockImplementation(() => {});
     const deps = { configRepo, tasks, runner: { kind: "local" as const, launch: async () => undefined }, slack: () => ({}) as never, store };
     await handleGithubWebhook("pull_request", { action: "closed", pull_request: { number: 7, merged: true, html_url: "https://github.com/acme/web/pull/7" }, repository: { full_name: "acme/web" } }, deps);
-    expect(requests).toEqual([`GET /rest/api/3/issue/${ISSUE}/transitions`, `POST /rest/api/3/issue/${ISSUE}/transitions`, `POST /rest/api/3/issue/${ISSUE}/comment`]);
+    expect(requests).toEqual([
+      `GET /rest/api/3/issue/${ISSUE}`,
+      `GET /rest/api/3/issue/${ISSUE}/transitions`,
+      `POST /rest/api/3/issue/${ISSUE}/transitions`,
+      `POST /rest/api/3/issue/${ISSUE}/comment`,
+    ]);
     expect(logs.mock.calls.map((c) => String(c[0]))).toContain(`[github] pull_request acme/web#7: ticket ${ISSUE} marked done`);
 
     // Jira disconnected: nothing is called.

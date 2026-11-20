@@ -632,6 +632,46 @@ export class JiraClient {
     };
   }
 
+  /**
+   * Where an issue is now: its current key and project. Jira answers an old
+   * key of a moved issue with the issue under its new key, so writes check
+   * this rather than the key they were given.
+   */
+  async issueProject(key: string): Promise<{ key: string; projectKey: string }> {
+    const raw = obj(await this.request<unknown>("GET", `/rest/api/3/issue/${encodeURIComponent(key)}`, { query: { fields: "project" } }));
+    const found = str(raw?.key);
+    const projectKey = str(obj(obj(raw?.fields)?.project)?.key);
+    if (!found || !projectKey) throw this.fail(`Jira did not say which project ${key} is in.`);
+    return { key: found, projectKey };
+  }
+
+  /**
+   * Who last moved the issue into `status` (case-insensitive), from its
+   * history (the changelog API, newest page first); undefined when the history
+   * has no such move.
+   */
+  async lastMoveTo(key: string, status: string): Promise<{ accountId: string; accountType: string } | undefined> {
+    const path = `/rest/api/3/issue/${encodeURIComponent(key)}/changelog`;
+    const PAGE = 100;
+    const page = async (startAt: number) => obj(await this.request<unknown>("GET", path, { query: { startAt, maxResults: PAGE } }));
+    let data = await page(0);
+    // The history is oldest first: the latest moves are on its last page.
+    const total = num(data?.total) ?? 0;
+    if (total > PAGE && data?.isLast !== true) data = await page(total - PAGE);
+    const histories = arr(data?.values);
+    for (let i = histories.length - 1; i >= 0; i--) {
+      const h = obj(histories[i]);
+      const moved = arr(h?.items).some((it) => {
+        const item = obj(it);
+        return (item?.field === "status" || item?.fieldId === "status") && sameStatus(str(item?.toString) ?? "", status);
+      });
+      if (!moved) continue;
+      const author = obj(h?.author);
+      return { accountId: str(author?.accountId) ?? "", accountType: str(author?.accountType) ?? "unknown" };
+    }
+    return undefined;
+  }
+
   /** Creates an issue; the description is plain text (converted to ADF). */
   async createIssue(input: {
     projectKey: string;
@@ -895,8 +935,8 @@ export function jiraClientFor(c: Config, fetchFn?: typeof fetch): JiraClient | u
   return siteUrl && email && token ? new JiraClient({ siteUrl, email, token }, fetchFn) : undefined;
 }
 
-/** What ticket sync needs from Jira (ticket-sync.ts): comments and moves by status name. */
-export type JiraTicketClient = Pick<JiraClient, "addComment" | "transitionTo">;
+/** What ticket sync needs from Jira (ticket-sync.ts): where the issue is now, comments and moves by status name. */
+export type JiraTicketClient = Pick<JiraClient, "issueProject" | "addComment" | "transitionTo">;
 
 /**
  * Proves the site address, email and token work before the admin page saves
@@ -1232,6 +1272,13 @@ export function jiraHandlers(opts: JiraToolOptions): JiraHandlers {
     checkProject(issue.projectKey);
     return issue;
   };
+  /** Before a write: the issue's real project must be allowed (Jira resolves the old key of a moved issue). Returns its current key. */
+  const writableKey = async (client: JiraClient, key: string): Promise<string> => {
+    checkProject(projectOfIssue(key));
+    const where = await client.issueProject(key);
+    checkProject(where.projectKey);
+    return where.key;
+  };
 
   const runContent = async (fn: (client: JiraClient) => Promise<CallToolResult>): Promise<CallToolResult> => {
     const client = opts.client;
@@ -1282,8 +1329,7 @@ export function jiraHandlers(opts: JiraToolOptions): JiraHandlers {
       run(async (client) => {
         const q = query.trim();
         if (!q) throw new JiraInputError("Give a name or email to search for.");
-        const issueKey = issue_key ? issueKeyOf(issue_key) : undefined;
-        if (issueKey) checkProject(projectOfIssue(issueKey));
+        const issueKey = issue_key ? await writableKey(client, issueKeyOf(issue_key)) : undefined;
         const users = await client.assignableUsers({ query: q, ...(issueKey ? { issueKey } : { projectKey: projectKeyOf(project_key) }) });
         const active = users.filter((u) => u.active);
         if (active.length === 0) return `No one who can be assigned matches "${q}".`;
@@ -1333,21 +1379,21 @@ export function jiraHandlers(opts: JiraToolOptions): JiraHandlers {
 
     jira_add_comment: ({ issue_key, text }) =>
       run(async (client) => {
-        const key = issueKeyOf(issue_key);
+        const given = issueKeyOf(issue_key);
         const body = text.trim();
         if (!body) throw new JiraInputError("The comment is empty.");
         if (body.length > MAX_BODY_CHARS) throw new JiraInputError(`A comment is at most ${MAX_BODY_CHARS} characters.`);
-        checkProject(projectOfIssue(key));
+        const key = await writableKey(client, given);
         const comment = await client.addComment(key, signedUpdate(body, opts.pointerName));
         return `Added a comment${comment.id ? ` (comment ${comment.id})` : ""} to ${key}.`;
       }),
 
     jira_move_issue: ({ issue_key, status }) =>
       run(async (client) => {
-        const key = issueKeyOf(issue_key);
+        const given = issueKeyOf(issue_key);
         const wanted = status.trim();
         if (!wanted) throw new JiraInputError("Give the status to move the issue to.");
-        checkProject(projectOfIssue(key));
+        const key = await writableKey(client, given);
         const moved = await client.transitionTo(key, wanted);
         return moved.changed ? `Moved ${key} to "${moved.status}".` : `${key} is already in "${moved.status}".`;
       }),

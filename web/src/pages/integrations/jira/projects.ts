@@ -29,6 +29,8 @@ export interface WebhookResponse {
   jql: string;
   /** Registered in Jira (needs the Administer Jira permission). */
   registered: boolean;
+  /** Deliveries must now be signed with the secret. */
+  signed: boolean;
   /** An earlier registration was still there and is kept. */
   kept?: boolean;
   error?: string;

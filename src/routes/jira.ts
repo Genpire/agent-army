@@ -175,10 +175,15 @@ export function jiraRoutes(deps: IntegrationRouteDeps): Router {
   });
 
   // ---------- Issues that start repo tasks (admin) ----------
-  // Projects whose issues start tasks. `null` removes a project.
+  // Projects whose issues start tasks (`null` removes one), and whether the webhook in Jira signs its deliveries
+  // (set when it is registered from here; confirmed by the owner after pasting the secret into Jira by hand).
   router.post("/api/jira/automation", requireAdmin, async (req, res) => {
     const parsed = z
-      .object({ enabled: z.boolean().optional(), projects: z.record(z.string(), z.union([PROJECT_AUTOMATION_INPUT, z.null()])).optional() })
+      .object({
+        enabled: z.boolean().optional(),
+        signed: z.boolean().optional(),
+        projects: z.record(z.string(), z.union([PROJECT_AUTOMATION_INPUT, z.null()])).optional(),
+      })
       .safeParse(req.body);
     if (!parsed.success) {
       const issue = parsed.error.issues[0];
@@ -195,6 +200,7 @@ export function jiraRoutes(deps: IntegrationRouteDeps): Router {
     const client = jiraClientFor(config);
     const adding = changes.filter((e): e is [string, z.infer<typeof PROJECT_AUTOMATION_INPUT>] => e[1] !== null);
     if ((input.enabled || adding.length > 0) && !client) return void res.status(400).json({ error: "Connect Jira first." });
+    if (input.signed && !config.jira.automation.webhookSecret) return void res.status(400).json({ error: "Set up the webhook first: it makes the secret Jira signs with." });
     const total = new Set([...Object.keys(config.jira.automation.projects), ...adding.map(([key]) => key)]).size;
     if (total > MAX_AUTOMATED_PROJECTS) return void res.status(400).json({ error: `Automate at most ${MAX_AUTOMATED_PROJECTS} projects.` });
 
@@ -229,6 +235,7 @@ export function jiraRoutes(deps: IntegrationRouteDeps): Router {
         else c.jira.automation.projects[key] = checked[key]!;
       }
       if (input.enabled !== undefined) c.jira.automation.enabled = input.enabled;
+      if (input.signed !== undefined) c.jira.automation.signed = input.signed;
     });
     await rememberConsoleUrl(store, baseUrl(req));
     res.json({ ok: true, automation: publicView(updated).jira.automation });
@@ -259,18 +266,27 @@ export function jiraRoutes(deps: IntegrationRouteDeps): Router {
       { store, client, redact },
       { name: `Agent Army (${config.team.pointer.name.slice(0, 40)})`, url, secret, projectKeys },
     );
+    // Registered from here, the webhook has the secret: from now on every delivery must be signed. A new secret
+    // that could not be registered is not in Jira yet: unsigned deliveries are accepted until the owner confirms it.
+    if (result.ok || parsed.data.rotate) {
+      config = await configRepo.update((c) => {
+        c.jira.automation.signed = result.ok;
+      });
+    }
     res.json({
       ok: result.ok,
       url,
       secret,
       jql,
+      signed: config.jira.automation.signed === true,
       ...(result.ok ? { registered: true, kept: result.kept } : { registered: false, error: result.error, manualSteps: manualJiraWebhookSteps(url, jql) }),
     });
   });
 
   // ---------- The webhook: issues that start repo tasks ----------
-  // The secret in the URL is the check, and Jira's signature (X-Hub-Signature) too when the webhook has the secret.
-  // The payload only names the issue; it is read again from Jira.
+  // The secret in the URL is the check, and Jira's signature (X-Hub-Signature): required once the webhook is known
+  // to have the secret (automation.signed), and checked whenever one is sent. The payload only names the issue;
+  // it is read again from Jira.
   router.post("/jira/webhook/:secret", express.raw({ type: "*/*", limit: "5mb" }), async (req: Request, res: Response) => {
     const auto = (await configRepo.load()).jira.automation;
     const given = String(req.params.secret ?? "");
@@ -280,8 +296,8 @@ export function jiraRoutes(deps: IntegrationRouteDeps): Router {
     }
     const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
     const signature = req.get("x-hub-signature");
-    if (signature !== undefined && !verifyJiraSignature(auto.webhookSecret, rawBody, signature)) {
-      return void res.status(401).json({ error: "Invalid signature." });
+    if (signature === undefined ? auto.signed : !verifyJiraSignature(auto.webhookSecret, rawBody, signature)) {
+      return void res.status(401).json({ error: signature === undefined ? "Missing signature." : "Invalid signature." });
     }
     let payload: unknown;
     try {

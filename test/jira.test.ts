@@ -246,6 +246,26 @@ describe("JiraClient", () => {
     await expect(site.client.transitionTo("ACME-1", "Blocked")).rejects.toThrow('ACME-1 cannot move from "In Review" to "Blocked" now. Statuses it can move to: In Progress, Done.');
   });
 
+  it("finds who last moved an issue into a status, from the last page of its history", async () => {
+    const move = (accountType: string, to: string, field = "status") => ({ author: { accountId: `id-${to}-${accountType}`, accountType }, items: [{ field, toString: to }] });
+    const site = fakeSite({
+      "GET /rest/api/3/issue/ACME-1/changelog": (call) =>
+        call.query.get("startAt") === "0"
+          ? Response.json({ startAt: 0, maxResults: 100, total: 150, isLast: false, values: [move("atlassian", "Ready for dev")] })
+          : Response.json({ startAt: 50, maxResults: 100, total: 150, isLast: true, values: [move("atlassian", "ready for DEV"), move("customer", "Ready for dev"), move("atlassian", "Ready for dev", "summary")] }),
+      "GET /rest/api/3/issue/ACME-2/changelog": () => Response.json({ startAt: 0, total: 1, isLast: true, values: [move("atlassian", "Done")] }),
+    });
+    expect(await site.client.lastMoveTo("ACME-1", "Ready for dev")).toEqual({ accountId: "id-Ready for dev-customer", accountType: "customer" });
+    expect(site.calls.map((c) => c.query.get("startAt"))).toEqual(["0", "50"]);
+    expect(await site.client.lastMoveTo("ACME-2", "Ready for dev")).toBeUndefined();
+  });
+
+  it("tells where an issue is now: Jira answers a moved issue's old key with its new one", async () => {
+    const site = fakeSite({ "GET /rest/api/3/issue/ACME-5": () => Response.json({ key: "OTHER-9", fields: { project: { key: "OTHER" } } }) });
+    expect(await site.client.issueProject("ACME-5")).toEqual({ key: "OTHER-9", projectKey: "OTHER" });
+    expect(site.calls[0]!.query.get("fields")).toBe("project");
+  });
+
   it("comments in ADF", async () => {
     const site = fakeSite({ "POST /rest/api/3/issue/ACME-1/comment": () => Response.json({ id: "100" }, { status: 201 }) });
     expect(await site.client.addComment("ACME-1", "Opened https://github.com/acme/web/pull/7")).toEqual({ id: "100" });
@@ -431,6 +451,18 @@ describe("the jira tools", () => {
     expect(site.calls.at(-1)!.body).toEqual({ body: textToAdf("Fixed in #7\n\n— Pointer (Agent Army)") });
     expect(text(await h.jira_move_issue({ issue_key: "ACME-123", status: "done" }))).toBe('Moved ACME-123 to "Done".');
     expect(text(await h.jira_move_issue({ issue_key: "OTHER-1", status: "done" }))).toMatch(/^Project OTHER is not one/);
+  });
+
+  it("refuse to write on an issue that moved to a project Pointer may not use, though its old key is allowed", async () => {
+    const { h, site } = handlers(
+      {},
+      toolSite({ "GET /rest/api/3/issue/ACME-5": () => Response.json({ key: "OTHER-9", fields: { project: { key: "OTHER" } } }) }),
+    );
+    const refusal = "Project OTHER is not one of the Jira projects Pointer may use (ACME). Ask the owner to allow it on the admin page.";
+    expect(text(await h.jira_add_comment({ issue_key: "ACME-5", text: "hello" }))).toBe(refusal);
+    expect(text(await h.jira_move_issue({ issue_key: "ACME-5", status: "Done" }))).toBe(refusal);
+    expect(text(await h.jira_find_users({ query: "dana", issue_key: "ACME-5" }))).toBe(refusal);
+    expect(site.calls.map((c) => `${c.method} ${c.path}`)).toEqual(["GET /rest/api/3/issue/ACME-5", "GET /rest/api/3/issue/ACME-5", "GET /rest/api/3/issue/ACME-5"]);
   });
 
   it("attach an issue's files: images shown and stored, text shown", async () => {

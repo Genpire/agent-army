@@ -175,6 +175,8 @@ export const JiraConfigSchema = z
         enabled: z.boolean().default(false),
         /** Part of the webhook URL (/jira/webhook/<secret>), and the secret Jira signs deliveries with when set there. */
         webhookSecret: z.string().min(20).max(200).optional(),
+        /** The webhook in Jira has the secret, so every delivery must be signed with it (X-Hub-Signature). Absent = not known to. */
+        signed: z.boolean().optional(),
         projects: z.record(z.string().regex(JIRA_KEY_RE), JiraProjectAutomationSchema).default({}),
       })
       .default({ enabled: false, projects: {} }),
@@ -503,6 +505,7 @@ export function publicView(c: Config) {
       automation: {
         enabled: c.jira.automation.enabled,
         webhookConfigured: Boolean(c.jira.automation.webhookSecret),
+        signed: c.jira.automation.signed === true,
         projects: c.jira.automation.projects,
       },
     },
