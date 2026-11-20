@@ -22,6 +22,7 @@ import { MondayClient } from "../integrations/monday/monday.js";
 import type { NotesRepo } from "./notes.js";
 import { ActivityMapper } from "./pointer-activity.js";
 import { createPointerToolServer, githubToolOptions } from "./pointer-tools.js";
+import { requesterSlackId } from "../slack/slack-tools.js";
 import type { PointerBrain, PointerBrainDeps, PointerReply, PointerRequest } from "./pointer-types.js";
 import { SKILL_TOOL, type TeamSkills, buildChatAgents, pluginSkillName, rosterText, skillQueryOptions } from "../team/team.js";
 import { configSecrets, makeRedactor } from "../tasks/worker.js";
@@ -364,10 +365,13 @@ export function createPointerBrain(
       const skillOptions = skillQueryOptions(teamSkills);
       const builtins = skillOptions ? [...CHAT_BUILTIN_TOOLS, SKILL_TOOL] : [...CHAT_BUILTIN_TOOLS];
 
-      // GitLab, Bitbucket, Jira, Miro and apps: each one that cannot be built is left out (chat-integrations.ts).
+      // The requester's Slack user id: "me" for Slack messages; none in the console.
+      const slackSelf = requesterSlackId(req);
+      // GitLab, Bitbucket, Jira, Miro, Slack and apps: each one that cannot be built is left out (chat-integrations.ts).
       const integrations: ChatIntegration[] = await chatIntegrations(config, {
         configRepo: deps.configRepo,
         requester: req.userName || req.userId,
+        ...(slackSelf ? { requesterSlackId: slackSelf } : {}),
         addAttachment: ctx.addAttachment,
         redact,
       });
@@ -426,7 +430,13 @@ export function createPointerBrain(
               {
                 hooks: [
                   subagentReadOnlyGate(gateTools),
-                  confirmGate({ pending, conversation: conversationKey(req), message: req.text, gated: gatedTools(connected) }),
+                  confirmGate({
+                    pending,
+                    conversation: conversationKey(req),
+                    message: req.text,
+                    gated: gatedTools(connected),
+                    ...(slackSelf ? { requesterSlackId: slackSelf } : {}),
+                  }),
                 ],
               },
             ],

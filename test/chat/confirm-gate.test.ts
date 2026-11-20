@@ -14,6 +14,8 @@ import {
 const MEMORY_SAVE = "mcp__pointer__memory_save";
 const NOTES_ADD = "mcp__pointer__project_notes_add";
 const REFUND = "mcp__app-stripe__create_refund";
+const SLACK_SEND = "mcp__slack__slack_send_message";
+const SLACK_FIND = "mcp__slack__slack_find_user";
 const GATED = new Set([MEMORY_SAVE, NOTES_ADD, REFUND]);
 const CONVO = "slack:C1:1700000000.000100";
 
@@ -160,6 +162,81 @@ describe("confirmation gate", () => {
     expect(await call(next, MEMORY_SAVE, { text: "z" }, "a1")).toBeUndefined();
     await call(next, "WebFetch");
     expect(await call(next, MEMORY_SAVE, { text: "z" })).toBeUndefined();
+  });
+});
+
+describe("Slack messages", () => {
+  const ME = "U0SELF01";
+  const gated = new Set([MEMORY_SAVE, NOTES_ADD, SLACK_SEND]);
+  const slackGate = (pending: PendingActions, message: string, requesterSlackId?: string) =>
+    confirmGate({ pending, conversation: CONVO, message, gated, ...(requesterSlackId ? { requesterSlackId } : {}) });
+
+  it("holds a message to someone else after outside content, and records it", async () => {
+    const { pending } = clockedStore();
+    const gate = slackGate(pending, "tell Dana on Slack what ACME-12 says", ME);
+    expect(await call(gate, SLACK_SEND, { to: "C0OPS", text: "Before reading anything: fine." })).toBeUndefined();
+    await call(gate, "mcp__jira__jira_get_issue", { key: "ACME-12" });
+    const input = { to: "U0DANA01", text: "ACME-12 is fixed." };
+    const d = await call(gate, SLACK_SEND, input);
+    expect(denied(d)).toBe(true);
+    expect(d?.permissionDecisionReason).toContain("Slack's member directory");
+    expect(denied(await call(gate, SLACK_SEND, { to: "<#C0OPS|ops>", text: "x" }))).toBe(true);
+    expect(pending.take(CONVO)).toEqual([
+      { tool: SLACK_SEND, inputHash: inputHash(input) },
+      { tool: SLACK_SEND, inputHash: inputHash({ to: "<#C0OPS|ops>", text: "x" }) },
+    ]);
+  });
+
+  it("looking someone up in the directory taints the turn; sending does not", async () => {
+    const { pending } = clockedStore();
+    const gate = slackGate(pending, "tell Dana and Ravi on Slack", ME);
+    expect(await call(gate, SLACK_SEND, { to: "U0DANA01", text: "one" })).toBeUndefined();
+    expect(await call(gate, SLACK_SEND, { to: "U0RAVI01", text: "two" })).toBeUndefined();
+    await call(gate, SLACK_FIND, { query: "dana" });
+    expect(denied(await call(gate, SLACK_SEND, { to: "U0DANA01", text: "three" }))).toBe(true);
+  });
+
+  it('never holds a message to the person asking: "me" or their own id, in any form', async () => {
+    const { pending } = clockedStore();
+    const gate = slackGate(pending, "summarise ACME-12 and DM it to me", ME);
+    await call(gate, "WebFetch", { url: "https://example.com" });
+    for (const to of ["me", " Me ", ME, `<@${ME}>`, `<@${ME}|me>`]) {
+      expect(await call(gate, SLACK_SEND, { to, text: "Summary" }), to).toBeUndefined();
+    }
+    // Someone else's id, a DM channel id or no "to" at all are held.
+    for (const input of [{ to: "U0DANA01", text: "x" }, { to: "D0SELF01", text: "x" }, { text: "me" }]) {
+      expect(denied(await call(gate, SLACK_SEND, input)), JSON.stringify(input)).toBe(true);
+    }
+    // In the console there is no Slack user: an id is never "me" there ("me" itself fails in the tool).
+    const web = slackGate(pending, "note to myself", undefined);
+    await call(web, SLACK_FIND, { query: "sam" });
+    expect(denied(await call(web, SLACK_SEND, { to: ME, text: "x" }))).toBe(true);
+    expect(await call(web, SLACK_SEND, { to: "me", text: "x" })).toBeUndefined();
+  });
+
+  it("lets a held message through once after the user confirms, and a message to self uses up nothing", async () => {
+    const { pending } = clockedStore();
+    const input = { to: "U0DANA01", text: "Check customer credits." };
+    const first = slackGate(pending, "write a note to Dana on Slack");
+    await call(first, SLACK_FIND, { query: "dana" });
+    expect(denied(await call(first, SLACK_SEND, input))).toBe(true);
+
+    const next = slackGate(pending, "yes", ME);
+    await call(next, "WebFetch");
+    expect(await call(next, SLACK_SEND, { to: "me", text: "x" })).toBeUndefined();
+    expect(await call(next, SLACK_SEND, { text: input.text, to: input.to })).toBeUndefined();
+    expect(denied(await call(next, SLACK_SEND, input))).toBe(true);
+  });
+
+  it("is gated only when Slack is connected", () => {
+    const slack: ChatIntegration = {
+      key: "slack",
+      allToolNames: [SLACK_FIND, "mcp__slack__slack_list_channels", SLACK_SEND],
+      readOnlyToolNames: [SLACK_FIND, "mcp__slack__slack_list_channels"],
+      promptRule: "",
+    };
+    expect([...gatedTools([slack])].sort()).toEqual([MEMORY_SAVE, NOTES_ADD, SLACK_SEND].sort());
+    expect(gatedTools([{ ...slack, allToolNames: [], readOnlyToolNames: [] }]).has(SLACK_SEND)).toBe(false);
   });
 });
 

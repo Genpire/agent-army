@@ -26,6 +26,8 @@ export function verifySlackSignature(opts: {
  * App manifest for Slack's "create from manifest" (and for updating an
  * existing app). Pointer reads channel, private-channel and DM messages so it
  * can answer without a mention; `app_mention` stays for older installs.
+ * channels:read and groups:read let it find a channel by name when asked to
+ * post there (slack_list_channels in slack-tools.ts).
  */
 export function buildManifest(baseUrl: string, botName: string) {
   return {
@@ -46,6 +48,8 @@ export function buildManifest(baseUrl: string, botName: string) {
           "groups:history",
           "im:history",
           "users:read",
+          "channels:read",
+          "groups:read",
           "reactions:write",
           "files:read",
           "files:write",
