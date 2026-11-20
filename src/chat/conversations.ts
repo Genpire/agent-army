@@ -12,13 +12,13 @@ import type {
   PointerRequest,
   StartRepoTask,
 } from "./pointer-types.js";
-import { describeTasks } from "../progress.js";
+import { describeTasks } from "../tasks/progress.js";
 import { HOST_TERMS, repoHost } from "../repo-id.js";
-import type { Runner } from "../runner.js";
+import type { Runner } from "../tasks/runner.js";
 import type { Store } from "../core/store.js";
-import { describeTimeline, plainLine, readTimeline } from "../task-events.js";
-import { type Task, type TaskRepo, type TaskTicket, type ThreadState, WEB_CHANNEL, newTaskId } from "../tasks.js";
-import { type ThreadTaskResult, resolveTaskRepo, startThreadTask } from "../thread-task.js";
+import { describeTimeline, plainLine, readTimeline } from "../tasks/task-events.js";
+import { type Task, type TaskRepo, type TaskTicket, type ThreadState, WEB_CHANNEL, newTaskId } from "../tasks/tasks.js";
+import { type ThreadTaskResult, resolveTaskRepo, startThreadTask } from "../tasks/thread-task.js";
 import type { UsageRepo } from "../spending/usage.js";
 import { configSecrets, makeRedactor } from "../worker.js";
 

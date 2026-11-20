@@ -1,6 +1,6 @@
-import type { CheckInfo, StatusInfo } from "./github.js";
+import type { CheckInfo, StatusInfo } from "../github.js";
 import type { TrackerEvent } from "./progress.js";
-import type { Store } from "./core/store.js";
+import type { Store } from "../core/store.js";
 import { TASK_PHASES, type TaskPhase } from "./tasks.js";
 
 /**

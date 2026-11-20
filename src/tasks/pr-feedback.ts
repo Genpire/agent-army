@@ -1,5 +1,5 @@
-import type { PrFeedback } from "./github.js";
-import { type CodeHostKind, HOST_TERMS, repoHost } from "./repo-id.js";
+import type { PrFeedback } from "../github.js";
+import { type CodeHostKind, HOST_TERMS, repoHost } from "../repo-id.js";
 
 /**
  * Review feedback on a task's pull request (merge request on GitLab), as a

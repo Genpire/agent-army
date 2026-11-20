@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type { ProgressSnapshot } from "./progress.js";
-import type { Store } from "./core/store.js";
+import type { Store } from "../core/store.js";
 
 export type TaskStatus = "queued" | "running" | "done" | "failed";
 

@@ -16,7 +16,7 @@ import type {
   StartRepoTaskResult,
 } from "../../src/chat/pointer-types.js";
 import { FsStore } from "../../src/core/store.js";
-import { TaskRepo } from "../../src/tasks.js";
+import { TaskRepo } from "../../src/tasks/tasks.js";
 
 interface Post {
   channel: string;

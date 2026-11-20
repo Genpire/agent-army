@@ -9,7 +9,7 @@ import { BOT_MARKER } from "../src/github.js";
 import type * as GitlabWebhook from "../src/gitlab-webhook.js";
 import { createApp } from "../src/server.js";
 import { FsStore } from "../src/core/store.js";
-import { TaskRepo, newTaskId } from "../src/tasks.js";
+import { TaskRepo, newTaskId } from "../src/tasks/tasks.js";
 import { EXCERPT_MAX_CHARS, resetWebhookStateForTests } from "../src/webhook.js";
 
 // The route hands verified deliveries to handleGitlabDelivery; record them there

@@ -2,8 +2,8 @@ import type { Config, JiraProjectAutomation } from "./core/config.js";
 import { type JiraTicketClient, jiraClientFor } from "./jira.js";
 import { MondayClient } from "./monday.js";
 import type { Store } from "./core/store.js";
-import { addEvent, currentPhase, plainLine, readTimeline, timelineKey } from "./task-events.js";
-import { type Task, type TaskTicket, isWebTask } from "./tasks.js";
+import { addEvent, currentPhase, plainLine, readTimeline, timelineKey } from "./tasks/task-events.js";
+import { type Task, type TaskTicket, isWebTask } from "./tasks/tasks.js";
 
 /**
  * The ticket follows its repo task: a monday.com item (see

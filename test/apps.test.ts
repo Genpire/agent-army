@@ -27,8 +27,8 @@ import { deriveKey } from "../src/core/crypto.js";
 import { newAppId } from "../src/routes/apps.js";
 import { createApp } from "../src/server.js";
 import { FsStore } from "../src/core/store.js";
-import { TaskRepo, WEB_CHANNEL } from "../src/tasks.js";
-import { startThreadTask } from "../src/thread-task.js";
+import { TaskRepo, WEB_CHANNEL } from "../src/tasks/tasks.js";
+import { startThreadTask } from "../src/tasks/thread-task.js";
 import { defaultTeam } from "../src/team/team.js";
 
 const PUBLIC = { env: {} as NodeJS.ProcessEnv };

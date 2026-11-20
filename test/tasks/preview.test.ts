@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Report } from "../src/team/agents.js";
-import { type CheckInfo, type DeploymentInfo, type DeploymentStatusInfo, GitHub, type IssueComment, type StatusInfo } from "../src/github.js";
+import type { Report } from "../../src/team/agents.js";
+import { type CheckInfo, type DeploymentInfo, type DeploymentStatusInfo, GitHub, type IssueComment, type StatusInfo } from "../../src/github.js";
 import {
   BYPASS_COOKIE_PARAM,
   BYPASS_PARAM,
@@ -30,8 +30,8 @@ import {
   startBypassRedirect,
   touchesVisible,
   vercelPreviewFromComment,
-} from "../src/preview.js";
-import { estimateRange, previewStatus, sizeDetail, sizeLine } from "../web/src/pages/chat/labels.js";
+} from "../../src/tasks/preview.js";
+import { estimateRange, previewStatus, sizeDetail, sizeLine } from "../../web/src/pages/chat/labels.js";
 
 const SHA = "8a4674fe39e8526675dcd078271f535d55012932";
 

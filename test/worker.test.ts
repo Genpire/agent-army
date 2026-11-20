@@ -15,9 +15,9 @@ import { type CodeHostKind, repoPath } from "../src/repo-id.js";
 import { FsStore } from "../src/core/store.js";
 import { REPO_RULES, type AgentSpec, defaultTeam, rosterText } from "../src/team/team.js";
 import { type CheckInfo, GitHub, type PrRef, type StatusInfo } from "../src/github.js";
-import { BROWSER_SERVER, BROWSER_TOOLS, browserServer } from "../src/browser.js";
-import type { PlanItem } from "../src/progress.js";
-import type { Task, ThreadState } from "../src/tasks.js";
+import { BROWSER_SERVER, BROWSER_TOOLS, browserServer } from "../src/tasks/browser.js";
+import type { PlanItem } from "../src/tasks/progress.js";
+import type { Task, ThreadState } from "../src/tasks/tasks.js";
 import {
   type ExecFile,
   FALLBACK_COMMIT_EMAIL,

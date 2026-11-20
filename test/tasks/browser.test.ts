@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import { BROWSER_TOOLS, browserAvailable, browserServer, collectScreenshots } from "../src/browser.js";
-import { uploadThreadFiles } from "../src/slack/slack.js";
+import { BROWSER_TOOLS, browserAvailable, browserServer, collectScreenshots } from "../../src/tasks/browser.js";
+import { uploadThreadFiles } from "../../src/slack/slack.js";
 
 const tmp = (prefix: string) => mkdtemp(join(tmpdir(), prefix));
 
@@ -43,7 +43,7 @@ describe("browserServer", () => {
     expect(config.command).toBe(process.execPath);
     const [launcher, ...flags] = config.args ?? [];
     expect(isAbsolute(launcher!)).toBe(true);
-    expect(launcher).toBe(fileURLToPath(new URL("../src/browser-mcp.js", import.meta.url)));
+    expect(launcher).toBe(fileURLToPath(new URL("../../src/tasks/browser-mcp.js", import.meta.url)));
     expect(flags).toEqual([
       "--headless",
       "--browser",
@@ -75,7 +75,7 @@ describe("browserServer", () => {
 });
 
 describe("browser-mcp launcher", () => {
-  const launcher = fileURLToPath(new URL("../src/browser-mcp.ts", import.meta.url));
+  const launcher = fileURLToPath(new URL("../../src/tasks/browser-mcp.ts", import.meta.url));
   const run = (env: Record<string, string>, input?: string) =>
     new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
       const child = spawn(process.execPath, ["--import", "tsx", launcher, "--headless", "--isolated", "--ignore-roots"], {

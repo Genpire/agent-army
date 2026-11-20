@@ -9,7 +9,7 @@ import type { MemoryRepo } from "./memory.js";
 import { MONDAY_READ_TOOL_NAMES, type MondayToolOptions, mondayTools } from "../monday.js";
 import type { NotesRepo } from "./notes.js";
 import type { AddAttachment, StartRepoTask } from "./pointer-types.js";
-import { prRef } from "../pr-feedback.js";
+import { prRef } from "../tasks/pr-feedback.js";
 import {
   type CodeHostKind,
   GITHUB_REPO_RE,

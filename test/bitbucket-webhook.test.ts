@@ -10,7 +10,7 @@ import { deriveKey } from "../src/core/crypto.js";
 import { BOT_MARKER } from "../src/github.js";
 import { createApp } from "../src/server.js";
 import { FsStore } from "../src/core/store.js";
-import { TaskRepo, newTaskId } from "../src/tasks.js";
+import { TaskRepo, newTaskId } from "../src/tasks/tasks.js";
 import type { TicketClient } from "../src/ticket-sync.js";
 import { EXCERPT_MAX_CHARS, resetWebhookStateForTests } from "../src/webhook.js";
 

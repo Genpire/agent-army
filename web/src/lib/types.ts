@@ -7,8 +7,8 @@ import type { publicView } from "../../../src/core/config.js";
 import type { MemoryFact } from "../../../src/chat/memory.js";
 import type { NotesRepo, ProjectNotes } from "../../../src/chat/notes.js";
 import type { MondayBoardSummary } from "../../../src/monday.js";
-import type { ProgressSnapshot } from "../../../src/progress.js";
-import type { CiSummary, Task } from "../../../src/tasks.js";
+import type { ProgressSnapshot } from "../../../src/tasks/progress.js";
+import type { CiSummary, Task } from "../../../src/tasks/tasks.js";
 import type { Access, AgentSpec, Effort, PointerSpec, Team } from "../../../src/team/team.js";
 import type { MonthUsage } from "../../../src/spending/usage.js";
 
@@ -58,8 +58,8 @@ export type {
   LiveReply,
   TaskMilestone,
 } from "../../../src/chat/conversations.js";
-export type { CheckItem, CheckState, PhaseInfo, PhaseState, TaskEvent, TaskEventKind, TaskTimeline } from "../../../src/task-events.js";
-export type { TaskPhase, TaskReport } from "../../../src/tasks.js";
+export type { CheckItem, CheckState, PhaseInfo, PhaseState, TaskEvent, TaskEventKind, TaskTimeline } from "../../../src/tasks/task-events.js";
+export type { TaskPhase, TaskReport } from "../../../src/tasks/tasks.js";
 export type { ActivityKind } from "../../../src/chat/pointer-types.js";
 
 /** GET /api/conversations: newest activity first. */
@@ -85,11 +85,11 @@ export interface ScreenshotList {
 
 /** GET /api/tasks/:id/events: null when the task has no timeline (older tasks, or not started yet). */
 export interface TaskEventsView {
-  timeline: import("../../../src/task-events.js").TaskTimeline | null;
+  timeline: import("../../../src/tasks/task-events.js").TaskTimeline | null;
 }
 
 /** The order of a repo task's steps, for the stepper (checked against the server's list). */
-export const TASK_PHASE_ORDER = ["clone", "setup", "plan", "build", "verify", "publish", "checks"] as const satisfies readonly import("../../../src/tasks.js").TaskPhase[];
+export const TASK_PHASE_ORDER = ["clone", "setup", "plan", "build", "verify", "publish", "checks"] as const satisfies readonly import("../../../src/tasks/tasks.js").TaskPhase[];
 
 // ---------- AI providers (GET /api/ai/providers) ----------
 

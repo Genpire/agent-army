@@ -17,14 +17,14 @@ import { type Conversation, ConversationRepo } from "../src/chat/conversations.j
 import { hashPassword } from "../src/core/crypto.js";
 import { MemoryRepo } from "../src/chat/memory.js";
 import { NotesRepo } from "../src/chat/notes.js";
-import type { PlanItem, ProgressSnapshot } from "../src/progress.js";
+import type { PlanItem, ProgressSnapshot } from "../src/tasks/progress.js";
 import type { PointerBrain } from "../src/chat/pointer-types.js";
-import type { Runner } from "../src/runner.js";
-import { ScreenshotRepo } from "../src/screenshots.js";
+import type { Runner } from "../src/tasks/runner.js";
+import { ScreenshotRepo } from "../src/tasks/screenshots.js";
 import { createApp } from "../src/server.js";
 import { FsStore } from "../src/core/store.js";
-import { TimelineRecorder } from "../src/task-events.js";
-import { type Task, TaskRepo, WEB_CHANNEL, newTaskId } from "../src/tasks.js";
+import { TimelineRecorder } from "../src/tasks/task-events.js";
+import { type Task, TaskRepo, WEB_CHANNEL, newTaskId } from "../src/tasks/tasks.js";
 import { type Team, agentLabel, defaultTeam } from "../src/team/team.js";
 
 export const DEMO_PASSWORD = "agent-army-demo";

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { PrFeedback } from "../src/github.js";
-import { FEEDBACK_ITEM_MAX_CHARS, FEEDBACK_MAX_CHARS, FEEDBACK_MAX_ITEMS, formatFeedback, prRef } from "../src/pr-feedback.js";
+import type { PrFeedback } from "../../src/github.js";
+import { FEEDBACK_ITEM_MAX_CHARS, FEEDBACK_MAX_CHARS, FEEDBACK_MAX_ITEMS, formatFeedback, prRef } from "../../src/tasks/pr-feedback.js";
 
 let nextId = 1;
 const item = (over: Partial<PrFeedback>): PrFeedback => ({

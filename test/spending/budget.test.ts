@@ -25,8 +25,8 @@ import { MemoryRepo } from "../../src/chat/memory.js";
 import type { PointerBrain, PointerContext, PointerReply, PointerRequest, SlackMessageEvent, StartRepoTaskResult } from "../../src/chat/pointer-types.js";
 import { createApp } from "../../src/server.js";
 import { FsStore } from "../../src/core/store.js";
-import { type Task, TaskRepo, newTaskId } from "../../src/tasks.js";
-import { startThreadTask } from "../../src/thread-task.js";
+import { type Task, TaskRepo, newTaskId } from "../../src/tasks/tasks.js";
+import { startThreadTask } from "../../src/tasks/thread-task.js";
 import { UsageRepo } from "../../src/spending/usage.js";
 import { handleGithubWebhook, resetWebhookStateForTests } from "../../src/webhook.js";
 

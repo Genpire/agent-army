@@ -7,9 +7,9 @@ import type { Spending } from "../spending/budget.js";
 import type { Budget, Config } from "../core/config.js";
 import { type ProviderRuntime, defaultModel, providerRuntime } from "../ai/ai-providers.js";
 import type { QueryFn } from "../chat/pointer.js";
-import { modelName } from "../sizing.js";
+import { modelName } from "../tasks/sizing.js";
 import type { Store } from "../core/store.js";
-import { type Task, type TaskRepo, newTaskId } from "../tasks.js";
+import { type Task, type TaskRepo, newTaskId } from "../tasks/tasks.js";
 import {
   ACCESS_LEVELS,
   type Access,

@@ -22,7 +22,7 @@ import {
   webhookIds,
 } from "../src/monday-automation.js";
 import { createApp } from "../src/server.js";
-import type { Task, TaskTicket } from "../src/tasks.js";
+import type { Task, TaskTicket } from "../src/tasks/tasks.js";
 
 const BOARD = "4012345678";
 const ITEM = "9001";

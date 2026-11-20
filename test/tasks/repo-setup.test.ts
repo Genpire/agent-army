@@ -2,7 +2,7 @@ import { mkdtemp, readFile, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { ConfigSchema, type RepoSetup } from "../src/core/config.js";
+import { ConfigSchema, type RepoSetup } from "../../src/core/config.js";
 import {
   cleanOutput,
   findRepoSetup,
@@ -10,8 +10,8 @@ import {
   repoSetupContext,
   runSetupCommand,
   setupEnv,
-} from "../src/repo-setup.js";
-import { makeRedactor } from "../src/worker.js";
+} from "../../src/tasks/repo-setup.js";
+import { makeRedactor } from "../../src/worker.js";
 
 const setupOf = (over: Partial<RepoSetup> = {}): RepoSetup => ({ setupCommand: "", startCommand: "", appUrl: "", env: {}, ...over });
 

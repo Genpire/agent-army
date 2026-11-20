@@ -7,9 +7,9 @@ import {
   ciSummaryLine,
   storedCiSummary,
   waitForChecks,
-} from "../src/ci.js";
-import type { Annotation, CheckInfo, StatusInfo } from "../src/github.js";
-import { makeRedactor } from "../src/worker.js";
+} from "../../src/tasks/ci.js";
+import type { Annotation, CheckInfo, StatusInfo } from "../../src/github.js";
+import { makeRedactor } from "../../src/worker.js";
 
 const check = (name: string, over: Partial<CheckInfo> = {}): CheckInfo => ({
   id: name.length * 1000 + name.charCodeAt(0),

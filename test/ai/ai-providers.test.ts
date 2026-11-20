@@ -19,7 +19,7 @@ import {
 import { AI_PROVIDER_IDS, type AiProviderId, type Config, ConfigSchema, isChatReady, isReady, publicView } from "../../src/core/config.js";
 import type { QueryFn } from "../../src/chat/pointer.js";
 import { createApp } from "../../src/server.js";
-import { estimateTaskSize } from "../../src/sizing.js";
+import { estimateTaskSize } from "../../src/tasks/sizing.js";
 import { buildRepoAgents } from "../../src/team/team.js";
 import { configSecrets, onboardingError, teamQueryOptions } from "../../src/worker.js";
 

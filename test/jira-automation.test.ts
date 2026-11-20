@@ -24,7 +24,7 @@ import { START_COOLDOWN_MS, INSTRUCTION_MAX_CHARS } from "../src/monday-automati
 import { normalizeSiteUrl } from "../src/routes/jira.js";
 import { createApp } from "../src/server.js";
 import { FsStore } from "../src/core/store.js";
-import type { Task, TaskTicket } from "../src/tasks.js";
+import type { Task, TaskTicket } from "../src/tasks/tasks.js";
 
 const SITE = "https://acme.atlassian.net";
 const KEY = "ACME-123";

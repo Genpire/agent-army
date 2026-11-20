@@ -1,7 +1,7 @@
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { describe, expect, it } from "vitest";
-import { ProgressTracker, describeTask, describeTasks, formatProgress, oneLine, taskIdFromResult } from "../src/progress.js";
-import type { Task } from "../src/tasks.js";
+import { ProgressTracker, describeTask, describeTasks, formatProgress, oneLine, taskIdFromResult } from "../../src/tasks/progress.js";
+import type { Task } from "../../src/tasks/tasks.js";
 
 const T0 = Date.parse("2026-11-18T12:00:00Z");
 

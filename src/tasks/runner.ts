@@ -22,7 +22,7 @@ export class LocalRunner implements Runner {
 
   constructor(
     private readonly maxParallel: () => number,
-    private readonly workerPath = fileURLToPath(new URL("./worker.js", import.meta.url)),
+    private readonly workerPath = fileURLToPath(new URL("../worker.js", import.meta.url)),
   ) {}
 
   async launch(taskId: string): Promise<void> {

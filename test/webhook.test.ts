@@ -9,7 +9,7 @@ import { deriveKey } from "../src/core/crypto.js";
 import { BOT_MARKER } from "../src/github.js";
 import { createApp } from "../src/server.js";
 import { FsStore } from "../src/core/store.js";
-import { type Task, TaskRepo, newTaskId } from "../src/tasks.js";
+import { type Task, TaskRepo, newTaskId } from "../src/tasks/tasks.js";
 import type * as Webhook from "../src/webhook.js";
 
 // The server hands verified deliveries to handleGithubWebhook; record them there

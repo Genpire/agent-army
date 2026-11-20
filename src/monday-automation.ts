@@ -5,8 +5,8 @@ import type { DirectTaskResult } from "./chat/conversations.js";
 import { KeyedQueue } from "./slack/listen.js";
 import { type MondayBoard, MondayClient, type MondayItemDetails, statusColumns } from "./monday.js";
 import type { Store } from "./core/store.js";
-import { plainLine } from "./task-events.js";
-import type { Task, TaskRepo, TaskTicket } from "./tasks.js";
+import { plainLine } from "./tasks/task-events.js";
+import type { Task, TaskRepo, TaskTicket } from "./tasks/tasks.js";
 import { type TicketClient, updateTicket } from "./ticket-sync.js";
 import { configSecrets, makeRedactor } from "./worker.js";
 

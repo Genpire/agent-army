@@ -8,7 +8,7 @@ import type { Request, RequestHandler } from "express";
 import type { ConfigRepo } from "../core/config.js";
 import type { ConversationService } from "../chat/conversations.js";
 import type { Store } from "../core/store.js";
-import type { TaskRepo } from "../tasks.js";
+import type { TaskRepo } from "../tasks/tasks.js";
 import type { WebhookDeps } from "../webhook.js";
 
 export interface IntegrationRouteDeps {

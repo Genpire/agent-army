@@ -9,9 +9,9 @@ import { HOST_TERMS, repoHost, repoWebUrl } from "./repo-id.js";
 import { KeyedQueue } from "./slack/listen.js";
 import type { SlackDeps } from "./chat/pointer-types.js";
 import type { WebThreads } from "./chat/conversations.js";
-import { type PrThread, type TaskRepo, WEB_CHANNEL } from "./tasks.js";
+import { type PrThread, type TaskRepo, WEB_CHANNEL } from "./tasks/tasks.js";
 import type { Store } from "./core/store.js";
-import { startThreadTask } from "./thread-task.js";
+import { startThreadTask } from "./tasks/thread-task.js";
 import { type TicketClient, appendTicketEvent, ticketPrClosed } from "./ticket-sync.js";
 import { configSecrets, makeRedactor } from "./worker.js";
 

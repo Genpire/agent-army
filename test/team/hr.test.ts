@@ -32,7 +32,7 @@ import {
 import type { QueryFn } from "../../src/chat/pointer.js";
 import { createApp } from "../../src/server.js";
 import { FsStore } from "../../src/core/store.js";
-import { type Task, TaskRepo, newTaskId } from "../../src/tasks.js";
+import { type Task, TaskRepo, newTaskId } from "../../src/tasks/tasks.js";
 import { type AgentSpec, type Team, defaultTeam } from "../../src/team/team.js";
 import { UsageRepo } from "../../src/spending/usage.js";
 

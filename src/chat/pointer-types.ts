@@ -7,8 +7,8 @@ import type { AttachmentInfo, AttachmentRepo, NewAttachment } from "./attachment
 import type { ConfigRepo } from "../core/config.js";
 import type { MemoryRepo } from "./memory.js";
 import type { NotesRepo } from "./notes.js";
-import type { Runner } from "../runner.js";
-import type { TaskRepo, ThreadState } from "../tasks.js";
+import type { Runner } from "../tasks/runner.js";
+import type { TaskRepo, ThreadState } from "../tasks/tasks.js";
 import type { UsageRepo } from "../spending/usage.js";
 
 /** A file attached to a Slack message (subset of Slack's file object). */

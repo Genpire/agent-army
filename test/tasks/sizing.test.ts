@@ -1,7 +1,7 @@
 import type { Options, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { describe, expect, it, vi } from "vitest";
-import { type Config, ConfigSchema } from "../src/core/config.js";
-import type { QueryFn } from "../src/chat/pointer.js";
+import { type Config, ConfigSchema } from "../../src/core/config.js";
+import type { QueryFn } from "../../src/chat/pointer.js";
 import {
   DEFAULT_ESTIMATES,
   FALLBACK_REASON,
@@ -15,10 +15,10 @@ import {
   routeRepoTask,
   routedConfig,
   sizingPrompt,
-} from "../src/sizing.js";
-import type { Task } from "../src/tasks.js";
-import { buildRepoAgents } from "../src/team/team.js";
-import { teamQueryOptions } from "../src/worker.js";
+} from "../../src/tasks/sizing.js";
+import type { Task } from "../../src/tasks/tasks.js";
+import { buildRepoAgents } from "../../src/team/team.js";
+import { teamQueryOptions } from "../../src/worker.js";
 
 const API_KEY = "sk-ant-secret-key-0123456789";
 
