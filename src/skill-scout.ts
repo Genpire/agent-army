@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Options, query } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
-import { defaultModel, providerRuntime } from "./ai-providers.js";
+import { defaultModel, providerRuntime } from "./ai/ai-providers.js";
 import type { Spending } from "./budget.js";
 import type { Config } from "./core/config.js";
 import type { QueryFn } from "./pointer.js";

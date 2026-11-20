@@ -18,9 +18,9 @@ import { AttachmentRepo, type ThreadRef, classify, expandZip } from "./attachmen
 import { Spending } from "./budget.js";
 import { type Screenshot, browserAvailable, browserServer, collectScreenshots } from "./browser.js";
 import { type CiOutcome, type WaitOptions, ciFailureDetails, ciFixPrompt, ciSummary, ciSummaryLine, storedCiSummary, waitForChecks } from "./ci.js";
-import { type ProviderSession, providerProblem, providerRuntime } from "./ai-providers.js";
+import { type ProviderSession, providerProblem, providerRuntime } from "./ai/ai-providers.js";
 import { repoTaskApps } from "./apps.js";
-import { repoTaskEngines } from "./engines.js";
+import { repoTaskEngines } from "./ai/engines.js";
 import type { CodeHost } from "./code-host.js";
 import { allHostSecrets, codeHostFor } from "./code-host-factory.js";
 import { type Config, ConfigRepo, integrationSecrets, resolveMasterKey } from "./core/config.js";

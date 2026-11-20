@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { providerProblem } from "./ai-providers.js";
+import { providerProblem } from "./ai/ai-providers.js";
 import type { Spending } from "./budget.js";
 import type { Config, ConfigRepo } from "./core/config.js";
 import { KeyedQueue } from "./listen.js";

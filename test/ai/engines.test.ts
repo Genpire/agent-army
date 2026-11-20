@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import type { AgentDefinition } from "@anthropic-ai/claude-agent-sdk";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { type Config, ConfigSchema } from "../src/core/config.js";
+import { type Config, ConfigSchema } from "../../src/core/config.js";
 import {
   ENGINES_SERVER,
   type EngineDeps,
@@ -18,10 +18,10 @@ import {
   geminiRunner,
   repoTaskEngines,
   runEngine,
-} from "../src/engines.js";
-import { createApp } from "../src/server.js";
-import { type AgentSpec, buildRepoAgents, defaultTeam, repoAllowedTools } from "../src/team.js";
-import { makeRedactor } from "../src/worker.js";
+} from "../../src/ai/engines.js";
+import { createApp } from "../../src/server.js";
+import { type AgentSpec, buildRepoAgents, defaultTeam, repoAllowedTools } from "../../src/team.js";
+import { makeRedactor } from "../../src/worker.js";
 
 const CODEX_KEY = "sk-proj-engine-test-key-0123456789abcdef";
 const GEMINI_KEY = "AIzaEngineTestKey0123456789abcdefghijk";

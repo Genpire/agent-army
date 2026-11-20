@@ -94,7 +94,7 @@ export const TASK_PHASE_ORDER = ["clone", "setup", "plan", "build", "verify", "p
 // ---------- AI providers (GET /api/ai/providers) ----------
 
 export type { AiProviderView, AiProvidersView } from "../../../src/routes/ai.js";
-export type { ModelPrice, PresetCapabilities, PresetField, PresetKind, PresetModel } from "../../../src/ai-presets.js";
+export type { ModelPrice, PresetCapabilities, PresetField, PresetKind, PresetModel } from "../../../src/ai/ai-presets.js";
 export type { AiProviderId, ModelTier } from "../../../src/core/config.js";
 
 /** The model tiers a provider maps, in the order the page shows them (checked against the server's list). */

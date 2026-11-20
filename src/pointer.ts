@@ -10,7 +10,7 @@ import {
   query,
 } from "@anthropic-ai/claude-agent-sdk";
 import type { ContentBlockParam } from "@anthropic-ai/sdk/resources";
-import { defaultModel, fitContentBlocks, providerRuntime } from "./ai-providers.js";
+import { defaultModel, fitContentBlocks, providerRuntime } from "./ai/ai-providers.js";
 import { type AttachmentInfo, type AttachmentRepo, type ThreadRef, toContentBlocks } from "./attachments.js";
 import { type ChatIntegration, chatIntegrations, subagentIntegrationTools } from "./chat-integrations.js";
 import { PendingActions, confirmGate, conversationKey, gatedTools } from "./confirm-gate.js";

@@ -23,8 +23,8 @@
  *   which Anthropic and OpenRouter do not support. Codex and Gemini CLI run
  *   as team members instead (engines.ts).
  */
-import type { AiProviderId, ModelTier } from "./core/config.js";
-import type { Effort } from "./team.js";
+import type { AiProviderId, ModelTier } from "../core/config.js";
+import type { Effort } from "../team.js";
 
 /** Anthropic's own API; Claude on a cloud; another provider's Anthropic-compatible API; any such endpoint. */
 export type PresetKind = "anthropic" | "cloud" | "compatible" | "custom";

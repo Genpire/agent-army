@@ -5,7 +5,7 @@ import { type Options, query } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import type { Spending } from "./budget.js";
 import type { Budget, Config } from "./core/config.js";
-import { type ProviderRuntime, defaultModel, providerRuntime } from "./ai-providers.js";
+import { type ProviderRuntime, defaultModel, providerRuntime } from "./ai/ai-providers.js";
 import type { QueryFn } from "./pointer.js";
 import { modelName } from "./sizing.js";
 import type { Store } from "./core/store.js";

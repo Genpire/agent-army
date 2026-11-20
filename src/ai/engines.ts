@@ -24,9 +24,9 @@ import { createInterface } from "node:readline";
 import { delimiter, isAbsolute, join } from "node:path";
 import { type AgentDefinition, type McpServerConfig, createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
-import { type Config, ENGINE_IDS, type EngineId } from "./core/config.js";
-import { type AgentSpec, type Team, enabledAgents } from "./team.js";
-import { gitRunner, makeRedactor } from "./worker.js";
+import { type Config, ENGINE_IDS, type EngineId } from "../core/config.js";
+import { type AgentSpec, type Team, enabledAgents } from "../team.js";
+import { gitRunner, makeRedactor } from "../worker.js";
 
 /** What a repo task gets for its engine agents. */
 export interface RepoTaskEngines {

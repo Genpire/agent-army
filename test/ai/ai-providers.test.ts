@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import type { Options, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { AI_PRESETS } from "../src/ai-presets.js";
+import { AI_PRESETS } from "../../src/ai/ai-presets.js";
 import {
   type ConnectionValues,
   anthropicRuntime,
@@ -15,13 +15,13 @@ import {
   parseHeaderLines,
   providerRuntime,
   testConnection,
-} from "../src/ai-providers.js";
-import { AI_PROVIDER_IDS, type AiProviderId, type Config, ConfigSchema, isChatReady, isReady, publicView } from "../src/core/config.js";
-import type { QueryFn } from "../src/pointer.js";
-import { createApp } from "../src/server.js";
-import { estimateTaskSize } from "../src/sizing.js";
-import { buildRepoAgents } from "../src/team.js";
-import { configSecrets, onboardingError, teamQueryOptions } from "../src/worker.js";
+} from "../../src/ai/ai-providers.js";
+import { AI_PROVIDER_IDS, type AiProviderId, type Config, ConfigSchema, isChatReady, isReady, publicView } from "../../src/core/config.js";
+import type { QueryFn } from "../../src/pointer.js";
+import { createApp } from "../../src/server.js";
+import { estimateTaskSize } from "../../src/sizing.js";
+import { buildRepoAgents } from "../../src/team.js";
+import { configSecrets, onboardingError, teamQueryOptions } from "../../src/worker.js";
 
 // ---------- Fixtures: one complete connection per provider, each with its own secrets ----------
 
@@ -460,7 +460,7 @@ describe("AI provider admin API", () => {
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
   const post = (path: string, body: unknown = {}, withCookie = true) => send("POST", path, body, withCookie);
-  const providers = async () => (await (await send("GET", "/api/ai/providers")).json()) as import("../src/routes/ai.js").AiProvidersView;
+  const providers = async () => (await (await send("GET", "/api/ai/providers")).json()) as import("../../src/routes/ai.js").AiProvidersView;
   const state = async () => (await (await send("GET", "/api/state")).json()).config;
   const error = async (res: Response) => ({ status: res.status, error: ((await res.json()) as { error: string }).error });
 
