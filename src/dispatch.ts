@@ -310,7 +310,7 @@ function repoTaskStarter(ctx: Ctx, thread: ThreadState | null): StartRepoTask {
 
       const threadTs = taskThreadTs(e);
       const started = await startThreadTask(
-        { tasks: deps.tasks, runner: deps.runner, slack, redact: ctx.redact, budget: deps.spending },
+        { tasks: deps.tasks, runner: deps.runner, slack, redact: ctx.redact, budget: deps.spending, configRepo: deps.configRepo },
         {
           repo: target,
           channel: e.channel,

@@ -7,27 +7,35 @@
  * What a connection may use is decided here, from the tools listed when it
  * was last checked: "read" access offers only the tools the server marks
  * read-only (readOnlyHint), "write" every tool, and disabled tools never.
+ * Claude Code reaches apps only through this process's proxy
+ * (apps-proxy.ts), which holds the credentials and enforces those rules.
+ *
+ * OAuth tokens are renewed by the web service only: in chat shortly before
+ * they expire, and before a repo task starts (refreshAppsForTask). A repo
+ * task uses the stored token while it is valid and never writes the config.
  * An app that cannot be used right now (its sign-in expired, its address is
  * refused) is left out with a warning; it never breaks chat or a task.
  */
-import type { McpHttpServerConfig, McpServerConfig, McpServerToolPolicy, McpSSEServerConfig } from "@anthropic-ai/claude-agent-sdk";
+import type { McpHttpServerConfig, McpServerConfig, McpServerToolPolicy } from "@anthropic-ai/claude-agent-sdk";
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { catalogApp } from "./apps-catalog.js";
-import { type NetGuardOptions, AppUrlError, assertPublicUrl, guardedFetch } from "./apps-net.js";
+import { type NetGuardOptions, AppUrlError, assertPublicUrl } from "./apps-net.js";
 import { AppSignInError, type FreshTokenDeps, freshAccessToken } from "./apps-oauth.js";
+import { type AppProxy, type ProxyScope, type ProxySource, appProxy, listAllTools, openUpstream } from "./apps-proxy.js";
 import type { ChatIntegration, ChatIntegrationContext } from "./chat-integrations.js";
 import type { AppConnection, AppTool, Config, ConfigRepo } from "./config.js";
 import { type AgentSpec, enabledAgents } from "./team.js";
 
 /** Listing an app's tools gives up after this. */
 export const APP_TOOL_TIMEOUT_MS = 15_000;
-/** Repo tasks run for up to an hour or more: their OAuth tokens are renewed when less than this is left. */
-export const TASK_TOKEN_MARGIN_MS = 45 * 60_000;
-const MAX_TOOLS = 500;
-const MAX_TOOL_PAGES = 20;
+/**
+ * Before a repo task starts, the web service renews OAuth tokens that expire
+ * within this, so a task has one that lasts (a fresh one-hour token is left as is).
+ */
+export const TASK_TOKEN_HORIZON_MS = 50 * 60_000;
+/** The timeline note for an app a repo task leaves out because its token cannot be used. */
+export const EXPIRED_IN_TASK = "sign in again or the token expired; it was not refreshed in the task";
 
 /** The apps of a repo task: one MCP server per app, and which full tool names each agent may call. */
 export interface RepoTaskApps {
@@ -35,14 +43,20 @@ export interface RepoTaskApps {
   servers: Record<string, McpServerConfig>;
   /** Full tool names an agent (by id) may call; [] when it has no apps. */
   toolsFor(agentId: string): string[];
+  /**
+   * The servers an agent starts (key → config): its own route on the proxy,
+   * read-only for an agent that only looks. Absent: `servers`, for the apps
+   * it has tools on.
+   */
+  serversFor?(agentId: string): Record<string, McpServerConfig>;
   /** Every tool name any agent may call, for allowedTools. */
   allToolNames: string[];
   /** Lines for the orchestrator's instructions: which apps exist and who has them. */
   promptRule: string;
 }
 
-/** What reaching an app needs: the network guard, and for OAuth apps where a renewed token is kept. */
-export type AppDeps = NetGuardOptions & Omit<FreshTokenDeps, keyof NetGuardOptions> & { configRepo?: ConfigRepo };
+/** What reaching an app needs: the network guard, the proxy (tests pass their own), and for OAuth apps where a renewed token is kept. */
+export type AppDeps = NetGuardOptions & Omit<FreshTokenDeps, keyof NetGuardOptions> & { configRepo?: ConfigRepo; proxy?: AppProxy };
 
 const messageOf = (err: unknown) => (err instanceof Error ? err.message : String(err));
 const unique = <T>(xs: T[]) => [...new Set(xs)];
@@ -64,13 +78,19 @@ export function allowedToolsOf(app: ToolChoice): string[] {
   return app.tools.filter((t) => !disabled.has(t.name) && (app.access === "write" || t.readOnly)).map((t) => t.name);
 }
 
-/** The allowed tools the server marks read-only: what chat subagents may call. */
+/** The allowed tools the server marks read-only: what chat subagents and agents that only look may call. */
 export function readOnlyToolsOf(app: ToolChoice): string[] {
   const disabled = new Set(app.disabledTools);
   return app.tools.filter((t) => t.readOnly && !disabled.has(t.name)).map((t) => t.name);
 }
 
-/** The headers the app's server gets: its API key, its custom headers, or a fresh OAuth access token. */
+const toolsOfScope = (scope: ProxyScope) => (scope === "read" ? readOnlyToolsOf : allowedToolsOf);
+
+/**
+ * The headers the app's server gets: its API key, its custom headers, or an
+ * OAuth access token (renewed when a ConfigRepo is given and it expires within
+ * `marginMs`; without one, the stored token while it is valid).
+ */
 export async function appHeaders(app: AppConnection, deps: AppDeps = {}): Promise<Record<string, string>> {
   switch (app.auth.type) {
     case "none":
@@ -113,26 +133,12 @@ export async function listAppTools(app: AppConnection, deps: AppDeps = {}): Prom
   const timer = setTimeout(() => abort.abort(new Error("timeout")), timeoutMs);
   let client: Client | undefined;
   const work = (async () => {
-    const url = await assertPublicUrl(app.url, deps);
-    const headers = await appHeaders(app, deps);
-    const fetch = guardedFetch({ ...deps, timeoutMs });
-    const transport =
-      app.transport === "sse"
-        ? new SSEClientTransport(url, { requestInit: { headers }, fetch })
-        : new StreamableHTTPClientTransport(url, { requestInit: { headers }, fetch });
-    client = new Client({ name: "agent-army", version: "1.0.0" });
-    const opts = { timeout: timeoutMs, signal: abort.signal };
-    await client.connect(transport, opts);
+    await appHeaders(app, deps);
+    client = await openUpstream(app, () => appHeaders(app, deps), { ...deps, timeoutMs });
     const tools = new Map<string, AppTool>();
-    let cursor: string | undefined;
-    for (let page = 0; page < MAX_TOOL_PAGES && tools.size < MAX_TOOLS; page++) {
-      const res = await client.listTools(cursor ? { cursor } : undefined, opts);
-      for (const t of res.tools) {
-        if (!t.name || t.name.length > 128 || tools.has(t.name) || tools.size >= MAX_TOOLS) continue;
-        tools.set(t.name, { name: t.name, description: (t.description ?? t.annotations?.title ?? "").slice(0, 2000), readOnly: t.annotations?.readOnlyHint === true });
-      }
-      cursor = res.nextCursor;
-      if (!cursor) break;
+    for (const t of await listAllTools(client, timeoutMs, abort.signal)) {
+      if (!t.name || t.name.length > 128 || tools.has(t.name)) continue;
+      tools.set(t.name, { name: t.name, description: (t.description ?? t.annotations?.title ?? "").slice(0, 2000), readOnly: t.annotations?.readOnlyHint === true });
     }
     return [...tools.values()];
   })();
@@ -151,17 +157,40 @@ export async function listAppTools(app: AppConnection, deps: AppDeps = {}): Prom
 export type ToolLister = typeof listAppTools;
 
 /**
- * The app's MCP server for the Agent SDK: its address and sign-in headers
- * (a fresh OAuth token), always loaded (chat and repo tasks have no tool
- * search), and tools it may not use denied on top of allowedTools.
+ * Where the proxy takes an app from for each request. With a ConfigRepo (the
+ * web service): the app as currently configured, its OAuth token renewed
+ * shortly before it expires. Without one (a repo task): the app as given,
+ * its stored token only while valid.
  */
-export async function mcpServerConfig(app: AppConnection, deps: AppDeps = {}): Promise<McpHttpServerConfig | McpSSEServerConfig> {
+function proxySource(app: AppConnection, scope: ProxyScope, deps: AppDeps): ProxySource {
+  const { configRepo } = deps;
+  return {
+    app: async () => {
+      if (!configRepo) return app;
+      const current = (await configRepo.load()).apps.find((a) => a.id === app.id);
+      if (!current?.enabled) throw new Error(`${app.name} is no longer connected or is turned off.`);
+      return current;
+    },
+    headers: (current) => appHeaders(current, deps),
+    tools: (current) => toolsOfScope(scope)(current),
+  };
+}
+
+/**
+ * The app's MCP server for the Agent SDK: its route on this process's
+ * proxy (a loopback address and the proxy key; never the app's address or
+ * credentials), always loaded (chat and repo tasks have no tool search), and
+ * the tools it may not use denied on top of allowedTools. Throws when the
+ * app cannot be used now (an address refused, a sign-in expired).
+ */
+export async function mcpServerConfig(app: AppConnection, deps: AppDeps & { scope?: ProxyScope } = {}): Promise<McpHttpServerConfig> {
+  const scope = deps.scope ?? "all";
   await assertPublicUrl(app.url, deps);
-  const headers = await appHeaders(app, deps);
-  const allowed = new Set(allowedToolsOf(app));
+  await appHeaders(app, deps);
+  const allowed = new Set(toolsOfScope(scope)(app));
   const denied: McpServerToolPolicy[] = app.tools.filter((t) => !allowed.has(t.name)).map((t) => ({ name: t.name, permission_policy: "always_deny" }));
-  const common = { url: app.url, headers, alwaysLoad: true, ...(denied.length ? { tools: denied } : {}) };
-  return app.transport === "sse" ? { type: "sse", ...common } : { type: "http", ...common };
+  const route = await (deps.proxy ?? appProxy()).serverConfig(app.id, scope, proxySource(app, scope, deps));
+  return { ...route, alwaysLoad: true, ...(denied.length ? { tools: denied } : {}) };
 }
 
 /** Enabled agents an app is assigned to (their `apps` list it). */
@@ -212,7 +241,8 @@ const unavailableRule = (app: AppConnection, reason: string) =>
 /**
  * One chat integration per enabled app: its server and tool names when it
  * can be used now, otherwise only a rule saying why not. Read-only tools go
- * to the agents the app is assigned to (agentIds, possibly none).
+ * to the agents the app is assigned to (agentIds, possibly none). Runs in
+ * the web service: OAuth tokens are renewed shortly before they expire.
  */
 export async function appChatIntegrations(config: Config, ctx: ChatIntegrationContext, deps: AppDeps = {}): Promise<ChatIntegration[]> {
   return Promise.all(
@@ -244,29 +274,47 @@ export async function appChatIntegrations(config: Config, ctx: ChatIntegrationCo
   );
 }
 
+/** The enabled apps assigned to enabled agents: those a repo task can use. */
+const taskApps = (config: Config) => {
+  const wanted = new Set(enabledAgents(config.team).flatMap((a) => a.apps));
+  return config.apps.filter((a) => a.enabled && wanted.has(a.id));
+};
+
+export interface RepoTaskAppsDeps extends NetGuardOptions {
+  redact: (text: string) => string;
+  /** A line for the task's timeline (an app left out, and why). */
+  note?: (text: string) => void;
+  proxy?: AppProxy;
+  now?: () => number;
+}
+
 /**
- * The apps of a repo task: a server for each enabled app assigned to an
- * enabled agent, and each agent's tools on them. An agent that only looks
- * (access "read") gets an app's read-only tools only. Undefined when no app
- * can be used.
+ * The apps of a repo task (in the worker): a proxy route for each enabled
+ * app assigned to an enabled agent, and each agent's tools on them. An agent
+ * that only looks (access "read") gets an app's read-only tools, on a
+ * read-only route. Tokens are the stored ones, used while valid: the worker
+ * never renews them or writes the config, and an app whose token cannot be
+ * used is left out with a timeline note. Undefined when no app can be used.
  */
-export async function repoTaskApps(config: Config, deps: AppDeps & { redact: (text: string) => string }): Promise<RepoTaskApps | undefined> {
+export async function repoTaskApps(config: Config, deps: RepoTaskAppsDeps): Promise<RepoTaskApps | undefined> {
   const agents = enabledAgents(config.team).filter((a) => a.apps.length);
-  const wanted = new Set(agents.flatMap((a) => a.apps));
-  const built = new Map<string, { app: AppConnection; server: McpServerConfig; allowed: string[]; readOnly: string[] }>();
+  // No ConfigRepo: the stored tokens, never renewed here.
+  const { redact: _redact, note: _note, ...net } = deps;
+  const built = new Map<string, { app: AppConnection; all: McpServerConfig; read: McpServerConfig; allowed: string[]; readOnly: string[] }>();
   await Promise.all(
-    config.apps
-      .filter((a) => a.enabled && wanted.has(a.id))
-      .map(async (app) => {
-        const allowed = allowedToolsOf(app);
-        if (!allowed.length) return;
-        try {
-          const server = await mcpServerConfig(app, { marginMs: TASK_TOKEN_MARGIN_MS, ...deps });
-          built.set(app.id, { app, server, allowed, readOnly: readOnlyToolsOf(app) });
-        } catch (err) {
-          console.warn(`[worker] app ${app.name} left out:`, deps.redact(messageOf(err)).slice(0, 300));
-        }
-      }),
+    taskApps(config).map(async (app) => {
+      const allowed = allowedToolsOf(app);
+      if (!allowed.length) return;
+      try {
+        const all = await mcpServerConfig(app, { ...net, scope: "all" });
+        const read = await mcpServerConfig(app, { ...net, scope: "read" });
+        built.set(app.id, { app, all, read, allowed, readOnly: readOnlyToolsOf(app) });
+      } catch (err) {
+        const reason = err instanceof AppSignInError ? EXPIRED_IN_TASK : deps.redact(messageOf(err)).slice(0, 200);
+        console.warn(`[worker] app ${app.name} left out:`, reason);
+        deps.note?.(`${app.name} left out: ${reason}.`);
+      }
+    }),
   );
   if (!built.size) return undefined;
 
@@ -279,6 +327,11 @@ export async function repoTaskApps(config: Config, deps: AppDeps & { redact: (te
   const toolsFor = (agentId: string) => {
     const agent = agents.find((a) => a.id === agentId);
     return agent ? unique(grants(agent).flatMap((g) => g.tools.map((t) => appToolName(g.app, t)))) : [];
+  };
+  const serversFor = (agentId: string): Record<string, McpServerConfig> => {
+    const agent = agents.find((a) => a.id === agentId);
+    if (!agent) return {};
+    return Object.fromEntries(grants(agent).map((g) => [appServerKey(g.app), agent.access === "read" ? g.read : g.all]));
   };
 
   const lines = [...built.values()].flatMap(({ app }) => {
@@ -294,9 +347,35 @@ export async function repoTaskApps(config: Config, deps: AppDeps & { redact: (te
   ].join("\n");
 
   return {
-    servers: Object.fromEntries([...built.values()].map((b) => [appServerKey(b.app), b.server])),
+    servers: Object.fromEntries([...built.values()].map((b) => [appServerKey(b.app), b.all])),
     toolsFor,
+    serversFor,
     allToolNames: unique(agents.flatMap((a) => toolsFor(a.id))),
     promptRule,
   };
+}
+
+/**
+ * Before a repo task starts (in the web service, the only process that
+ * renews tokens): renews the OAuth tokens of the apps the team can use in a
+ * task that expire within the task's horizon. Never throws: an app whose
+ * renewal fails is left out by the task.
+ */
+export async function refreshAppsForTask(
+  configRepo: ConfigRepo,
+  deps: NetGuardOptions & { redact: (text: string) => string; horizonMs?: number; now?: () => number },
+): Promise<void> {
+  try {
+    const config = await configRepo.load(true);
+    const oauthApps = taskApps(config).filter((a) => a.auth.type === "oauth" && a.auth.oauth.tokens);
+    await Promise.all(
+      oauthApps.map((app) =>
+        freshAccessToken(app, { ...deps, configRepo, marginMs: deps.horizonMs ?? TASK_TOKEN_HORIZON_MS }).catch((err: unknown) => {
+          console.warn(`[apps] ${app.name}: the sign-in could not be renewed before a task:`, deps.redact(messageOf(err)).slice(0, 300));
+        }),
+      ),
+    );
+  } catch (err) {
+    console.warn("[apps] renewing sign-ins before a task failed:", deps.redact(messageOf(err)).slice(0, 300));
+  }
 }

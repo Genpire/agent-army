@@ -306,7 +306,7 @@ async function followUp(event: string, d: Start, config: Config, deps: WebhookDe
   const repo = thread && thread.repo.toLowerCase() === d.repo.toLowerCase() ? thread.repo : d.repo;
   const verb = d.kind === "changes_requested" ? "requested changes on" : d.kind === "commented" ? "commented on" : `asked ${config.team.pointer.name} on`;
   const started = await startThreadTask(
-    { tasks: deps.tasks, runner: deps.runner, slack, redact, budget: deps.spending },
+    { tasks: deps.tasks, runner: deps.runner, slack, redact, budget: deps.spending, configRepo: deps.configRepo },
     {
       repo,
       channel: ref.channel,

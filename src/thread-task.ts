@@ -1,6 +1,7 @@
 import type { WebClient } from "@slack/web-api";
+import { refreshAppsForTask } from "./apps.js";
 import type { TaskBudgetCheck } from "./budget.js";
-import type { Config } from "./config.js";
+import type { Config, ConfigRepo } from "./config.js";
 import { repoAccessError } from "./code-host-access.js";
 import { REPO_FORMAT_HINT } from "./repo-id.js";
 import type { Runner } from "./runner.js";
@@ -16,6 +17,8 @@ export interface ThreadTaskDeps {
   redact?: (text: string) => string;
   /** The spending caps (see budget.ts), checked before anything is posted or saved. Every caller passes it. */
   budget?: TaskBudgetCheck;
+  /** Renews the sign-ins of the team's apps before the worker starts (the worker never renews them; see apps.ts). */
+  configRepo?: ConfigRepo;
 }
 
 export interface ThreadTaskInput {
@@ -79,6 +82,7 @@ export async function startThreadTask(deps: ThreadTaskDeps, input: ThreadTaskInp
   }
 
   try {
+    if (deps.configRepo) await refreshAppsForTask(deps.configRepo, { redact });
     await deps.runner.launch(task.id);
   } catch (err) {
     const error = `Could not start a worker: ${redact(errorText(err))}`;
