@@ -135,6 +135,15 @@ function AppForm({ app, preset, redirectUrl, onClose }: { app: AppView; preset?:
     });
   };
 
+  /** Forgets the owner's own OAuth client and signs in with automatic registration instead. */
+  const signInAutomatically = async () => {
+    await action.run(async () => {
+      await api.post(`/api/apps/${encodeURIComponent(app.id)}`, { auth: { type: "oauth", automatic: true } });
+      const { url } = await api.post<{ url: string }>(`/api/apps/${encodeURIComponent(app.id)}/oauth/start`);
+      window.location.assign(url);
+    });
+  };
+
   const remove = async () => {
     const ok = await action.run(
       async () => {
@@ -198,6 +207,9 @@ function AppForm({ app, preset, redirectUrl, onClose }: { app: AppView; preset?:
               </MetadataList>
               <HStack gap={2} wrap="wrap">
                 {app.auth.type === "oauth" && <Button label={signedOut ? `Sign in with ${app.name}` : "Sign in again"} variant={signedOut ? "primary" : "secondary"} size="sm" clickAction={signIn} />}
+                {app.auth.type === "oauth" && app.auth.ownClient && preset?.clientRegistration !== "manual" && (
+                  <Button label="Use automatic sign-in" variant="secondary" size="sm" clickAction={signInAutomatically} />
+                )}
                 <Button label="List tools again" variant="secondary" size="sm" clickAction={recheck} isDisabled={signedOut} />
               </HStack>
             </VStack>

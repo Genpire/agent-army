@@ -21,6 +21,8 @@ export function SecretField({ label, value, onChange, saved, description, placeh
   return (
     <TextInput
       type="password"
+      // Never a saved password: browsers otherwise fill it in, and the field before it with a saved user name.
+      autoComplete="new-password"
       label={label}
       value={value}
       onChange={(v) => onChange(v)}

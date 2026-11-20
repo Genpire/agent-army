@@ -526,7 +526,12 @@ export function publicView(c: Config) {
       transport: a.transport,
       auth:
         a.auth.type === "oauth"
-          ? { type: "oauth" as const, signedIn: Boolean(a.auth.oauth.tokens) }
+          ? {
+              type: "oauth" as const,
+              signedIn: Boolean(a.auth.oauth.tokens),
+              /** Signs in with an OAuth app the owner registered (apps-oauth.ts OWNER_CLIENT_FLAG), not automatic registration. */
+              ownClient: a.auth.oauth.clientInformation?.entered_by_owner === true,
+            }
           : a.auth.type === "headers"
             ? { type: "headers" as const, headerNames: Object.keys(a.auth.headers).sort() }
             : a.auth.type === "bearer"
