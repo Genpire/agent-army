@@ -8,6 +8,18 @@ import type { CatalogApp } from "./apps-catalog.js";
 
 export const MORE_APPS: CatalogApp[] = [
   {
+    id: "genpire",
+    name: "Genpire",
+    category: "Design",
+    url: "https://mcp.genpire.com/mcp",
+    transport: "http",
+    auth: "oauth",
+    docsUrl: "https://www.genpire.com/integrations/ai-assistants",
+    description: "Design real products: Genpire draws them and saves them in your Genpire account, then keeps working on them with you: changes, options, brand styles, tech packs, colours, print files and Studio images.",
+    examples: ["In Genpire, design a canvas tote bag with our brand style", "Show my latest Genpire products and their tech packs"],
+    notes: "Genpire lets apps it trusts sign in. If the sign-in page says the link is not valid, Genpire has not allowed this deployment yet.",
+  },
+  {
     id: "algolia",
     name: "Algolia",
     category: "AI & search",
