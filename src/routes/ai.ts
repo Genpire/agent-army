@@ -19,7 +19,7 @@ import {
   providerProblem,
   testConnection,
 } from "../ai-providers.js";
-import { AI_PROVIDER_IDS, type AiProviderId, type Config, MODEL_TIERS, type ModelTier, mask } from "../config.js";
+import { AI_PROVIDER_IDS, type AiProviderId, type Config, MODEL_TIERS, type ModelTier, mask } from "../core/config.js";
 import { configSecrets, makeRedactor } from "../worker.js";
 import type { IntegrationRouteDeps } from "./types.js";
 

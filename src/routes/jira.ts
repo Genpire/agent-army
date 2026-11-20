@@ -7,8 +7,8 @@
  */
 import express, { type Request, type Response, Router } from "express";
 import { z } from "zod";
-import { type Config, JIRA_KEY_RE, type JiraProjectAutomation, JiraProjectAutomationSchema, REPO_RE, publicView } from "../config.js";
-import { randomToken, safeEqual } from "../crypto.js";
+import { type Config, JIRA_KEY_RE, type JiraProjectAutomation, JiraProjectAutomationSchema, REPO_RE, publicView } from "../core/config.js";
+import { randomToken, safeEqual } from "../core/crypto.js";
 import { repoAccessError } from "../code-host-access.js";
 import { JiraError, checkJira, jiraClientFor } from "../jira.js";
 import {

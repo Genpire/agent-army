@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ConfigSchema, type Config } from "../src/config.js";
+import { ConfigSchema, type Config } from "../src/core/config.js";
 import {
   MIRO_API_URL,
   MIRO_READ_TOOL_NAMES,

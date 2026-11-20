@@ -6,8 +6,8 @@
  */
 import express, { type Request, type Response, Router } from "express";
 import { z } from "zod";
-import type { Config } from "../config.js";
-import { randomToken } from "../crypto.js";
+import type { Config } from "../core/config.js";
+import { randomToken } from "../core/crypto.js";
 import { GITLAB_DEFAULT_URL, GitLab, gitlabStatus } from "../gitlab.js";
 import { GITLAB_EVENTS, handleGitlabDelivery, verifyGitlabToken } from "../gitlab-webhook.js";
 import { RecentSet } from "../listen.js";

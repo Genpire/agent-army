@@ -1,6 +1,6 @@
-import { decrypt, encrypt } from "./crypto.js";
+import { decrypt, encrypt } from "./core/crypto.js";
 import { sniffImageType } from "./attachments.js";
-import type { Store } from "./store.js";
+import type { Store } from "./core/store.js";
 
 /**
  * Screenshots from a repo task's browser checks, kept in the store and

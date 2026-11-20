@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ConfigRepo } from "../src/config.js";
+import { ConfigRepo } from "../src/core/config.js";
 import {
   ACTIVITY_MAX,
   type ChatMessage,
@@ -17,10 +17,10 @@ import {
   taskResultMarkdown,
   toHistory,
 } from "../src/conversations.js";
-import { deriveKey } from "../src/crypto.js";
+import { deriveKey } from "../src/core/crypto.js";
 import { ActivityMapper, toolLabel } from "../src/pointer-activity.js";
 import type { PointerBrain, PointerContext, PointerReply, PointerRequest } from "../src/pointer-types.js";
-import { FsStore } from "../src/store.js";
+import { FsStore } from "../src/core/store.js";
 import { TimelineRecorder } from "../src/task-events.js";
 import { type Task, TaskRepo, WEB_CHANNEL } from "../src/tasks.js";
 import { defaultTeam } from "../src/team.js";

@@ -24,7 +24,7 @@ import { type NetGuardOptions, AppUrlError, assertPublicUrl } from "./apps-net.j
 import { AppSignInError, type FreshTokenDeps, freshAccessToken } from "./apps-oauth.js";
 import { type AppProxy, type ProxyScope, type ProxySource, appProxy, listAllTools, openUpstream } from "./apps-proxy.js";
 import type { ChatIntegration, ChatIntegrationContext } from "./chat-integrations.js";
-import type { AppConnection, AppTool, Config, ConfigRepo } from "./config.js";
+import type { AppConnection, AppTool, Config, ConfigRepo } from "./core/config.js";
 import { type AgentSpec, enabledAgents } from "./team.js";
 
 /** Listing an app's tools gives up after this. */

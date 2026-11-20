@@ -8,8 +8,8 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { strToU8 } from "fflate";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type AttachmentInfo, AttachmentRepo, type NewAttachment } from "../src/attachments.js";
-import { ConfigRepo, ConfigSchema } from "../src/config.js";
-import { deriveKey } from "../src/crypto.js";
+import { ConfigRepo, ConfigSchema } from "../src/core/config.js";
+import { deriveKey } from "../src/core/crypto.js";
 import { GitHub } from "../src/github.js";
 import { MemoryRepo } from "../src/memory.js";
 import { MONDAY_READ_TOOL_NAMES, MONDAY_TOOL_NAMES, MondayClient, mondayTools } from "../src/monday.js";
@@ -35,7 +35,7 @@ import {
   startRepoTaskTool,
 } from "../src/pointer-tools.js";
 import type { AddAttachment, PointerRequest, StartRepoTask } from "../src/pointer-types.js";
-import { FsStore } from "../src/store.js";
+import { FsStore } from "../src/core/store.js";
 import { defaultTeam } from "../src/team.js";
 
 // Spy on the options the tool server hands to the monday.com tools; the real tools still run.

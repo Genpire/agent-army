@@ -2,7 +2,7 @@ import { createSdkMcpServer, tool, type SdkMcpToolDefinition } from "@anthropic-
 import { z } from "zod";
 import { ATTACHMENT_LIMITS, classify, expandZip, sizeLabel, sniffImageType } from "./attachments.js";
 import type { ChatIntegration, ChatIntegrationContext } from "./chat-integrations.js";
-import { type Config, JIRA_KEY_RE } from "./config.js";
+import { type Config, JIRA_KEY_RE } from "./core/config.js";
 import { type CallToolResult, htmlToText } from "./monday.js";
 import type { AddAttachment } from "./pointer-types.js";
 import { signedUpdate } from "./ticket-sync.js";

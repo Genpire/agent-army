@@ -5,7 +5,7 @@
  * repositories). The one rule every entry point uses: repo tasks, review
  * follow-ups, channel bindings, ticket automations, Pointer's tools.
  */
-import type { Config } from "./config.js";
+import type { Config } from "./core/config.js";
 import { connectionForRepo, describeAllowed as describeGitHubAllowed, hasGitHub } from "./github-access.js";
 import { type CodeHostKind, HOST_TERMS, repoHost, repoPath } from "./repo-id.js";
 

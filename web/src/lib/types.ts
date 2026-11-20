@@ -3,7 +3,7 @@
  * imports: nothing from the server ends up in the browser bundle), so the
  * page and the API cannot drift apart.
  */
-import type { publicView } from "../../../src/config.js";
+import type { publicView } from "../../../src/core/config.js";
 import type { MemoryFact } from "../../../src/memory.js";
 import type { NotesRepo, ProjectNotes } from "../../../src/notes.js";
 import type { MondayBoardSummary } from "../../../src/monday.js";
@@ -95,10 +95,10 @@ export const TASK_PHASE_ORDER = ["clone", "setup", "plan", "build", "verify", "p
 
 export type { AiProviderView, AiProvidersView } from "../../../src/routes/ai.js";
 export type { ModelPrice, PresetCapabilities, PresetField, PresetKind, PresetModel } from "../../../src/ai-presets.js";
-export type { AiProviderId, ModelTier } from "../../../src/config.js";
+export type { AiProviderId, ModelTier } from "../../../src/core/config.js";
 
 /** The model tiers a provider maps, in the order the page shows them (checked against the server's list). */
-export const MODEL_TIER_OPTIONS = ["main", "opus", "sonnet", "haiku", "subagent"] as const satisfies readonly import("../../../src/config.js").ModelTier[];
+export const MODEL_TIER_OPTIONS = ["main", "opus", "sonnet", "haiku", "subagent"] as const satisfies readonly import("../../../src/core/config.js").ModelTier[];
 
 /** The effort levels and access levels, in the order the page offers them (checked against the server's types). */
 export const EFFORT_OPTIONS = ["low", "medium", "high", "xhigh", "max"] as const satisfies readonly Effort[];

@@ -1,7 +1,7 @@
 import { createHmac } from "node:crypto";
 import { WebClient } from "@slack/web-api";
 import { ATTACHMENT_LIMITS } from "./attachments.js";
-import { safeEqual } from "./crypto.js";
+import { safeEqual } from "./core/crypto.js";
 import type { ConversationMessage, SlackFileRef } from "./pointer-types.js";
 import { messageText } from "./targeting.js";
 

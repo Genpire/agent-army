@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parseReport } from "../src/agents.js";
-import { ConfigRepo, ConfigSchema, publicView } from "../src/config.js";
-import { decrypt, deriveKey, encrypt, hashPassword, signSession, verifyPassword, verifySession } from "../src/crypto.js";
+import { ConfigRepo, ConfigSchema, publicView } from "../src/core/config.js";
+import { decrypt, deriveKey, encrypt, hashPassword, signSession, verifyPassword, verifySession } from "../src/core/crypto.js";
 import { checkBashCommand } from "../src/guard.js";
 import { ATTACHMENT_LIMITS } from "../src/attachments.js";
 import {
@@ -18,7 +18,7 @@ import {
   unreact,
   verifySlackSignature,
 } from "../src/slack.js";
-import { FsStore } from "../src/store.js";
+import { FsStore } from "../src/core/store.js";
 import { type Conversation, pendingMilestones, taskResultMarkdown } from "../src/conversations.js";
 import { type Task, decodeTaskPayload, encodeTaskPayload, newTaskId } from "../src/tasks.js";
 import { GITHUB_REPO_RE, REPO_FORMAT_HINT, REPO_RE } from "../src/repo-id.js";

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import type { AgentDefinition } from "@anthropic-ai/claude-agent-sdk";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { type Config, ConfigSchema } from "../src/config.js";
+import { type Config, ConfigSchema } from "../src/core/config.js";
 import {
   ENGINES_SERVER,
   type EngineDeps,

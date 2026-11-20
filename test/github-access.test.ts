@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ConfigSchema } from "../src/config.js";
+import { ConfigSchema } from "../src/core/config.js";
 import { connectionForRepo, describeAllowed, githubTokens, hasGitHub, matchesAllowList } from "../src/github-access.js";
 import { isRepoAllowed } from "../src/targeting.js";
 

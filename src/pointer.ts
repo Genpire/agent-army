@@ -14,7 +14,7 @@ import { defaultModel, fitContentBlocks, providerRuntime } from "./ai-providers.
 import { type AttachmentInfo, type AttachmentRepo, type ThreadRef, toContentBlocks } from "./attachments.js";
 import { type ChatIntegration, chatIntegrations, subagentIntegrationTools } from "./chat-integrations.js";
 import { PendingActions, confirmGate, conversationKey, gatedTools } from "./confirm-gate.js";
-import type { Config } from "./config.js";
+import type { Config } from "./core/config.js";
 import { GitHub } from "./github.js";
 import { isRepoAllowedOnHost } from "./code-host-access.js";
 import type { MemoryFact } from "./memory.js";

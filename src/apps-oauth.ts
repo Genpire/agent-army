@@ -16,8 +16,8 @@ import { type OAuthClientProvider, type OAuthDiscoveryState, auth } from "@model
 import { InvalidClientError, InvalidGrantError, UnauthorizedClientError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import type { OAuthClientInformationMixed, OAuthClientMetadata, OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js";
 import { type FetchLike, type LookupFn, AppUrlError, guardedFetch, privateAppUrlsAllowed } from "./apps-net.js";
-import type { AppAuth, AppConnection, ConfigRepo } from "./config.js";
-import { randomToken, safeEqual } from "./crypto.js";
+import type { AppAuth, AppConnection, ConfigRepo } from "./core/config.js";
+import { randomToken, safeEqual } from "./core/crypto.js";
 
 export type AppOAuth = Extract<AppAuth, { type: "oauth" }>["oauth"];
 

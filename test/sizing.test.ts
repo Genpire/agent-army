@@ -1,6 +1,6 @@
 import type { Options, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { describe, expect, it, vi } from "vitest";
-import { type Config, ConfigSchema } from "../src/config.js";
+import { type Config, ConfigSchema } from "../src/core/config.js";
 import type { QueryFn } from "../src/pointer.js";
 import {
   DEFAULT_ESTIMATES,

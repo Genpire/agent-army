@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Options, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { describe, expect, it } from "vitest";
-import { type Config, ConfigSchema } from "../src/config.js";
+import { type Config, ConfigSchema } from "../src/core/config.js";
 import type { QueryFn } from "../src/pointer.js";
 import { createApp } from "../src/server.js";
 import {

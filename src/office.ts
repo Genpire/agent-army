@@ -1,6 +1,6 @@
 import type { ConversationSummary } from "./conversations.js";
 import type { AgentProgress } from "./progress.js";
-import type { Store } from "./store.js";
+import type { Store } from "./core/store.js";
 import { type TaskEvent, type TaskTimeline, currentPhase, plainLine, readTimeline } from "./task-events.js";
 import { type Task, type TaskPhase, type TaskRepo, WEB_CHANNEL } from "./tasks.js";
 import { type AgentSpec, type Team, agentLabel, enabledAgents } from "./team.js";

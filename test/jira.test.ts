@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { type Config, ConfigSchema } from "../src/config.js";
+import { type Config, ConfigSchema } from "../src/core/config.js";
 import {
   ConfluenceClient,
   JiraClient,

@@ -1,7 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import type { TaskBudgetCheck } from "./budget.js";
-import { type Config, REPO_RE } from "./config.js";
+import { type Config, REPO_RE } from "./core/config.js";
 import { BOT_MARKER, WRITE_ASSOCIATIONS } from "./github.js";
 import { isRepoAllowedOnHost } from "./code-host-access.js";
 import { isJiraConnected } from "./jira.js";
@@ -10,7 +10,7 @@ import { KeyedQueue } from "./listen.js";
 import type { SlackDeps } from "./pointer-types.js";
 import type { WebThreads } from "./conversations.js";
 import { type PrThread, type TaskRepo, WEB_CHANNEL } from "./tasks.js";
-import type { Store } from "./store.js";
+import type { Store } from "./core/store.js";
 import { startThreadTask } from "./thread-task.js";
 import { type TicketClient, appendTicketEvent, ticketPrClosed } from "./ticket-sync.js";
 import { configSecrets, makeRedactor } from "./worker.js";

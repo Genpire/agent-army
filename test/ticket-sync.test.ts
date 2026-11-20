@@ -2,9 +2,9 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { type Config, ConfigRepo, ConfigSchema } from "../src/config.js";
-import { deriveKey } from "../src/crypto.js";
-import { FsStore } from "../src/store.js";
+import { type Config, ConfigRepo, ConfigSchema } from "../src/core/config.js";
+import { deriveKey } from "../src/core/crypto.js";
+import { FsStore } from "../src/core/store.js";
 import { TimelineRecorder, readTimeline } from "../src/task-events.js";
 import { type Task, TaskRepo, WEB_CHANNEL, newTaskId } from "../src/tasks.js";
 import {

@@ -33,8 +33,8 @@ import {
   ToolListChangedNotificationSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { type FetchLike, type NetGuardOptions, assertPublicUrl, guardedFetch } from "./apps-net.js";
-import type { AppConnection } from "./config.js";
-import { randomToken, safeEqual } from "./crypto.js";
+import type { AppConnection } from "./core/config.js";
+import { randomToken, safeEqual } from "./core/crypto.js";
 
 /** The header Claude Code sends the proxy's key in. */
 export const PROXY_KEY_HEADER = "x-proxy-key";

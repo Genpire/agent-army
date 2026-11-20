@@ -1,6 +1,6 @@
 import type { WebClient } from "@slack/web-api";
 import { ATTACHMENT_LIMITS, type AttachmentRepo, type ThreadRef } from "./attachments.js";
-import { type Config, isChatReady } from "./config.js";
+import { type Config, isChatReady } from "./core/config.js";
 import { repoAccessError } from "./code-host-access.js";
 import {
   KeyedQueue,

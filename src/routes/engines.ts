@@ -7,11 +7,11 @@
  */
 import { type Response, Router } from "express";
 import { z } from "zod";
-import { ENGINE_IDS, type EngineId } from "../config.js";
+import { ENGINE_IDS, type EngineId } from "../core/config.js";
 import { ENGINES, engineAgentTemplate, engineAgents } from "../engines.js";
 import { agentIdFor } from "../hr.js";
 import { type AgentSpec, TeamSchema } from "../team.js";
-import { checkGeminiKey, checkOpenAiKey } from "../validate.js";
+import { checkGeminiKey, checkOpenAiKey } from "../core/validate.js";
 import { configSecrets, makeRedactor } from "../worker.js";
 import type { IntegrationRouteDeps } from "./types.js";
 

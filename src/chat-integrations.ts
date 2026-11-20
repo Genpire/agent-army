@@ -9,7 +9,7 @@
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { appChatIntegrations } from "./apps.js";
 import { codeHostChatIntegrations } from "./code-host-tools.js";
-import type { Config, ConfigRepo } from "./config.js";
+import type { Config, ConfigRepo } from "./core/config.js";
 import { jiraChatIntegration } from "./jira.js";
 import { miroChatIntegration } from "./miro.js";
 import type { AddAttachment } from "./pointer-types.js";

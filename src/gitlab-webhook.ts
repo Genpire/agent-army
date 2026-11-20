@@ -17,7 +17,7 @@
  */
 import { z } from "zod";
 import { configSecrets, makeRedactor } from "./worker.js";
-import { safeEqual } from "./crypto.js";
+import { safeEqual } from "./core/crypto.js";
 import { BOT_MARKER, WRITE_ASSOCIATIONS } from "./github.js";
 import { GitLab, associationForAccess, isGitLabBot, mergeRequestWebUrl } from "./gitlab.js";
 import { REPO_ID_MAX, parseRepo, repoId } from "./repo-id.js";

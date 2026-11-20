@@ -13,7 +13,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import { Bitbucket, type BitbucketAccount } from "./bitbucket.js";
-import type { Config } from "./config.js";
+import type { Config } from "./core/config.js";
 import { BOT_MARKER, WRITE_ASSOCIATIONS } from "./github.js";
 import { BITBUCKET_REPO_RE, repoId, repoPath } from "./repo-id.js";
 import {

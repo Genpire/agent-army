@@ -2,7 +2,7 @@ import { mkdtemp, readFile, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { ConfigSchema, type RepoSetup } from "../src/config.js";
+import { ConfigSchema, type RepoSetup } from "../src/core/config.js";
 import {
   cleanOutput,
   findRepoSetup,

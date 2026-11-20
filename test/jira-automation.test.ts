@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { type Config, ConfigSchema, type JiraProjectAutomation } from "../src/config.js";
+import { type Config, ConfigSchema, type JiraProjectAutomation } from "../src/core/config.js";
 import type { DirectTaskResult } from "../src/conversations.js";
 import type { JiraIssueDetails } from "../src/jira.js";
 import {
@@ -23,7 +23,7 @@ import {
 import { START_COOLDOWN_MS, INSTRUCTION_MAX_CHARS } from "../src/monday-automation.js";
 import { normalizeSiteUrl } from "../src/routes/jira.js";
 import { createApp } from "../src/server.js";
-import { FsStore } from "../src/store.js";
+import { FsStore } from "../src/core/store.js";
 import type { Task, TaskTicket } from "../src/tasks.js";
 
 const SITE = "https://acme.atlassian.net";

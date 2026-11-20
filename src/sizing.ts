@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { type Options, query } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { type ProviderRuntime, anthropicRuntime } from "./ai-providers.js";
-import type { Config } from "./config.js";
+import type { Config } from "./core/config.js";
 import type { QueryFn } from "./pointer.js";
 import type { Task } from "./tasks.js";
 import { type Effort, type Route, type Routing, TASK_SIZES, type TaskSize } from "./team.js";

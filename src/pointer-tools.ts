@@ -2,7 +2,7 @@ import { type McpSdkServerConfigWithInstance, createSdkMcpServer, tool } from "@
 import { z } from "zod";
 import type { CodeHostReader } from "./code-host.js";
 import { matchesPathAllowList, repoAccessError } from "./code-host-access.js";
-import type { Config } from "./config.js";
+import type { Config } from "./core/config.js";
 import type { CodeHit, GitHub, ItemState } from "./github.js";
 import { type GitHubConnection, connectionForRepo, describeAllowed, githubConnections, matchesAllowList } from "./github-access.js";
 import type { MemoryRepo } from "./memory.js";

@@ -1,4 +1,4 @@
-import type { Config } from "./config.js";
+import type { Config } from "./core/config.js";
 
 /**
  * Pointer can hold several GitHub connections: the primary one (config.github)

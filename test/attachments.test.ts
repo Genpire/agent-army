@@ -4,8 +4,8 @@ import { join } from "node:path";
 import { strToU8, zipSync } from "fflate";
 import { describe, expect, it } from "vitest";
 import { ATTACHMENT_LIMITS, AttachmentRepo, classify, expandZip, sniffImageType, toContentBlocks } from "../src/attachments.js";
-import { deriveKey } from "../src/crypto.js";
-import { FsStore } from "../src/store.js";
+import { deriveKey } from "../src/core/crypto.js";
+import { FsStore } from "../src/core/store.js";
 
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
 

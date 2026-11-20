@@ -22,11 +22,11 @@ import {
   repoTaskApps,
   setAppAgents,
 } from "../src/apps.js";
-import { type AppConnection, AppConnectionSchema, type Config, ConfigRepo, ConfigSchema } from "../src/config.js";
-import { deriveKey } from "../src/crypto.js";
+import { type AppConnection, AppConnectionSchema, type Config, ConfigRepo, ConfigSchema } from "../src/core/config.js";
+import { deriveKey } from "../src/core/crypto.js";
 import { newAppId } from "../src/routes/apps.js";
 import { createApp } from "../src/server.js";
-import { FsStore } from "../src/store.js";
+import { FsStore } from "../src/core/store.js";
 import { TaskRepo, WEB_CHANNEL } from "../src/tasks.js";
 import { startThreadTask } from "../src/thread-task.js";
 import { defaultTeam } from "../src/team.js";

@@ -9,7 +9,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { FetchLike } from "../src/apps-net.js";
 import { AppProxy, PROXY_KEY_HEADER, type ProxyScope, type ProxySource } from "../src/apps-proxy.js";
 import { allowedToolsOf, readOnlyToolsOf } from "../src/apps.js";
-import { type AppConnection, AppConnectionSchema } from "../src/config.js";
+import { type AppConnection, AppConnectionSchema } from "../src/core/config.js";
 
 const KEY = "up-secret-key-123456";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

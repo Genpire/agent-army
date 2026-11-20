@@ -7,7 +7,7 @@
 import { Bitbucket } from "./bitbucket.js";
 import type { CodeHost } from "./code-host.js";
 import { repoAccessError } from "./code-host-access.js";
-import type { Config } from "./config.js";
+import type { Config } from "./core/config.js";
 import { GitHub } from "./github.js";
 import { connectionForRepo, githubTokens } from "./github-access.js";
 import { GitLab, type GitLabOptions } from "./gitlab.js";

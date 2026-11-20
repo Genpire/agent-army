@@ -1,7 +1,7 @@
 import type { WebClient } from "@slack/web-api";
 import { refreshAppsForTask } from "./apps.js";
 import type { TaskBudgetCheck } from "./budget.js";
-import type { Config, ConfigRepo } from "./config.js";
+import type { Config, ConfigRepo } from "./core/config.js";
 import { repoAccessError } from "./code-host-access.js";
 import { REPO_FORMAT_HINT } from "./repo-id.js";
 import type { Runner } from "./runner.js";

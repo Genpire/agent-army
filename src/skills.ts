@@ -2,11 +2,11 @@ import { createHash, randomBytes } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
-import type { Config, ConfigRepo } from "./config.js";
-import { decrypt, encrypt } from "./crypto.js";
+import type { Config, ConfigRepo } from "./core/config.js";
+import { decrypt, encrypt } from "./core/crypto.js";
 import { encodePath } from "./github.js";
 import { connectionForRepo } from "./github-access.js";
-import type { Store } from "./store.js";
+import type { Store } from "./core/store.js";
 import { SKILLS_PLUGIN, SKILL_NAME_RE, type Team, type TeamSkills } from "./team.js";
 
 /**

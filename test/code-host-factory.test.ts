@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Bitbucket } from "../src/bitbucket.js";
 import { allHostSecrets, codeHostFor } from "../src/code-host-factory.js";
-import { ConfigSchema } from "../src/config.js";
+import { ConfigSchema } from "../src/core/config.js";
 import { type CheckInfo, GitHub } from "../src/github.js";
 import { GitLab } from "../src/gitlab.js";
 

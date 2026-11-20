@@ -1,4 +1,4 @@
-import type { Store } from "./store.js";
+import type { Store } from "./core/store.js";
 import type { Task, TaskRepo } from "./tasks.js";
 
 /**

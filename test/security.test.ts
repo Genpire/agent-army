@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { REPO_RE } from "../src/config.js";
+import { REPO_RE } from "../src/core/config.js";
 import { encodePath } from "../src/github.js";
 import { checkBashCommand } from "../src/guard.js";
 import { subagentReadOnlyGate } from "../src/pointer.js";
@@ -52,11 +52,11 @@ describe("security fixes from review", () => {
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ConfigRepo } from "../src/config.js";
-import { deriveKey } from "../src/crypto.js";
+import { ConfigRepo } from "../src/core/config.js";
+import { deriveKey } from "../src/core/crypto.js";
 import { MemoryRepo } from "../src/memory.js";
 import { createPointerBrain } from "../src/pointer.js";
-import { FsStore } from "../src/store.js";
+import { FsStore } from "../src/core/store.js";
 
 describe("brain options", () => {
   it("never expands prompt syntax and gates subagents", async () => {

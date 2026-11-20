@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { type Config, type ConfigRepo, MONDAY_ID_RE, type MondayBoardAutomation } from "./config.js";
+import { type Config, type ConfigRepo, MONDAY_ID_RE, type MondayBoardAutomation } from "./core/config.js";
 import type { DirectTaskResult } from "./conversations.js";
 import { KeyedQueue } from "./listen.js";
 import { type MondayBoard, MondayClient, type MondayItemDetails, statusColumns } from "./monday.js";
-import type { Store } from "./store.js";
+import type { Store } from "./core/store.js";
 import { plainLine } from "./task-events.js";
 import type { Task, TaskRepo, TaskTicket } from "./tasks.js";
 import { type TicketClient, updateTicket } from "./ticket-sync.js";

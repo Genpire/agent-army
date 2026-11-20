@@ -1,10 +1,10 @@
 import { z } from "zod";
-import { presetFor } from "./ai-presets.js";
-import { isProviderReady } from "./ai-providers.js";
+import { presetFor } from "../ai-presets.js";
+import { isProviderReady } from "../ai-providers.js";
 import { decrypt, deriveKey, encrypt, randomToken } from "./crypto.js";
 import type { Store } from "./store.js";
-import { REPO_RE } from "./repo-id.js";
-import { TeamSchema, defaultTeam } from "./team.js";
+import { REPO_RE } from "../repo-id.js";
+import { TeamSchema, defaultTeam } from "../team.js";
 
 /** Any repository id (GitHub owner/repo, gitlab:group/project, bitbucket:workspace/repo); see repo-id.ts. */
 export { REPO_RE };

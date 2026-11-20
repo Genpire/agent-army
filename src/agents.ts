@@ -1,4 +1,4 @@
-import type { Config } from "./config.js";
+import type { Config } from "./core/config.js";
 import { type CodeHostKind, HOST_TERMS } from "./repo-id.js";
 import { REPO_RULES, hasWriteAgent, rosterText } from "./team.js";
 

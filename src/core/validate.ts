@@ -1,4 +1,4 @@
-import { slackClient } from "./slack.js";
+import { slackClient } from "../slack.js";
 
 /** Each check proves a credential works before the wizard saves it. */
 const skip = () => process.env.SKIP_VALIDATION === "1";

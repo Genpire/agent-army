@@ -17,8 +17,8 @@ import {
   isReady,
   publicView,
   resolveMasterKey,
-} from "./config.js";
-import { hashPassword, randomToken, safeEqual, sessionKey, signSession, verifyPassword, verifySession } from "./crypto.js";
+} from "./core/config.js";
+import { hashPassword, randomToken, safeEqual, sessionKey, signSession, verifyPassword, verifySession } from "./core/crypto.js";
 import { repoAccessError } from "./code-host-access.js";
 import { GITHUB_REPO_RE, REPO_FORMAT_HINT, REPO_ID_MAX, isRepoId } from "./repo-id.js";
 import { CONVERSATION_ID_RE, ConversationService, MESSAGE_MAX_CHARS, type WebThreads } from "./conversations.js";
@@ -46,12 +46,12 @@ import { SCREENSHOT_NAME_RE, ScreenshotRepo, TASK_ID_RE, screenshotType } from "
 import { SCOUT_NEED_MAX_CHARS, findSkills } from "./skill-scout.js";
 import { type FetchLike, SKILL_LIMITS, SkillLibrary, SkillsPluginCache, skillView } from "./skills.js";
 import { buildManifest, manifestCreateUrl, slackClient, verifySlackSignature } from "./slack.js";
-import { createStore } from "./store.js";
+import { createStore } from "./core/store.js";
 import { readTimeline } from "./task-events.js";
 import { TaskRepo } from "./tasks.js";
 import { SKILL_NAME_RE, TeamSchema } from "./team.js";
 import { rememberConsoleUrl } from "./ticket-sync.js";
-import { checkAnthropic, checkGithub, checkSlack } from "./validate.js";
+import { checkAnthropic, checkGithub, checkSlack } from "./core/validate.js";
 import { UsageRepo } from "./usage.js";
 import { handleGithubWebhook, parseGithubPayload, verifyGithubSignature } from "./webhook.js";
 import { configSecrets, makeRedactor } from "./worker.js";

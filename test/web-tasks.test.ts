@@ -5,16 +5,16 @@ import { join } from "node:path";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Screenshot } from "../src/browser.js";
-import { type Config, ConfigRepo, ConfigSchema, resolveMasterKey } from "../src/config.js";
+import { type Config, ConfigRepo, ConfigSchema, resolveMasterKey } from "../src/core/config.js";
 import type { ConversationService } from "../src/conversations.js";
-import { deriveKey } from "../src/crypto.js";
+import { deriveKey } from "../src/core/crypto.js";
 import { MemoryRepo } from "../src/memory.js";
 import { type QueryFn, createPointerBrain } from "../src/pointer.js";
 import type { PointerActivity, PointerBrain, PointerContext, PointerReply, PointerRequest } from "../src/pointer-types.js";
 import { ProgressTracker, type TrackerEvent, browserAction } from "../src/progress.js";
 import { ScreenshotRepo, screenshotName } from "../src/screenshots.js";
 import { createApp } from "../src/server.js";
-import { FsStore, type Store } from "../src/store.js";
+import { FsStore, type Store } from "../src/core/store.js";
 import {
   TASK_EVENTS_MAX,
   TimelineRecorder,

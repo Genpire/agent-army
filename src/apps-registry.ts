@@ -9,7 +9,7 @@
 import { z } from "zod";
 import { APP_CATALOG, type AppAuthKind } from "./apps-catalog.js";
 import { type NetGuardOptions, appUrlProblem, guardedFetch } from "./apps-net.js";
-import { APP_HEADER_RE } from "./config.js";
+import { APP_HEADER_RE } from "./core/config.js";
 
 export const REGISTRY_URL = "https://registry.modelcontextprotocol.io/v0.1/servers";
 export const REGISTRY_CACHE_TTL_MS = 60 * 60_000;

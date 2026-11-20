@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ChatIntegration, ChatIntegrationContext } from "../src/chat-integrations.js";
 import type { CodeHostReader } from "../src/code-host.js";
 import { type CodeHostClients, codeHostChatIntegrations, codeToolHost, repoOnHost } from "../src/code-host-tools.js";
-import { type Config, ConfigSchema } from "../src/config.js";
+import { type Config, ConfigSchema } from "../src/core/config.js";
 import { codeListPulls, codeListRepos, codeReadFile, codeRecentCommits, codeSearchCode } from "../src/pointer-tools.js";
 
 const GITLAB_TOKEN = "glpat-test-token-0000000000";

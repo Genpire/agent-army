@@ -18,7 +18,7 @@ import {
 } from "../src/office.js";
 import type { ProgressSnapshot } from "../src/progress.js";
 import { createApp } from "../src/server.js";
-import type { Store } from "../src/store.js";
+import type { Store } from "../src/core/store.js";
 import { type TaskEvent, type TaskTimeline, emptyTimeline, timelineKey } from "../src/task-events.js";
 import { type Task, WEB_CHANNEL, newTaskId } from "../src/tasks.js";
 import { type Team, agentLabel, defaultTeam } from "../src/team.js";
