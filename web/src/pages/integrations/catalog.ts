@@ -5,8 +5,9 @@
  */
 import { plural } from "../../lib/format";
 import type { PublicConfig } from "../../lib/types";
+import { GENPIRE_PRESET_ID, genpireApp, genpireStatus } from "./genpire/genpire";
 
-export const INTEGRATION_IDS = ["claude", "codex", "gemini", "slack", "github", "gitlab", "bitbucket", "monday", "jira", "miro", "apps"] as const;
+export const INTEGRATION_IDS = ["claude", "codex", "gemini", "slack", "github", "gitlab", "bitbucket", "monday", "jira", "miro", "genpire", "apps"] as const;
 export type IntegrationId = (typeof INTEGRATION_IDS)[number];
 
 export const isIntegrationId = (s: string | undefined): s is IntegrationId => (INTEGRATION_IDS as readonly string[]).includes(s ?? "");
@@ -15,8 +16,31 @@ export const isIntegrationId = (s: string | undefined): s is IntegrationId => (I
 export type StatusTone = "success" | "warning" | "neutral";
 
 /** What kind of integration each is, in order (the hub files them under the catalog's categories: hub/model.ts). */
-export const INTEGRATION_GROUPS = ["Essentials", "AI", "Code", "Work tracking", "Boards", "Apps"] as const;
+export const INTEGRATION_GROUPS = ["Essentials", "AI", "Code", "Work tracking", "Boards", "Design", "Apps"] as const;
 export type IntegrationGroup = (typeof INTEGRATION_GROUPS)[number];
+
+/**
+ * Built-in integrations that are an app connection underneath, by the catalog
+ * preset they connect: their tile and pane show that connection, so the hub
+ * leaves it out of the connected apps and the preset out of what can be added
+ * (hub/model.ts). The catalog entry stays on the server: the pane adds the
+ * connection from it.
+ */
+export const BUILT_IN_APP_PRESETS: ReadonlyMap<string, Exclude<IntegrationId, "apps">> = new Map([[GENPIRE_PRESET_ID, "genpire"]]);
+
+/**
+ * The app connections built-in integrations show, by app id: the first one
+ * added from each of their presets (genpireApp). Any other connection from
+ * the same preset stays an app of its own.
+ */
+export function builtInApps(apps: readonly { id: string; presetId?: string | null }[]): Map<string, Exclude<IntegrationId, "apps">> {
+  const shown = new Map<string, Exclude<IntegrationId, "apps">>();
+  for (const [presetId, id] of BUILT_IN_APP_PRESETS) {
+    const app = apps.find((a) => a.presetId === presetId);
+    if (app) shown.set(app.id, id);
+  }
+  return shown;
+}
 
 export interface IntegrationSummary {
   id: IntegrationId;
@@ -65,9 +89,12 @@ export function summarize(config: PublicConfig): IntegrationSummary[] {
   // A code host is required until one is connected; the others are then optional.
   const codeRequired = !hasCodeHost(config);
   const optional = (connected: boolean, text: string) => (connected ? text : "Optional");
-  const enabledApps = apps.filter((a) => a.enabled).length;
+  // The apps built-in integrations show (Genpire) are counted by their own rows.
+  const builtIn = builtInApps(apps);
+  const enabledApps = apps.filter((a) => a.enabled && !builtIn.has(a.id)).length;
 
-  const rows: Omit<IntegrationSummary, "tone">[] = [
+  // A row sets its tone only where it differs from what `connected` and `required` give (a sign-in that expired).
+  const rows: (Omit<IntegrationSummary, "tone"> & { tone?: StatusTone })[] = [
     {
       id: "claude",
       name: "AI model",
@@ -166,6 +193,14 @@ export function summarize(config: PublicConfig): IntegrationSummary[] {
       status: optional(miro.connected, `Connected${miro.userName ? ` as ${miro.userName}` : ""}`),
     },
     {
+      id: "genpire",
+      name: "Genpire",
+      group: "Design",
+      enables: `Lets ${name} design real products in your Genpire account: products, brand styles, tech packs, print files.`,
+      required: false,
+      ...genpireStatus(genpireApp(apps)),
+    },
+    {
       id: "apps",
       name: "Apps",
       group: "Apps",
@@ -175,7 +210,7 @@ export function summarize(config: PublicConfig): IntegrationSummary[] {
       status: enabledApps > 0 ? plural(enabledApps, "app") + " connected" : "Optional",
     },
   ];
-  return rows.map((r) => ({ ...r, tone: r.connected ? "success" : r.required ? "warning" : "neutral" }));
+  return rows.map((r) => ({ ...r, tone: r.tone ?? (r.connected ? "success" : r.required ? "warning" : "neutral") }));
 }
 
 // ---------- Input helpers (the server validates again) ----------

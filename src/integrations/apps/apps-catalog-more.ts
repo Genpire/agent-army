@@ -17,6 +17,8 @@ export const MORE_APPS: CatalogApp[] = [
     docsUrl: "https://www.genpire.com/integrations/ai-assistants",
     description: "Design real products: Genpire draws them and saves them in your Genpire account, then keeps working on them with you: changes, options, brand styles, tech packs, colours, print files and Studio images.",
     examples: ["In Genpire, design a canvas tote bag with our brand style", "Show my latest Genpire products and their tech packs"],
+    instructions:
+      "Work someone asks for \"in Genpire\" goes through these tools. Designing or editing a product uses the owner's Genpire plan, so do it only when asked. You may prepare a factory quote request, but never send one: sending happens in Genpire itself. Share what Genpire makes as the links it returns.",
     notes: "Genpire lets apps it trusts sign in. If the sign-in page says the link is not valid, Genpire has not allowed this deployment yet.",
   },
   {

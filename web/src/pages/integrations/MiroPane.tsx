@@ -4,7 +4,6 @@
  */
 import { Button } from "@astryxdesign/core/Button";
 import { FormLayout } from "@astryxdesign/core/FormLayout";
-import { List, ListItem } from "@astryxdesign/core/List";
 import { MetadataList, MetadataListItem } from "@astryxdesign/core/MetadataList";
 import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
@@ -19,7 +18,7 @@ import { plural } from "../../lib/format";
 import { useConfig } from "../../lib/state";
 import { type IntegrationSummary, parseList } from "./catalog";
 import { type MiroBoardItem, type MiroBoardSummary, boardDescription, boardIdOf, boardItem, boardRefsError, fetchBoards } from "./miro/boards";
-import { FormActions, FormError, PaneHeader, PaneSection, Steps, Strong, useSave } from "./parts";
+import { Examples, FormActions, FormError, PaneHeader, PaneSection, Steps, Strong, useSave } from "./parts";
 
 export function MiroPane({ summary, onBack }: { summary: IntegrationSummary; onBack?: () => void }) {
   const { config } = useConfig();
@@ -224,19 +223,6 @@ function MiroBoards() {
       <FormActions>
         <Button label="Save boards" variant="primary" isDisabled={Boolean(refsError)} clickAction={submit} />
       </FormActions>
-    </PaneSection>
-  );
-}
-
-/** Requests to try, as a bulleted list under a section title. */
-function Examples({ title, description, examples }: { title: string; description?: string; examples: string[] }) {
-  return (
-    <PaneSection title={title} description={description}>
-      <List listStyle="disc" density="compact">
-        {examples.map((example) => (
-          <ListItem key={example} label={<Text>“{example}”</Text>} align="first-line" />
-        ))}
-      </List>
     </PaneSection>
   );
 }

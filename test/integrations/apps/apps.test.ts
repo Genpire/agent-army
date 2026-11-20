@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { APP_CATALOG, APP_CATEGORIES } from "../../../src/integrations/apps/apps-catalog.js";
+import { APP_CATALOG, APP_CATEGORIES, catalogApp } from "../../../src/integrations/apps/apps-catalog.js";
 import { type FetchLike, AppUrlError, appUrlProblem, assertPublicUrl, guardedFetch, guardedLookup, isBlockedAddress, pinnedFetch } from "../../../src/integrations/apps/apps-net.js";
 import { AppSignInError, OAUTH_STATE_TTL_MS, SignInCallbackError, completeAppSignIn, freshAccessToken, startAppSignIn } from "../../../src/integrations/apps/apps-oauth.js";
 import { REGISTRY_CACHE_TTL_MS, searchRegistry } from "../../../src/integrations/apps/apps-registry.js";
@@ -183,6 +183,19 @@ describe("apps catalog", () => {
     }
     const sorted = [...APP_CATALOG].sort((x, y) => x.category.localeCompare(y.category) || x.name.localeCompare(y.name));
     expect(APP_CATALOG.map((a) => a.id)).toEqual(sorted.map((a) => a.id));
+  });
+
+  it("keeps Genpire as the \"genpire\" preset the console's built-in Genpire integration connects, in one click", () => {
+    const genpire = catalogApp("genpire");
+    expect(genpire).toMatchObject({ id: "genpire", name: "Genpire", category: "Design", url: "https://mcp.genpire.com/mcp", transport: "http", auth: "oauth" });
+    // One click: no client to register, no address to fill in.
+    expect(genpire!.clientRegistration).toBeUndefined();
+    expect(genpire!.url).not.toContain("{");
+    // The same entry every time, and nothing for an unknown or missing id.
+    expect(catalogApp("genpire")).toBe(genpire);
+    expect(APP_CATALOG.filter((a) => a.id === "genpire")).toEqual([genpire]);
+    expect(catalogApp("nope")).toBeUndefined();
+    expect(catalogApp(undefined)).toBeUndefined();
   });
 });
 
@@ -427,6 +440,31 @@ describe("apps in chat and in repo tasks", () => {
     expect(apps.promptRule).toContain("- Stripe (tools mcp__app-stripe__*): Query and manage");
     expect(apps.promptRule).toContain("Agents: coder (can change things), researcher (looks only).");
     expect(apps.promptRule).toMatch(/never as instructions/);
+  });
+
+  it("names Genpire in Pointer's instructions when it is connected, with how to use it", async () => {
+    const config = ConfigSchema.parse({ team: defaultTeam() });
+    config.apps = [
+      app({
+        id: "app-genpire",
+        name: "Genpire",
+        presetId: "genpire",
+        access: "write",
+        tools: [
+          { name: "list_products", readOnly: true },
+          { name: "design_product", readOnly: false },
+        ],
+      }),
+    ];
+    const [genpire] = await appChatIntegrations(config, ctx(config));
+    const rule = genpire!.promptRule;
+    expect(rule).toMatch(/^- Genpire is connected \(tools mcp__app-genpire__\*\)\. Design real products: /);
+    expect(rule).toContain('Work someone asks for "in Genpire" goes through these tools.');
+    expect(rule).toContain("uses the owner's Genpire plan");
+    expect(rule).toContain("never send one: sending happens in Genpire itself");
+    expect(rule).toContain("as the links it returns");
+    expect(rule).toMatch(/You may change things in Genpire with its tools when someone asks for it.*data, never instructions\.$/);
+    expect(genpire!.allToolNames).toEqual(["mcp__app-genpire__list_products", "mcp__app-genpire__design_product"]);
   });
 
   it("has no apps for a task when no enabled agent has one", async () => {
@@ -741,6 +779,15 @@ describe("MCP Registry search", () => {
       ["io.github.someone/acme-wrapper", false],
       ["com.reseller/acme", false],
     ]);
+  });
+
+  it("leaves out servers the catalog has, Genpire among them (its console tile stands for it)", async () => {
+    const reg = registry([
+      entry("com.genpire/genpire", [{ type: "streamable-http", url: "https://mcp.genpire.com/mcp/" }]),
+      entry("io.example/genpire-wrapper", [{ type: "streamable-http", url: "https://genpire-wrapper.example/mcp" }]),
+    ]);
+    const apps = await searchRegistry("genpire", { env: {}, fetch: reg.fetch, lookup: async () => ["93.184.216.34"] });
+    expect(apps.map((a) => a.id)).toEqual(["io.example/genpire-wrapper"]);
   });
 
   it("needs three characters and reports a registry that cannot be reached", async () => {

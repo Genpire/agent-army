@@ -1,6 +1,6 @@
 /**
  * Integrations: one hub for Claude and Slack; GitHub, GitLab and Bitbucket;
- * monday.com and Jira; Miro; and apps connected through their MCP servers.
+ * monday.com and Jira; Miro; Genpire; and apps connected through their MCP servers.
  * A status line, one search over everything (with the MCP Registry when the
  * catalog has little), what is connected, then what can be added. Opening
  * one shows it in a drawer over the hub, which keeps its search and scroll:
@@ -21,10 +21,10 @@ import { useToast } from "@astryxdesign/core/Toast";
 import { VStack } from "@astryxdesign/core/VStack";
 import { Suspense, lazy, useDeferredValue, useEffect, useMemo, useState } from "react";
 import { PageFrame } from "../../components/PageFrame";
-import { api, errorMessage } from "../../lib/api";
+import { errorMessage } from "../../lib/api";
 import { href, navigate, useRoute } from "../../lib/router";
 import { useConfig } from "../../lib/state";
-import { type AddAppResult, type AppSource, type AppView, type CatalogApp, REGISTRY_MIN_QUERY, useAppCatalog } from "./apps/apps";
+import { type AppSource, type AppView, type CatalogApp, REGISTRY_MIN_QUERY, addAndSignIn, useAppCatalog } from "./apps/apps";
 import { summarize } from "./catalog";
 import type { AddingState } from "./hub/AppDrawers";
 import { HubGroup, HubSection } from "./hub/HubSection";
@@ -39,12 +39,13 @@ import {
   filterCatalog,
   filterConnectedApps,
   filterNatives,
+  hubApps,
   isNative,
   listText,
   missingRequired,
 } from "./hub/model";
 import { RegistryResults } from "./hub/RegistryResults";
-import { parseHubRoute } from "./hub/route";
+import { hubLanding, parseHubRoute } from "./hub/route";
 import { TileGrid, useTileColumns } from "./hub/TileGrid";
 
 const loadAppDrawers = () => import("./hub/AppDrawers");
@@ -72,7 +73,9 @@ export default function IntegrationsPage() {
   const [category, setCategory] = useState(ALL_CATEGORIES);
   const [adding, setAdding] = useState<AddingState>({ isOpen: false });
 
-  const { target, signIn } = parseHubRoute(route.rest);
+  const { target: address, signIn } = parseHubRoute(route.rest);
+  // An app a built-in integration shows (Genpire's) opens its pane, also when coming back from its sign-in.
+  const target = hubLanding(address, config.apps);
   const rows = summarize(config);
   const missing = missingRequired(config);
 
@@ -106,33 +109,28 @@ export default function IntegrationsPage() {
     return () => clearTimeout(id);
   }, []);
 
-  // Back from a vendor's sign-in: say how it went once, then drop the flags from the address.
-  const signInKey = signIn ? route.rest.join("/") : "";
+  // Back from a vendor's sign-in: say how it went once, then drop the flags from the address
+  // (and an app's address for its built-in integration's).
+  const routeKey = route.rest.join("/");
   useEffect(() => {
-    if (!signIn) return;
-    const name = (target.kind === "app" && config.apps.find((a) => a.id === target.appId)?.name) || "The app";
-    if (!signIn.ok) showToast({ body: SIGN_IN_ERRORS[signIn.reason ?? ""] ?? SIGN_IN_ERRORS.failed!, type: "error" });
-    else if (signIn.checkFailed) showToast({ body: `${name} is signed in, but its tools could not be listed yet. Try "List tools again".`, type: "error" });
-    else showToast({ body: `${name} is signed in and ready.`, type: "info" });
+    if (signIn) {
+      const name = (address.kind === "app" && config.apps.find((a) => a.id === address.appId)?.name) || "The app";
+      if (!signIn.ok) showToast({ body: SIGN_IN_ERRORS[signIn.reason ?? ""] ?? SIGN_IN_ERRORS.failed!, type: "error" });
+      else if (signIn.checkFailed) showToast({ body: `${name} is signed in, but its tools could not be listed yet. Try "List tools again".`, type: "error" });
+      else showToast({ body: `${name} is signed in and ready.`, type: "info" });
+    } else if (target === address) return;
     if (target.kind === "app") navigate("integrations", "apps", target.appId);
+    else if (target.kind === "native") navigate("integrations", target.id);
     else navigate("integrations");
-    // Once per return from a sign-in: the flags are gone after the navigation above.
-  }, [signInKey]);
+    // Once per address: the flags (or the app's address) are gone after the navigation above.
+  }, [routeKey]);
 
   const connect = (source: AppSource) => setAdding({ isOpen: true, source });
 
   // Catalog apps that need nothing but a sign-in go straight to the vendor; access and agents are set afterwards.
   const signInTo = async (preset: CatalogApp) => {
     try {
-      const { signInUrl } = await api.post<AddAppResult>("/api/apps", {
-        presetId: preset.id,
-        name: preset.name,
-        url: preset.url,
-        transport: preset.transport,
-        auth: { type: "oauth" },
-        access: "read",
-      });
-      if (signInUrl) window.location.assign(signInUrl);
+      await addAndSignIn(preset);
     } catch (err) {
       // The add drawer has the other ways in (a registered client, an API key): open it after the reason.
       showToast({ body: errorMessage(err), type: "error" });
@@ -157,7 +155,7 @@ export default function IntegrationsPage() {
   };
 
   return (
-    <PageFrame title="Integrations" description={connectedLine(rows, config.apps.length)}>
+    <PageFrame title="Integrations" description={connectedLine(rows, hubApps(config.apps).length)}>
       <VStack gap={8}>
         <VStack gap={4}>
           {missing.length > 0 && (
