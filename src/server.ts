@@ -21,7 +21,7 @@ import {
 import { hashPassword, randomToken, safeEqual, sessionKey, signSession, verifyPassword, verifySession } from "./core/crypto.js";
 import { repoAccessError } from "./integrations/code-hosts/code-host-access.js";
 import { GITHUB_REPO_RE, REPO_FORMAT_HINT, REPO_ID_MAX, isRepoId } from "./integrations/code-hosts/repo-id.js";
-import { CONVERSATION_ID_RE, ConversationService, MESSAGE_MAX_CHARS, type WebThreads } from "./chat/conversations.js";
+import { CONVERSATION_ID_RE, ConversationService, MAX_FILES_PER_MESSAGE, MESSAGE_MAX_CHARS, type WebThreads } from "./chat/conversations.js";
 import { handleSlackEvent, withBrainSlot } from "./slack/dispatch.js";
 import { HrService, PROPOSAL_ID_RE, REVIEW_ID_RE } from "./team/hr.js";
 import { RecentSet } from "./slack/listen.js";
@@ -59,6 +59,7 @@ import { removeStaleCredentialFolders } from "./ai/ai-providers.js";
 import { aiRoutes } from "./routes/ai.js";
 import { appsRoutes } from "./routes/apps.js";
 import { bitbucketRoutes } from "./routes/bitbucket.js";
+import { chatRoutes } from "./routes/chat.js";
 import { enginesRoutes } from "./routes/engines.js";
 import { gitlabRoutes } from "./routes/gitlab.js";
 import { jiraRoutes } from "./routes/jira.js";
@@ -209,7 +210,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
   // Spending caps for every start path (Slack, console, GitHub reviews) and chat; alerts in Slack.
   const spending = new Spending({ store, usage, config: () => configRepo.load(), slack: slackFactory });
   // Console conversations: answered by the same brain, within the same limit as Slack answers.
-  const conversations = new ConversationService({ store, configRepo, tasks, runner, brain, usage, spending, brainSlot: withBrainSlot });
+  const conversations = new ConversationService({ store, configRepo, tasks, runner, brain, usage, spending, brainSlot: withBrainSlot, attachments });
   const slackDeps: SlackDeps & { web: WebThreads; spending: Spending } = {
     configRepo,
     tasks,
@@ -723,13 +724,20 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
 
   // ---------- Chat: conversations with Pointer from the console ----------
   // Pointer answers in the background (202); the page polls the conversation.
-  const MESSAGE_TEXT = z.object({
-    text: z
-      .string()
-      .trim()
-      .min(1, "Write a message first.")
-      .max(MESSAGE_MAX_CHARS, `Messages are limited to ${MESSAGE_MAX_CHARS} characters.`),
+  // Files and voice messages are uploaded first (src/routes/chat.ts), then sent by id with a message.
+  const MESSAGE_BODY = z.object({
+    text: z.string().trim().max(MESSAGE_MAX_CHARS, `Messages are limited to ${MESSAGE_MAX_CHARS} characters.`).default(""),
+    attachmentIds: z
+      .array(z.string().max(20).regex(/^a-[0-9a-f]{8}$/, "A file you attached is no longer here. Remove it and attach it again."))
+      .max(MAX_FILES_PER_MESSAGE, `A message can carry ${MAX_FILES_PER_MESSAGE} files.`)
+      .default([]),
   });
+  const hasContent = (m: { text: string; attachmentIds: string[] }) => m.text !== "" || m.attachmentIds.length > 0;
+  const MESSAGE_TEXT = MESSAGE_BODY.refine(hasContent, "Write a message first.");
+  /** POST /api/conversations: with files, the draft id their upload answered. */
+  const FIRST_MESSAGE = MESSAGE_BODY.extend({
+    conversationId: z.string().max(40).regex(CONVERSATION_ID_RE, "The files you attached are no longer waiting here. Attach them again.").optional(),
+  }).refine(hasContent, "Write a message first.");
   const CONVERSATION_NOT_FOUND = "Conversation not found.";
   const conversationParam = (req: Request, res: Response): string | undefined => {
     const id = String(req.params.id ?? "");
@@ -743,9 +751,12 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
   });
 
   app.post("/api/conversations", requireAdmin, async (req, res) => {
-    const input = body(MESSAGE_TEXT, req, res);
+    const input = body(FIRST_MESSAGE, req, res);
     if (!input) return;
-    const result = await conversations.create(input.text);
+    const result = await conversations.create(input.text, {
+      attachmentIds: input.attachmentIds,
+      ...(input.conversationId ? { draftId: input.conversationId } : {}),
+    });
     if (!result.ok) return void res.status(result.status).json({ error: result.error });
     res.status(202).json({ conversation: result.conversation });
   });
@@ -763,7 +774,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
     if (!id) return;
     const input = body(MESSAGE_TEXT, req, res);
     if (!input) return;
-    const result = await conversations.send(id, input.text);
+    const result = await conversations.send(id, input.text, { attachmentIds: input.attachmentIds });
     if (!result.ok) return void res.status(result.status).json({ error: result.error });
     res.status(202).json({ conversation: result.conversation });
   });
@@ -1280,6 +1291,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
   app.use(appsRoutes(routeDeps));
   app.use(enginesRoutes(routeDeps));
   app.use(aiRoutes(routeDeps));
+  app.use(chatRoutes({ ...routeDeps, conversations }));
 
   app.use(express.static(fileURLToPath(new URL("../public", import.meta.url)), { index: "index.html" }));
 
