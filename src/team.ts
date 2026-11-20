@@ -378,9 +378,10 @@ const skillsFor = (a: AgentSpec, skills: TeamSkills | undefined) => {
 /** Agents that can run commands can also start the app and drive the browser; "looks only" agents cannot. */
 const usesBrowser = (a: AgentSpec, opts: RepoAgentOptions) => Boolean(opts.browser) && a.access !== "read";
 
-/** The app servers an agent uses in a repo task: those it has at least one tool on (apps.ts decides which). */
+/** The app servers an agent uses in a repo task: its own routes when given, else those it has at least one tool on (apps.ts decides which). */
 function appServersFor(a: AgentSpec, apps: RepoTaskApps | undefined): AgentMcpServerSpec[] {
   if (!apps) return [];
+  if (apps.serversFor) return Object.entries(apps.serversFor(a.id)).map(([key, server]) => ({ [key]: server }));
   const tools = apps.toolsFor(a.id);
   return Object.entries(apps.servers)
     .filter(([key]) => tools.some((t) => t.startsWith(`mcp__${key}__`)))

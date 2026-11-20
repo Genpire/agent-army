@@ -1,202 +1,257 @@
 /**
- * Integrations: Claude and Slack; GitHub, GitLab and Bitbucket; monday.com and
- * Jira; Miro; and apps connected through their MCP servers. A grouped list
- * with each one's status beside the selected one's pane (`#/integrations/<id>`,
- * `#/integrations/apps/<app id>` for one app).
+ * Integrations: one hub for Claude and Slack; GitHub, GitLab and Bitbucket;
+ * monday.com and Jira; Miro; and apps connected through their MCP servers.
+ * A status line, one search over everything (with the MCP Registry when the
+ * catalog has little), what is connected, then what can be added. Opening
+ * one shows it in a drawer over the hub, which keeps its search and scroll:
+ * `#/integrations/<id>` for a built-in integration, `#/integrations/apps/<app id>`
+ * for an app; closing goes back to `#/integrations`.
  *
- * Responsive contract (useMediaQuery):
- *   >=1120px  list 288 | pane            the list stays in view while the pane scrolls
- *   <1120px   list, or pane + back       `#/integrations` shows the list, `#/integrations/<id>` the pane
+ * Speed: the hub is in the console's main chunk; each pane and the app
+ * drawers are chunks of their own, fetched on first open or while idle. The
+ * catalog is fetched once and kept in memory; search filters in the browser.
  */
+import { Banner } from "@astryxdesign/core/Banner";
+import { Button } from "@astryxdesign/core/Button";
+import { EmptyState } from "@astryxdesign/core/EmptyState";
 import { HStack } from "@astryxdesign/core/HStack";
-import { Icon } from "@astryxdesign/core/Icon";
-import { List, ListItem } from "@astryxdesign/core/List";
-import { NavIcon } from "@astryxdesign/core/NavIcon";
-import { StackItem } from "@astryxdesign/core/Stack";
-import { StatusDot } from "@astryxdesign/core/StatusDot";
+import { Spinner } from "@astryxdesign/core/Spinner";
 import { Text } from "@astryxdesign/core/Text";
+import { useToast } from "@astryxdesign/core/Toast";
 import { VStack } from "@astryxdesign/core/VStack";
-import { useMediaQuery } from "@astryxdesign/core/hooks";
-import { spacingVars } from "@astryxdesign/core/theme/tokens.stylex";
-import {
-  ArchiveBoxIcon,
-  ChatBubbleLeftRightIcon,
-  ChevronRightIcon,
-  CodeBracketIcon,
-  CodeBracketSquareIcon,
-  PresentationChartLineIcon,
-  RectangleStackIcon,
-  SparklesIcon,
-  SquaresPlusIcon,
-  TicketIcon,
-} from "@heroicons/react/24/outline";
-import * as stylex from "@stylexjs/stylex";
-import { type ReactNode, useEffect, useRef } from "react";
+import { Suspense, lazy, useDeferredValue, useEffect, useMemo, useState } from "react";
 import { PageFrame } from "../../components/PageFrame";
+import { api, errorMessage } from "../../lib/api";
 import { href, navigate, useRoute } from "../../lib/router";
 import { useConfig } from "../../lib/state";
-import { AppsPane } from "./AppsPane";
-import { BitbucketPane } from "./BitbucketPane";
+import { type AddAppResult, type AppSource, type AppView, type CatalogApp, REGISTRY_MIN_QUERY, useAppCatalog } from "./apps/apps";
+import { summarize } from "./catalog";
+import type { AddingState } from "./hub/AppDrawers";
+import { HubGroup, HubSection } from "./hub/HubSection";
+import { CatalogTile, ConnectedAppTile, NativeTile } from "./hub/HubTiles";
+import { HubToolbar } from "./hub/HubToolbar";
+import { IntegrationDrawer, preloadPanes } from "./hub/IntegrationDrawer";
 import {
-  INTEGRATION_GROUPS,
-  type IntegrationId,
-  type IntegrationSummary,
-  defaultIntegration,
-  hasCodeHost,
-  isIntegrationId,
-  summarize,
-} from "./catalog";
-import { ClaudePane } from "./ClaudePane";
-import { GitHubPane } from "./GitHubPane";
-import { GitLabPane } from "./GitLabPane";
-import { JiraPane } from "./JiraPane";
-import { MiroPane } from "./MiroPane";
-import { MondayPane } from "./MondayPane";
-import { type HeroIcon, TONE_LABEL } from "./parts";
-import { SlackPane } from "./SlackPane";
+  ALL_CATEGORIES,
+  NATIVE_CATEGORY,
+  byCategory,
+  connectedLine,
+  filterCatalog,
+  filterConnectedApps,
+  filterNatives,
+  isNative,
+  listText,
+  missingRequired,
+} from "./hub/model";
+import { RegistryResults } from "./hub/RegistryResults";
+import { parseHubRoute } from "./hub/route";
+import { TileGrid, useTileColumns } from "./hub/TileGrid";
 
-const ICONS: Record<IntegrationId, HeroIcon> = {
-  claude: SparklesIcon,
-  slack: ChatBubbleLeftRightIcon,
-  github: CodeBracketIcon,
-  gitlab: CodeBracketSquareIcon,
-  bitbucket: ArchiveBoxIcon,
-  monday: RectangleStackIcon,
-  jira: TicketIcon,
-  miro: PresentationChartLineIcon,
-  apps: SquaresPlusIcon,
+const loadAppDrawers = () => import("./hub/AppDrawers");
+const AppDrawers = lazy(loadAppDrawers);
+
+/** Below this many matches, a search also looks in the MCP Registry. */
+const FEW_MATCHES = 3;
+
+const SIGN_IN_ERRORS: Record<string, string> = {
+  invalid: "That sign-in link was not valid or was already used. Start the sign-in again.",
+  expired: "The sign-in took too long. Start it again.",
+  denied: "The sign-in was cancelled at the app.",
+  failed: "The sign-in failed at the last step. Start it again; if it keeps failing, check the app's OAuth settings.",
 };
 
-const styles = stylex.create({
-  // The list stays in view while a long pane (GitHub) scrolls under the page header.
-  sticky: { position: "sticky", top: spacingVars["--spacing-0"], alignSelf: "flex-start" },
-});
+const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
 export default function IntegrationsPage() {
   const { config } = useConfig();
   const route = useRoute();
-  const isNarrow = useMediaQuery("(max-width: 1119px)");
+  const showToast = useToast();
+  const catalog = useAppCatalog();
+  const columns = useTileColumns();
+  const [query, setQuery] = useState("");
+  const [category, setCategory] = useState(ALL_CATEGORIES);
+  const [adding, setAdding] = useState<AddingState>({ isOpen: false });
+
+  const { target, signIn } = parseHubRoute(route.rest);
   const rows = summarize(config);
-  const requested = route.rest[0];
-  const selectedId: IntegrationId | undefined = isIntegrationId(requested) ? requested : isNarrow ? undefined : defaultIntegration(rows);
-  const selected = rows.find((r) => r.id === selectedId);
-  // The three code hosts count as one: any of them is enough.
-  const missing = rows.filter((r) => r.required && !r.connected && r.group !== "Code").length + (hasCodeHost(config) ? 0 : 1);
+  const missing = missingRequired(config);
 
-  const description =
-    missing > 0
-      ? `Claude, Slack and one code host (GitHub, GitLab or Bitbucket) are required; the rest are optional. ${missing} still ${missing === 1 ? "needs" : "need"} connecting.`
-      : "Everything required is connected. Choose one to see who it is connected as, or to change it, or connect more tools and apps.";
+  // Typing stays instant: the tiles follow the search a moment later when there are many.
+  const search = useDeferredValue(query);
+  const filter = useMemo(() => ({ query: search, category }), [search, category]);
+  const natives = filterNatives(rows, filter);
+  const connectedNatives = natives.filter((r) => r.connected);
+  const otherNatives = natives.filter((r) => !r.connected);
+  const connectedApps = useMemo(() => filterConnectedApps(config.apps, catalog.data?.apps, filter), [config.apps, catalog.data, filter]);
+  const catalogApps = useMemo(() => (catalog.data ? filterCatalog(catalog.data.apps, config.apps, filter) : []), [catalog.data, config.apps, filter]);
+  const groups = useMemo(() => (catalog.data ? byCategory(catalogApps, catalog.data.categories) : []), [catalogApps, catalog.data]);
+  const categories = catalog.data?.categories ?? [...new Set(Object.values(NATIVE_CATEGORY))].sort();
 
-  // A newly selected pane starts at its top, not at the previous pane's scroll position.
-  const top = useRef<HTMLElement>(null);
-  const shown = useRef(selectedId);
+  const matches = natives.length + connectedApps.length + catalogApps.length;
+  const searchRegistry = Boolean(catalog.data) && search.trim().length >= REGISTRY_MIN_QUERY && matches < FEW_MATCHES;
+  const connectedCount = connectedNatives.length + connectedApps.length;
+  const addCount = otherNatives.length + catalogApps.length;
+
+  // The pane chunks and the app drawers load while the browser is idle, so opening one does not wait.
   useEffect(() => {
-    if (shown.current === selectedId) return;
-    shown.current = selectedId;
-    scrollContainerToTop(top.current);
-  }, [selectedId]);
+    const preload = () => {
+      preloadPanes();
+      loadAppDrawers().catch(() => undefined);
+    };
+    if ("requestIdleCallback" in window) {
+      const id = window.requestIdleCallback(preload, { timeout: 3000 });
+      return () => window.cancelIdleCallback(id);
+    }
+    const id = setTimeout(preload, 1500);
+    return () => clearTimeout(id);
+  }, []);
 
-  const list = <IntegrationList rows={rows} selectedId={isNarrow ? undefined : selectedId} showChevron={isNarrow} />;
-  const pane = selected && <IntegrationPane key={selected.id} summary={selected} onBack={isNarrow ? () => navigate("integrations") : undefined} />;
+  // Back from a vendor's sign-in: say how it went once, then drop the flags from the address.
+  const signInKey = signIn ? route.rest.join("/") : "";
+  useEffect(() => {
+    if (!signIn) return;
+    const name = (target.kind === "app" && config.apps.find((a) => a.id === target.appId)?.name) || "The app";
+    if (!signIn.ok) showToast({ body: SIGN_IN_ERRORS[signIn.reason ?? ""] ?? SIGN_IN_ERRORS.failed!, type: "error" });
+    else if (signIn.checkFailed) showToast({ body: `${name} is signed in, but its tools could not be listed yet. Try "List tools again".`, type: "error" });
+    else showToast({ body: `${name} is signed in and ready.`, type: "info" });
+    if (target.kind === "app") navigate("integrations", "apps", target.appId);
+    else navigate("integrations");
+    // Once per return from a sign-in: the flags are gone after the navigation above.
+  }, [signInKey]);
+
+  const connect = (source: AppSource) => setAdding({ isOpen: true, source });
+
+  // Catalog apps that need nothing but a sign-in go straight to the vendor; access and agents are set afterwards.
+  const signInTo = async (preset: CatalogApp) => {
+    try {
+      const { signInUrl } = await api.post<AddAppResult>("/api/apps", {
+        presetId: preset.id,
+        name: preset.name,
+        url: preset.url,
+        transport: preset.transport,
+        auth: { type: "oauth" },
+        access: "read",
+      });
+      if (signInUrl) window.location.assign(signInUrl);
+    } catch (err) {
+      // The add drawer has the other ways in (a registered client, an API key): open it after the reason.
+      showToast({ body: errorMessage(err), type: "error" });
+      connect({ kind: "catalog", app: preset });
+    }
+  };
+
+  const onAdded = (app: AppView) => {
+    showToast({ body: `${app.name} added with ${app.tools.length} tools.`, type: "info" });
+    navigate("integrations", "apps", app.id);
+  };
+
+  // The app drawers' chunk mounts on first use and then stays, so the drawers can slide out.
+  const needsAppDrawers = adding.isOpen || target.kind === "app";
+  const [appDrawersMounted, setAppDrawersMounted] = useState(needsAppDrawers);
+  if (needsAppDrawers && !appDrawersMounted) setAppDrawersMounted(true);
+
+  const nativeSummary = target.kind === "native" ? rows.filter(isNative).find((r) => r.id === target.id) : undefined;
+  const clearFilters = () => {
+    setQuery("");
+    setCategory(ALL_CATEGORIES);
+  };
 
   return (
-    <PageFrame title="Integrations" description={description}>
-      <VStack ref={top}>
-        {isNarrow ? (
-          (pane ?? list)
-        ) : (
-          <HStack gap={8} vAlign="start">
-            <StackItem xstyle={styles.sticky}>
-              <VStack width={288}>{list}</VStack>
-            </StackItem>
-            <StackItem size="fill">{pane}</StackItem>
-          </HStack>
+    <PageFrame title="Integrations" description={connectedLine(rows, config.apps.length)}>
+      <VStack gap={8}>
+        <VStack gap={4}>
+          {missing.length > 0 && (
+            <Banner
+              status="warning"
+              title={`${capitalize(listText(missing.map((m) => m.label)))} still ${missing.length === 1 ? "needs" : "need"} connecting`}
+              description="Claude, Slack and one code host (GitHub, GitLab or Bitbucket) are needed before the team can work. Everything else is optional."
+              endContent={<Button label={`Connect ${missing[0]!.name}`} variant="primary" href={href("integrations", missing[0]!.id)} />}
+              collapsible={false}
+            />
+          )}
+          <HubToolbar
+            query={query}
+            onQueryChange={setQuery}
+            category={category}
+            onCategoryChange={setCategory}
+            categories={categories}
+            onAddCustom={() => setAdding({ isOpen: true, source: { kind: "custom" } })}
+          />
+        </VStack>
+
+        {connectedCount > 0 && (
+          <HubSection title="Connected" count={connectedCount}>
+            <TileGrid columns={columns}>
+              {connectedNatives.map((row) => (
+                <NativeTile key={row.id} row={row} />
+              ))}
+              {connectedApps.map((c) => (
+                <ConnectedAppTile key={c.app.id} {...c} />
+              ))}
+            </TileGrid>
+          </HubSection>
         )}
+
+        {(addCount > 0 || !catalog.data) && (
+          <HubSection title="Add more" count={catalog.data ? addCount : undefined}>
+            <VStack gap={6}>
+              {otherNatives.length > 0 && (
+                <HubGroup title="Built in">
+                  <TileGrid columns={columns}>
+                    {otherNatives.map((row) => (
+                      <NativeTile key={row.id} row={row} />
+                    ))}
+                  </TileGrid>
+                </HubGroup>
+              )}
+              {catalog.error && <Banner status="error" title={`Couldn't load the app catalog: ${catalog.error}`} collapsible={false} />}
+              {!catalog.data && !catalog.error && (
+                <HStack gap={2} vAlign="center">
+                  <Spinner size="sm" />
+                  <Text color="secondary">Loading the app catalog…</Text>
+                </HStack>
+              )}
+              {groups.map((group) => (
+                <HubGroup key={group.category} title={group.category}>
+                  <TileGrid columns={columns}>
+                    {group.apps.map((entry) => (
+                      <CatalogTile key={entry.id} entry={entry} onSignIn={signInTo} onConnect={connect} />
+                    ))}
+                  </TileGrid>
+                </HubGroup>
+              ))}
+            </VStack>
+          </HubSection>
+        )}
+
+        {matches === 0 && catalog.data && !searchRegistry && (
+          <EmptyState
+            title="Nothing matches"
+            description="Try another word or category, or add the app as a custom app with its MCP server's address."
+            actions={
+              <HStack gap={2} wrap="wrap" hAlign="center">
+                <Button label="Clear the search" variant="secondary" onClick={clearFilters} />
+                <Button label="Custom app" variant="secondary" onClick={() => setAdding({ isOpen: true, source: { kind: "custom" } })} />
+              </HStack>
+            }
+          />
+        )}
+
+        {searchRegistry && <RegistryResults query={search} connected={config.apps} onConnect={connect} columns={columns} />}
       </VStack>
+
+      <IntegrationDrawer summary={nativeSummary} onClose={() => navigate("integrations")} />
+      {appDrawersMounted && (
+        <Suspense fallback={null}>
+          <AppDrawers
+            appId={target.kind === "app" ? target.appId : undefined}
+            adding={adding}
+            onAddingOpenChange={(isOpen) => setAdding((s) => ({ ...s, isOpen }))}
+            onAdded={onAdded}
+            onAppClose={() => navigate("integrations")}
+          />
+        </Suspense>
+      )}
     </PageFrame>
   );
-}
-
-/** Scrolls the nearest scrolling ancestor (the page content) back to its top. */
-function scrollContainerToTop(el: HTMLElement | null): void {
-  for (let e = el?.parentElement; e; e = e.parentElement) {
-    const { overflowY } = getComputedStyle(e);
-    if (overflowY === "auto" || overflowY === "scroll") {
-      e.scrollTop = 0;
-      return;
-    }
-  }
-}
-
-function IntegrationList({ rows, selectedId, showChevron }: { rows: IntegrationSummary[]; selectedId?: IntegrationId; showChevron: boolean }) {
-  return (
-    <VStack gap={4}>
-      {INTEGRATION_GROUPS.map((group) => {
-        const inGroup = rows.filter((r) => r.group === group);
-        if (inGroup.length === 0) return null;
-        return (
-          <List
-            key={group}
-            header={
-              <Text type="label" color="secondary">
-                {group}
-              </Text>
-            }
-            density="spacious"
-            hasDividers>
-            {inGroup.map((r) => (
-              <ListItem
-                key={r.id}
-                href={href("integrations", r.id)}
-                isSelected={r.id === selectedId}
-                align="start"
-                startContent={<NavIcon icon={<Icon icon={ICONS[r.id]} size="sm" />} />}
-                label={<Text weight="semibold">{r.name}</Text>}
-                description={<RowDescription row={r} />}
-                endContent={showChevron ? <Icon icon={ChevronRightIcon} size="sm" color="secondary" /> : undefined}
-              />
-            ))}
-          </List>
-        );
-      })}
-    </VStack>
-  );
-}
-
-function RowDescription({ row }: { row: IntegrationSummary }): ReactNode {
-  return (
-    <VStack gap={1}>
-      <HStack gap={1.5} vAlign="center">
-        <StatusDot variant={row.tone} label={TONE_LABEL[row.tone]} />
-        <Text type="supporting" color="primary" maxLines={1}>
-          {row.status}
-        </Text>
-      </HStack>
-      <Text type="supporting">{row.enables}</Text>
-    </VStack>
-  );
-}
-
-function IntegrationPane({ summary, onBack }: { summary: IntegrationSummary; onBack?: () => void }) {
-  switch (summary.id) {
-    case "claude":
-      return <ClaudePane summary={summary} onBack={onBack} />;
-    case "slack":
-      return <SlackPane summary={summary} onBack={onBack} />;
-    case "github":
-      return <GitHubPane summary={summary} onBack={onBack} />;
-    case "gitlab":
-      return <GitLabPane summary={summary} onBack={onBack} />;
-    case "bitbucket":
-      return <BitbucketPane summary={summary} onBack={onBack} />;
-    case "monday":
-      return <MondayPane summary={summary} onBack={onBack} />;
-    case "jira":
-      return <JiraPane summary={summary} onBack={onBack} />;
-    case "miro":
-      return <MiroPane summary={summary} onBack={onBack} />;
-    case "apps":
-      return <AppsPane summary={summary} onBack={onBack} />;
-  }
 }

@@ -1,8 +1,9 @@
 /**
  * Brand logos from Simple Icons (CC0; the names and logos are trademarks of
  * their owners), by catalog id (src/apps-catalog.ts) or native integration
- * id. Only the icons named here are bundled, in a chunk of their own that
- * BrandLogo loads when a logo is first shown.
+ * id, plus hand-drawn marks for Slack and monday.com, which Simple Icons does
+ * not carry. Only the icons named here are bundled, in a chunk of their own
+ * that BrandLogo loads when a logo is first shown.
  */
 import {
   siAirtable,
@@ -100,7 +101,51 @@ export interface BrandIcon {
   path: string;
   /** The brand colour, as hex without "#". */
   hex: string;
+  /** A logo in several colours: its shapes, each in its own colour (`path` is all of them, in `hex`). */
+  parts?: readonly BrandIconPart[];
 }
+
+export interface BrandIconPart {
+  /** An SVG path in the same 24×24 view box. */
+  path: string;
+  /** Its colour, as hex without "#". */
+  hex: string;
+}
+
+/** A logo drawn in several colours. */
+const multicolour = (title: string, parts: BrandIconPart[]): BrandIcon => ({
+  title,
+  path: parts.map((p) => p.path).join(""),
+  hex: parts[0]!.hex,
+  parts,
+});
+
+/** Slack: four rounded bars, each with its dot, in its four brand colours. */
+const slack = multicolour("Slack", [
+  {
+    hex: "E01E5A",
+    path: "M5.042 15.165a2.528 2.528 0 0 1-2.52 2.523A2.528 2.528 0 0 1 0 15.165a2.527 2.527 0 0 1 2.522-2.52h2.52v2.52zM6.313 15.165a2.527 2.527 0 0 1 2.521-2.52 2.527 2.527 0 0 1 2.521 2.52v6.313A2.528 2.528 0 0 1 8.834 24a2.528 2.528 0 0 1-2.521-2.522v-6.313z",
+  },
+  {
+    hex: "36C5F0",
+    path: "M8.834 5.042a2.528 2.528 0 0 1-2.521-2.52A2.528 2.528 0 0 1 8.834 0a2.528 2.528 0 0 1 2.521 2.522v2.52H8.834zM8.834 6.313a2.528 2.528 0 0 1 2.521 2.521 2.528 2.528 0 0 1-2.521 2.521H2.522A2.528 2.528 0 0 1 0 8.834a2.528 2.528 0 0 1 2.522-2.521h6.312z",
+  },
+  {
+    hex: "2EB67D",
+    path: "M18.956 8.834a2.528 2.528 0 0 1 2.522-2.521A2.528 2.528 0 0 1 24 8.834a2.528 2.528 0 0 1-2.522 2.521h-2.522V8.834zM17.688 8.834a2.528 2.528 0 0 1-2.523 2.521 2.527 2.527 0 0 1-2.52-2.521V2.522A2.527 2.527 0 0 1 15.165 0a2.528 2.528 0 0 1 2.523 2.522v6.312z",
+  },
+  {
+    hex: "ECB22E",
+    path: "M15.165 18.956a2.528 2.528 0 0 1 2.523 2.522A2.528 2.528 0 0 1 15.165 24a2.527 2.527 0 0 1-2.52-2.522v-2.522h2.52zM15.165 17.688a2.527 2.527 0 0 1-2.52-2.523 2.526 2.526 0 0 1 2.52-2.52h6.313A2.527 2.527 0 0 1 24 15.165a2.528 2.528 0 0 1-2.522 2.523h-6.313z",
+  },
+]);
+
+/** monday.com: two slanted rounded bars and a dot, in red, yellow and green. */
+const monday = multicolour("monday.com", [
+  { hex: "FB275D", path: "M5.9 17.06L10.5 8.76A2.4 2.4 0 0 0 6.3 6.44L1.7 14.74A2.4 2.4 0 0 0 5.9 17.06Z" },
+  { hex: "FFCC00", path: "M13.1 17.06L17.7 8.76A2.4 2.4 0 0 0 13.5 6.44L8.9 14.74A2.4 2.4 0 0 0 13.1 17.06Z" },
+  { hex: "00CA72", path: "M17.6 15.9a2.4 2.4 0 1 0 4.8 0a2.4 2.4 0 1 0 -4.8 0Z" },
+]);
 
 export const LOGOS: Readonly<Record<string, BrandIcon>> = {
   // Apps catalog
@@ -185,9 +230,11 @@ export const LOGOS: Readonly<Record<string, BrandIcon>> = {
   trello: siTrello,
   "weights-and-biases": siWeightsandbiases,
   xero: siXero,
-  // Native integrations (Simple Icons has no Slack or monday.com logo)
+  // Native integrations (Slack and monday.com are drawn above: Simple Icons has neither)
   claude: siClaude,
   anthropic: siAnthropic,
+  slack,
+  monday,
   github: siGithub,
   gitlab: siGitlab,
   bitbucket: siBitbucket,

@@ -10,7 +10,7 @@ import { repoAccessError } from "./code-host-access.js";
 import type { Config } from "./config.js";
 import { GitHub } from "./github.js";
 import { connectionForRepo, githubTokens } from "./github-access.js";
-import { GitLab } from "./gitlab.js";
+import { GitLab, type GitLabOptions } from "./gitlab.js";
 import { REPO_FORMAT_HINT, parseRepo } from "./repo-id.js";
 
 export type CodeHostResult = { ok: true; host: CodeHost } | { ok: false; error: string };
@@ -29,7 +29,9 @@ export function codeHostFor(config: Config, repo: string): CodeHostResult {
     case "gitlab": {
       const token = config.gitlab.token;
       if (!token) return { ok: false, error: "GitLab is not connected. Ask the owner to connect it on the admin page." };
-      return { ok: true, host: new GitLab({ token, baseUrl: config.gitlab.baseUrl }) };
+      // With the allow list, the client checks each project's real path (after redirects and renames) against it.
+      const options: GitLabOptions = { token, baseUrl: config.gitlab.baseUrl, allowed: config.gitlab.allowed };
+      return { ok: true, host: new GitLab(options) };
     }
     case "bitbucket": {
       const token = config.bitbucket.token;

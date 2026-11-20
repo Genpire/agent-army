@@ -225,6 +225,22 @@ describe("apps in repo tasks", () => {
     expect(repoAllowedTools(defaultTeam(), { apps })).toEqual(expect.arrayContaining(apps.allToolNames));
   });
 
+  it("gives each agent its own route when the apps say which (read-only for an agent that only looks)", () => {
+    const routed: RepoTaskApps = {
+      ...apps,
+      serversFor: (id) =>
+        id === "coder"
+          ? { "app-sentry": server("http://127.0.0.1:4000/app-sentry/all") }
+          : id === "researcher"
+            ? { "app-sentry": server("http://127.0.0.1:4000/app-sentry/read") }
+            : {},
+    };
+    const agents = buildRepoAgents(defaultTeam(), { apps: routed });
+    expect(agents.coder!.mcpServers).toEqual([{ "app-sentry": server("http://127.0.0.1:4000/app-sentry/all") }]);
+    expect(agents.researcher!.mcpServers).toEqual([{ "app-sentry": server("http://127.0.0.1:4000/app-sentry/read") }]);
+    expect(agents.qa!.mcpServers).toBeUndefined();
+  });
+
   it("is unchanged without apps", () => {
     expect(buildRepoAgents(defaultTeam(), {})).toEqual(buildRepoAgents(defaultTeam()));
     expect(buildRepoAgents(defaultTeam()).coder!.mcpServers).toBeUndefined();

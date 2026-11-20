@@ -7,8 +7,12 @@
  * deployment's own network (SSRF). Tests (NODE_ENV=test) and local
  * development (ALLOW_PRIVATE_APP_URLS=1) may use private addresses.
  */
+import type { LookupAddress, LookupOptions } from "node:dns";
 import { lookup } from "node:dns/promises";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { BlockList, isIP } from "node:net";
+import { Readable } from "node:stream";
 
 /** The fetch the MCP SDK takes (FetchLike in @modelcontextprotocol/sdk). */
 export type FetchLike = (url: string | URL, init?: RequestInit) => Promise<Response>;
@@ -139,28 +143,114 @@ export async function assertPublicUrl(url: string | URL, opts: Pick<NetGuardOpti
 const timeoutSignal = (signal: AbortSignal | null | undefined, ms: number) =>
   signal ? AbortSignal.any([signal, AbortSignal.timeout(ms)]) : AbortSignal.timeout(ms);
 
+type LookupCallback = (err: NodeJS.ErrnoException | null, address: string | LookupAddress[], family?: number) => void;
+
+/**
+ * A lookup for node:http(s) that resolves with `resolve` and refuses a host
+ * with any blocked address: the connection uses exactly the addresses that
+ * were checked, so a name cannot resolve to a public address for the check
+ * and a private one for the connection (DNS rebinding).
+ */
+export function guardedLookup(resolve: LookupFn = systemLookup) {
+  return (hostname: string, options: LookupOptions, callback: LookupCallback): void => {
+    resolve(hostname).then(
+      (addresses) => {
+        if (!addresses.length || addresses.some(isBlockedAddress)) {
+          const err: NodeJS.ErrnoException = Object.assign(new AppUrlError(PRIVATE_MESSAGE), { code: "EAPPBLOCKED" });
+          return options.all ? callback(err, []) : callback(err, "", 4);
+        }
+        const all = addresses.map((address) => ({ address, family: isIP(address) }));
+        const wanted = options.family ? all.filter((a) => a.family === options.family) : all;
+        if (options.all) return callback(null, wanted);
+        const first = wanted[0];
+        if (!first) return callback(Object.assign(new Error(`No address for ${hostname}`), { code: "ENOTFOUND" }), "", 4);
+        callback(null, first.address, first.family);
+      },
+      (err: NodeJS.ErrnoException) => (options.all ? callback(err, []) : callback(err, "", 4)),
+    );
+  };
+}
+
+function encodeBody(body: RequestInit["body"]): { data?: string | Uint8Array; type?: string } {
+  if (body === undefined || body === null) return {};
+  if (typeof body === "string") return { data: body };
+  if (body instanceof URLSearchParams) return { data: body.toString(), type: "application/x-www-form-urlencoded;charset=UTF-8" };
+  if (body instanceof Uint8Array) return { data: body };
+  if (body instanceof ArrayBuffer) return { data: new Uint8Array(body) };
+  throw new TypeError("This request body type is not supported for app requests.");
+}
+
+/**
+ * fetch over node:http(s) with guardedLookup: the address checked is the
+ * address connected to. It never follows redirects (guardedFetch does, after
+ * checking them) and streams the response body.
+ */
+export function pinnedFetch(opts: Pick<NetGuardOptions, "lookup"> = {}): FetchLike {
+  const lookup = guardedLookup(opts.lookup ?? systemLookup);
+  return (input, init = {}) =>
+    new Promise<Response>((resolve, reject) => {
+      const url = new URL(String(input));
+      const send = url.protocol === "http:" ? httpRequest : httpsRequest;
+      const headers = Object.fromEntries(new Headers(init.headers));
+      const { data, type } = encodeBody(init.body);
+      if (type && !headers["content-type"]) headers["content-type"] = type;
+      if (data !== undefined) headers["content-length"] = String(Buffer.byteLength(data));
+      const method = (init.method ?? "GET").toUpperCase();
+      const req = send(url, { method, headers, lookup, ...(init.signal ? { signal: init.signal } : {}) }, (res) => {
+        const status = res.statusCode ?? 502;
+        const responseHeaders = new Headers();
+        for (const [name, value] of Object.entries(res.headers)) {
+          if (Array.isArray(value)) value.forEach((v) => responseHeaders.append(name, v));
+          else if (value !== undefined) responseHeaders.set(name, value);
+        }
+        const empty = method === "HEAD" || [204, 205, 304].includes(status);
+        if (empty) res.resume();
+        resolve(
+          new Response(empty ? null : (Readable.toWeb(res) as ReadableStream<Uint8Array>), {
+            status: status < 200 || status > 599 ? 502 : status,
+            statusText: res.statusMessage ?? "",
+            headers: responseHeaders,
+          }),
+        );
+      });
+      req.on("error", reject);
+      if (data !== undefined) req.write(data);
+      req.end();
+    });
+}
+
+/** Headers kept when a redirect leaves the origin: nothing that can carry a credential (Authorization, cookies, an app's key header). */
+const CROSS_ORIGIN_HEADERS = new Set(["accept", "accept-language", "content-type", "user-agent", "mcp-protocol-version"]);
+
 /**
  * A fetch that checks every address before connecting, including each
- * redirect's (followed by hand, GET and HEAD only, at most 5), and gives up
- * after a timeout. A caller that asks for redirect "manual" gets the redirect
- * itself, as with fetch.
+ * redirect's (followed by hand, GET and HEAD only, at most 5), connects only
+ * to the addresses it checked (pinnedFetch, unless tests or local development
+ * allow private addresses), and gives up after a timeout. A redirect to
+ * another origin is followed without credentials. A caller that asks for
+ * redirect "manual" gets the redirect itself, as with fetch.
  */
 export function guardedFetch(opts: NetGuardOptions = {}): FetchLike {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const pinned = pinnedFetch(opts);
   return async (input, init = {}) => {
-    const doFetch = opts.fetch ?? ((u: string | URL, i?: RequestInit) => globalThis.fetch(u, i));
+    const doFetch =
+      opts.fetch ?? (privateAppUrlsAllowed(opts.env) ? (u: string | URL, i?: RequestInit) => globalThis.fetch(u, i) : pinned);
     const method = (init.method ?? "GET").toUpperCase();
     const signal = timeoutSignal(init.signal, timeoutMs);
     let url = String(input);
+    let headers = new Headers(init.headers);
     for (let hop = 0; ; hop++) {
       await assertPublicUrl(url, opts);
-      const res = await doFetch(url, { ...init, signal, redirect: "manual" });
+      const res = await doFetch(url, { ...init, headers, signal, redirect: "manual" });
       const location = res.status >= 300 && res.status < 400 ? res.headers.get("location") : null;
       if (!location || init.redirect === "manual") return res;
       if (init.redirect === "error") throw new TypeError(`Redirected from ${new URL(url).host}`);
       if ((method !== "GET" && method !== "HEAD") || hop >= MAX_REDIRECTS) return res;
       await res.body?.cancel().catch(() => undefined);
-      url = new URL(location, url).href;
+      const next = new URL(location, url);
+      if (next.origin !== new URL(url).origin) headers = new Headers([...headers].filter(([name]) => CROSS_ORIGIN_HEADERS.has(name)));
+      url = next.href;
     }
   };
 }

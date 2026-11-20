@@ -225,7 +225,14 @@ export async function startAppSignIn(appId: string, deps: OAuthDeps): Promise<st
   const url = provider.authorizationUrl;
   if (!url) throw new Error(`${app.name} did not ask for a sign-in.`);
   if (url.protocol !== "https:" && !privateAppUrlsAllowed(deps.env)) throw new Error(`${app.name}'s sign-in page is not on an https:// address.`);
-  await saveOAuth(deps.configRepo, appId, () => ({ ...data, state: `${state}:${now()}` }));
+  // Only what the start changed, onto the app as it is now (an admin may have edited it meanwhile).
+  await saveOAuth(deps.configRepo, appId, (current) => ({
+    ...current,
+    clientInformation: data.clientInformation,
+    serverMetadata: data.serverMetadata,
+    codeVerifier: data.codeVerifier,
+    state: `${state}:${now()}`,
+  }));
   return url.href;
 }
 
@@ -262,12 +269,23 @@ export async function completeAppSignIn(input: { state: string; code?: string },
     throw new SignInCallbackError("failed", signInProblem(match, err, deps.baseUrl), appId);
   }
   if (!provider.data.tokens) throw new SignInCallbackError("failed", `${match.name} sent no tokens.`, appId);
-  await saveOAuth(deps.configRepo, appId, () => ({ ...provider.data, codeVerifier: undefined, state: undefined }));
+  const signedIn = provider.data;
+  await saveOAuth(deps.configRepo, appId, (current) => ({ ...current, ...issued(signedIn, current), codeVerifier: undefined, state: undefined }));
   return { appId };
 }
 
-// One refresh per app at a time in this process: a second refresh with the same refresh token could be refused.
+/** What a token exchange or refresh changed: the tokens, and the client and discovery the SDK may have stamped. */
+const issued = (data: AppOAuth, current: AppOAuth): Partial<AppOAuth> => ({
+  tokens: data.tokens,
+  expiresAt: data.expiresAt,
+  clientInformation: data.clientInformation ?? current.clientInformation,
+  serverMetadata: data.serverMetadata ?? current.serverMetadata,
+});
+
+// Refreshes run one at a time in this process (the web service; repo tasks never refresh), and one per app:
+// a second refresh with the same refresh token could be refused, and a provider that rotates them may revoke the grant.
 const refreshing = new Map<string, Promise<string>>();
+let refreshQueue: Promise<unknown> = Promise.resolve();
 
 const accessTokenOf = (oauth: AppOAuth) => (typeof oauth.tokens?.access_token === "string" ? oauth.tokens.access_token : undefined);
 const refreshTokenOf = (oauth: AppOAuth) => (typeof oauth.tokens?.refresh_token === "string" ? oauth.tokens.refresh_token : undefined);
@@ -299,7 +317,9 @@ export async function freshAccessToken(app: AppConnection, deps: FreshTokenDeps 
   }
   const running = refreshing.get(app.id);
   if (running) return running;
-  const run = refresh(app, { ...deps, configRepo: deps.configRepo, now, margin }).finally(() => refreshing.delete(app.id));
+  const configRepo = deps.configRepo;
+  const run = refreshQueue.then(() => refresh(app, { ...deps, configRepo, now, margin })).finally(() => refreshing.delete(app.id));
+  refreshQueue = run.catch(() => undefined);
   refreshing.set(app.id, run);
   return run;
 }
@@ -335,7 +355,9 @@ async function refresh(app: AppConnection, deps: FreshTokenDeps & { configRepo: 
   }
   const refreshed = accessTokenOf(provider.data);
   if (!failure && refreshed) {
-    await saveOAuth(deps.configRepo, app.id, (current) => ({ ...provider.data, state: current.state, codeVerifier: current.codeVerifier }));
+    // Only the tokens, onto the app as it is now; not over a new sign-in made meanwhile.
+    const renewed = provider.data;
+    await saveOAuth(deps.configRepo, app.id, (current) => (refreshTokenOf(current) === tried ? { ...current, ...issued(renewed, current) } : undefined));
     return refreshed;
   }
   if (!provider.data.tokens || failure instanceof InvalidGrantError) {

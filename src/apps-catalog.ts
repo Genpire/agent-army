@@ -528,10 +528,10 @@ const BASE_APPS: CatalogApp[] = [
   },
 ];
 
-/** A catalog entry by id. */
 /** Every catalog app (these and apps-catalog-more.ts), sorted by category, then name. */
 export const APP_CATALOG: CatalogApp[] = [...BASE_APPS, ...MORE_APPS].sort(
   (x, y) => x.category.localeCompare(y.category) || x.name.localeCompare(y.name),
 );
 
+/** A catalog entry by id. */
 export const catalogApp = (id: string | undefined): CatalogApp | undefined => (id ? APP_CATALOG.find((a) => a.id === id) : undefined);

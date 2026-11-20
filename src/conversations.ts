@@ -604,7 +604,7 @@ export class ConversationService implements WebThreads {
     const ticket = input.ticket ?? (await this.tasksOf(conversation)).reverse().find((t) => t.ticket && t.repo.toLowerCase() === input.repo.toLowerCase())?.ticket;
     const config = await this.deps.configRepo.load();
     const started = await startThreadTask(
-      { tasks: this.deps.tasks, runner: this.deps.runner, redact: makeRedactor(configSecrets(config)), budget: this.deps.spending },
+      { tasks: this.deps.tasks, runner: this.deps.runner, redact: makeRedactor(configSecrets(config)), budget: this.deps.spending, configRepo: this.deps.configRepo },
       {
         repo: input.repo,
         channel: WEB_CHANNEL,
