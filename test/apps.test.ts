@@ -1,19 +1,23 @@
 import { mkdtemp } from "node:fs/promises";
+import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { APP_CATALOG, APP_CATEGORIES } from "../src/apps-catalog.js";
-import { type FetchLike, AppUrlError, appUrlProblem, assertPublicUrl, guardedFetch, isBlockedAddress } from "../src/apps-net.js";
+import { type FetchLike, AppUrlError, appUrlProblem, assertPublicUrl, guardedFetch, guardedLookup, isBlockedAddress, pinnedFetch } from "../src/apps-net.js";
 import { AppSignInError, OAUTH_STATE_TTL_MS, SignInCallbackError, completeAppSignIn, freshAccessToken, startAppSignIn } from "../src/apps-oauth.js";
 import { REGISTRY_CACHE_TTL_MS, searchRegistry } from "../src/apps-registry.js";
+import { AppProxy, PROXY_KEY_HEADER } from "../src/apps-proxy.js";
 import {
+  EXPIRED_IN_TASK,
   allowedToolsOf,
   appChatIntegrations,
   appToolName,
   listAppTools,
   mcpServerConfig,
   readOnlyToolsOf,
+  refreshAppsForTask,
   removeApp,
   repoTaskApps,
   setAppAgents,
@@ -23,6 +27,8 @@ import { deriveKey } from "../src/crypto.js";
 import { newAppId } from "../src/routes/apps.js";
 import { createApp } from "../src/server.js";
 import { FsStore } from "../src/store.js";
+import { TaskRepo, WEB_CHANNEL } from "../src/tasks.js";
+import { startThreadTask } from "../src/thread-task.js";
 import { defaultTeam } from "../src/team.js";
 
 const PUBLIC = { env: {} as NodeJS.ProcessEnv };
@@ -231,9 +237,58 @@ describe("app address guard (SSRF)", () => {
     };
     await expect(guardedFetch({ env: {}, lookup, fetch })("https://a.example.com/start")).rejects.toBeInstanceOf(AppUrlError);
     expect(hops).toEqual(["https://a.example.com/start", "https://other.example.com/next"]);
-    // A POST is not redirected; a "manual" caller gets the redirect itself.
+    // A POST is not followed; a "manual" caller gets the redirect itself.
     expect((await guardedFetch({ env: {}, lookup, fetch })("https://a.example.com/start", { method: "POST" })).status).toBe(302);
     expect((await guardedFetch({ env: {}, lookup, fetch })("https://a.example.com/start", { redirect: "manual" })).status).toBe(302);
+  });
+
+  it("keeps credentials on a same-origin redirect and drops them when a redirect leaves the origin", async () => {
+    const lookup = async () => ["93.184.216.34"];
+    const to = (location: string) => new Response(null, { status: 302, headers: { location } });
+    const seen = new Map<string, Record<string, string>>();
+    const fetch: FetchLike = async (url, init) => {
+      seen.set(String(url), Object.fromEntries(new Headers(init?.headers)));
+      if (String(url).endsWith("/start")) return to("/same");
+      if (String(url).endsWith("/same")) return to("https://other.example.com/next");
+      if (String(url).endsWith("/next")) return to("https://a.example.com/back");
+      return new Response("ok");
+    };
+    const headers = { Authorization: "Bearer app-key", Cookie: "session=1", "X-API-Key": "custom-key", "Proxy-Authorization": "Basic x", Accept: "application/json" };
+    expect((await guardedFetch({ env: {}, lookup, fetch })("https://a.example.com/start", { headers })).status).toBe(200);
+    expect(seen.get("https://a.example.com/same")).toMatchObject({ authorization: "Bearer app-key", cookie: "session=1", "x-api-key": "custom-key" });
+    expect(seen.get("https://other.example.com/next")).toEqual({ accept: "application/json" });
+    // Once dropped they stay dropped, even back on the first origin.
+    expect(seen.get("https://a.example.com/back")).toEqual({ accept: "application/json" });
+  });
+
+  it("connects only to the addresses it checked (pinned DNS)", async () => {
+    const http = createServer(async (req, res) => {
+      const chunks: Buffer[] = [];
+      for await (const c of req) chunks.push(c as Buffer);
+      res.writeHead(201, { "content-type": "application/json", "x-reply": "yes" });
+      res.write('{"method":"' + req.method + '",');
+      setTimeout(() => res.end(`"header":"${req.headers["x-test"]}","body":${Buffer.concat(chunks).toString("utf8")}}`), 10);
+    });
+    await new Promise<void>((r) => http.listen(0, "127.0.0.1", () => r()));
+    const port = (http.address() as AddressInfo).port;
+    try {
+      // An address is connected to as given; the request and the streamed response go through.
+      const res = await pinnedFetch()(`http://127.0.0.1:${port}/echo`, { method: "POST", headers: { "x-test": "1", "content-type": "application/json" }, body: '{"a":1}' });
+      expect(res.status).toBe(201);
+      expect(res.headers.get("x-reply")).toBe("yes");
+      expect(await res.json()).toEqual({ method: "POST", header: "1", body: { a: 1 } });
+      // A name is resolved by the guard at connect time: one that resolves to a private address is refused.
+      await expect(pinnedFetch({ lookup: async () => ["127.0.0.1"] })(`http://local.example.com:${port}/echo`)).rejects.toThrow(/private network/);
+    } finally {
+      await new Promise<void>((r) => http.close(() => r()));
+    }
+    const resolved = await new Promise<unknown>((resolve) =>
+      guardedLookup(async () => ["93.184.216.34", "2606:4700::1111"])("ok.example.com", { all: true }, (err, addresses) => resolve(err ?? addresses)),
+    );
+    expect(resolved).toEqual([
+      { address: "93.184.216.34", family: 4 },
+      { address: "2606:4700::1111", family: 6 },
+    ]);
   });
 });
 
@@ -246,21 +301,29 @@ describe("app tools: read and write access", () => {
     expect(appToolName(app(), "delete.issue")).toBe("mcp__app-linear__delete_issue");
   });
 
-  it("builds the SDK server: headers, always loaded, the rest denied", async () => {
-    const server = await mcpServerConfig(app());
-    expect(server).toEqual({
-      type: "http",
-      url: "https://mcp.example.com/mcp",
-      headers: { Authorization: "Bearer lin_api_secret_key_123456" },
-      alwaysLoad: true,
-      tools: [
-        { name: "create_issue", permission_policy: "always_deny" },
-        { name: "delete.issue", permission_policy: "always_deny" },
-      ],
-    });
-    const sse = await mcpServerConfig(app({ transport: "sse", access: "write", auth: { type: "headers", headers: { "X-API-Key": "k-123456789" } } }));
-    expect(sse).toEqual({ type: "sse", url: "https://mcp.example.com/mcp", headers: { "X-API-Key": "k-123456789" }, alwaysLoad: true });
-    await expect(mcpServerConfig(app({ url: "https://10.0.0.1/mcp" }), PUBLIC)).rejects.toBeInstanceOf(AppUrlError);
+  it("gives Claude Code the proxy's loopback route and key, never the app's address or credentials", async () => {
+    const proxy = new AppProxy();
+    try {
+      const server = await mcpServerConfig(app(), { proxy });
+      expect(server).toEqual({
+        type: "http",
+        url: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/app-linear\/all$/),
+        headers: { [PROXY_KEY_HEADER]: proxy.secret },
+        alwaysLoad: true,
+        tools: [
+          { name: "create_issue", permission_policy: "always_deny" },
+          { name: "delete.issue", permission_policy: "always_deny" },
+        ],
+      });
+      // An SSE app is reached by the proxy; Claude Code still speaks Streamable HTTP to the proxy.
+      const sse = await mcpServerConfig(app({ transport: "sse", access: "write", auth: { type: "headers", headers: { "X-API-Key": "k-123456789" } } }), { proxy, scope: "read" });
+      expect(sse).toMatchObject({ type: "http", url: expect.stringMatching(/\/app-linear\/read$/), alwaysLoad: true });
+      const shown = JSON.stringify([server, sse]);
+      for (const secret of ["lin_api_secret_key_123456", "k-123456789", "mcp.example.com"]) expect(shown).not.toContain(secret);
+      await expect(mcpServerConfig(app({ url: "https://10.0.0.1/mcp" }), { ...PUBLIC, proxy })).rejects.toBeInstanceOf(AppUrlError);
+    } finally {
+      await proxy.close();
+    }
   });
 
   it("lists tools over Streamable HTTP with the key, page by page, with read-only hints", async () => {
@@ -334,10 +397,20 @@ describe("apps in chat and in repo tasks", () => {
   it("gives each agent its apps' servers and tools in a repo task; looks-only agents get read-only tools", async () => {
     const config = configWithApps();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const apps = (await repoTaskApps(config, { redact }))!;
-    expect(warn).toHaveBeenCalledWith("[worker] app Notion left out:", expect.stringMatching(/not signed in/));
+    const notes: string[] = [];
+    const proxy = new AppProxy();
+    const apps = (await repoTaskApps(config, { redact, proxy, note: (n) => notes.push(n) }))!;
+    expect(warn).toHaveBeenCalledWith("[worker] app Notion left out:", EXPIRED_IN_TASK);
+    expect(notes).toEqual([`Notion left out: ${EXPIRED_IN_TASK}.`]);
     warn.mockRestore();
     expect(Object.keys(apps.servers).sort()).toEqual(["app-linear", "app-stripe"]);
+    // Each agent starts its own route: the full one, or the read-only one for an agent that only looks.
+    const route = (agent: string, key: string) => (apps.serversFor!(agent)[key] as { url: string } | undefined)?.url;
+    expect(route("coder", "app-stripe")).toMatch(/\/app-stripe\/all$/);
+    expect(route("researcher", "app-stripe")).toMatch(/\/app-stripe\/read$/);
+    expect(Object.keys(apps.serversFor!("qa"))).toEqual([]);
+    expect(JSON.stringify(apps.servers)).not.toContain("rk_live_secret_987654321");
+    await proxy.close();
     expect(apps.toolsFor("coder")).toEqual([
       "mcp__app-linear__search_issues",
       "mcp__app-linear__get_issue",
@@ -487,6 +560,114 @@ describe("app OAuth", () => {
     const repo3 = await configRepoWith((c) => void (c.apps = [moved]));
     await expect(freshAccessToken((await repo3.load(true)).apps[0]!, { configRepo: repo3, fetch: idle.fetch, now: () => now })).rejects.toThrow(/Sign in again/);
     expect(idle.calls).toHaveLength(0);
+  });
+});
+
+describe("OAuth tokens and repo tasks", () => {
+  const now = 1_800_000_000_000;
+  const signedIn = (id: string, expiresAt: number, refresh = "refresh-token-0") =>
+    app({
+      id,
+      name: id.replace("app-", ""),
+      tools: [{ name: "search_issues", readOnly: true }],
+      auth: {
+        type: "oauth",
+        oauth: {
+          clientInformation: { client_id: "client-1" },
+          tokens: { access_token: `access-${id}`, refresh_token: refresh, token_type: "Bearer" },
+          expiresAt,
+          serverMetadata: { authorizationServerUrl: "https://auth.example.com" },
+        },
+      },
+    });
+  const assign = (c: Config, ids: string[]) => void (c.team.agents.find((a) => a.id === "coder")!.apps = ids);
+
+  it("uses a stored token in a repo task only while it is valid, and never renews it there", async () => {
+    const auth = fakeOAuth();
+    const config = ConfigSchema.parse({ team: defaultTeam() });
+    config.apps = [signedIn("app-valid", now + 10 * 60_000), signedIn("app-expired", now - 1)];
+    assign(config, ["app-valid", "app-expired"]);
+    const notes: string[] = [];
+    const proxy = new AppProxy();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const apps = (await repoTaskApps(config, { redact, proxy, fetch: auth.fetch, now: () => now, note: (n) => notes.push(n) }))!;
+    warn.mockRestore();
+    await proxy.close();
+    expect(Object.keys(apps.servers)).toEqual(["app-valid"]);
+    expect(notes).toEqual([`expired left out: ${EXPIRED_IN_TASK}.`]);
+    // Nothing was renewed (no token request), and there is no ConfigRepo to write to.
+    expect(auth.calls).toHaveLength(0);
+  });
+
+  it("renews before a task, in the web service, the tokens that would expire during it", async () => {
+    const auth = fakeOAuth();
+    const repo = await configRepoWith((c) => {
+      c.apps = [signedIn("app-soon", now + 20 * 60_000), signedIn("app-later", now + 2 * 3_600_000), signedIn("app-unused", now + 60_000)];
+      assign(c, ["app-soon", "app-later"]);
+    });
+    await refreshAppsForTask(repo, { redact, fetch: auth.fetch, now: () => now });
+    expect(auth.calls.filter((c) => c.body?.get("grant_type") === "refresh_token")).toHaveLength(1);
+    const tokens = Object.fromEntries((await repo.load(true)).apps.map((a) => [a.id, a.auth.type === "oauth" ? a.auth.oauth.tokens?.access_token : undefined]));
+    expect(tokens).toEqual({ "app-soon": "access-token-1", "app-later": "access-app-later", "app-unused": "access-app-unused" });
+
+    // A refused renewal never stops the task from starting.
+    const refused = fakeOAuth({ refreshRefused: true });
+    const repo2 = await configRepoWith((c) => {
+      c.apps = [signedIn("app-soon", now + 60_000)];
+      assign(c, ["app-soon"]);
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await expect(refreshAppsForTask(repo2, { redact, fetch: refused.fetch, now: () => now })).resolves.toBeUndefined();
+    warn.mockRestore();
+  });
+
+  it("renews the team's sign-ins before a repo task's worker is launched", async () => {
+    const order: string[] = [];
+    const auth = fakeOAuth();
+    const realFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.host !== "auth.example.com" && url.host !== "mcp.example.com") return realFetch(input, init);
+      if (url.pathname === "/token") order.push("renew");
+      return auth.handle(url.href, init);
+    });
+    try {
+      // A token that expires within the task's horizon (50 minutes), at today's clock.
+      const repo = await configRepoWith((c) => {
+        c.apps = [signedIn("app-soon", Date.now() + 10 * 60_000)];
+        assign(c, ["app-soon"]);
+      });
+      const tasks = new TaskRepo(new FsStore(await mkdtemp(join(tmpdir(), "army-apps-task-"))));
+      const runner = { kind: "local" as const, launch: async () => void order.push("launch") };
+      const started = await startThreadTask(
+        { tasks, runner, configRepo: repo },
+        { repo: "acme/web", channel: WEB_CHANNEL, threadTs: "conversation-1", userId: "admin", instruction: "Fix the login bug", ackText: "" },
+      );
+      expect(started.ok).toBe(true);
+      expect(order).toEqual(["renew", "launch"]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("never writes a renewed token over a sign-in made meanwhile, and only changes the sign-in", async () => {
+    const repo = await configRepoWith((c) => void (c.apps = [signedIn("app-linear", now - 1)]));
+    const base = fakeOAuth();
+    const fetch: FetchLike = async (url, init) => {
+      if (String(url).endsWith("/token")) {
+        // The owner signs in again, and renames the app, while the renewal is on its way.
+        await repo.update((c) => {
+          const a = c.apps[0]!;
+          a.name = "Linear (work)";
+          if (a.auth.type === "oauth") a.auth.oauth.tokens = { access_token: "newer-access", refresh_token: "newer-refresh", token_type: "Bearer" };
+        });
+      }
+      return base.fetch(url, init);
+    };
+    expect(await freshAccessToken((await repo.load(true)).apps[0]!, { configRepo: repo, fetch, now: () => now })).toBe("access-token-1");
+    const saved = (await repo.load(true)).apps[0]!;
+    expect(saved.name).toBe("Linear (work)");
+    expect(saved.auth.type === "oauth" && saved.auth.oauth.tokens).toMatchObject({ access_token: "newer-access", refresh_token: "newer-refresh" });
   });
 });
 

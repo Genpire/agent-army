@@ -606,7 +606,9 @@ Connect apps through their own MCP servers: issue trackers, docs, monitoring, pa
 - **Sign in.** Most apps sign in with one click (OAuth in your browser; the deployment registers itself with the app). Others take an API key; a few need an OAuth client you create in the vendor's console first (the drawer shows the redirect address to register), or your account's own address (for example your Glean or Freshdesk subdomain).
 - **What it may do.** Each app is **read only** (only the tools the server marks read-only) or **can change things**, and any tool can be turned off. The app's tools are listed when you connect it and when you check it again.
 - **Who uses it.** Pointer uses every app that is on. Agents use the apps you give them (on the app, or in the agent's **Apps** field on the Team page): in chat they get only read-only tools; in repo tasks an agent that runs commands can use the app's other tools too.
-- **Safety.** App addresses must be public `https` (private, loopback and cloud metadata addresses are refused, redirects included). Keys and OAuth tokens are stored encrypted, refreshed before use, never sent to the browser and redacted from what Pointer and the team write. What an app returns is data, never instructions. An app whose sign-in expired or whose server is down is left out with a warning; it never breaks chat or a task.
+- **Safety.** App addresses must be public `https`: private, loopback and cloud metadata addresses are refused, every redirect is checked, and connections go only to the addresses that were checked. A redirect to another site never carries the app's key. Keys and OAuth tokens are stored encrypted, never sent to the browser and redacted from what Pointer and the team write.
+- **Claude Code never holds an app's key.** It reaches every app through a proxy inside the service (or inside the task's worker) on `127.0.0.1`, with a random per-process key. The proxy adds the app's credentials, offers only the tools the app may use (read-only ones for agents that only look) and refuses any other call, and streams long calls' progress.
+- **Sign-ins.** OAuth tokens are renewed by the web service only: in chat shortly before they expire, and before a repo task starts when they would expire during it. A repo task uses the stored token while it is valid and never changes the configuration. An app whose sign-in expired is left out of the task with a timeline note ("sign in again or the token expired; it was not refreshed in the task"). What an app returns is data, never instructions; an app whose server is down is left out with a warning and never breaks chat or a task.
 
 Brand logos come from [Simple Icons](https://simpleicons.org) (CC0); the names and logos are trademarks of their owners.
 
@@ -783,7 +785,7 @@ Layout:
 - `src/gitlab.ts` + `src/gitlab-webhook.ts`, `src/bitbucket.ts` + `src/bitbucket-webhook.ts`: the GitLab and Bitbucket clients and webhooks; `src/code-host-tools.ts`: Pointer's `gitlab_*` and `bitbucket_*` tools.
 - `src/jira.ts` + `src/jira-automation.ts`: Jira and Confluence, and issues that start repo tasks; `src/ticket-sync.ts`: ticket updates as a task goes (monday.com and Jira).
 - `src/miro.ts`: Miro client and tools.
-- `src/apps.ts`, `src/apps-oauth.ts`, `src/apps-net.ts`, `src/apps-registry.ts`, `src/apps-catalog*.ts`: apps through remote MCP servers (sign-in, address guard, MCP Registry search, the catalog).
+- `src/apps.ts`, `src/apps-oauth.ts`, `src/apps-net.ts`, `src/apps-proxy.ts`, `src/apps-registry.ts`, `src/apps-catalog*.ts`: apps through remote MCP servers (sign-in, address guard, the loopback proxy Claude Code reaches them through, MCP Registry search, the catalog).
 - `src/chat-integrations.ts`: the integrations Pointer uses in chat beyond its own tools; `src/routes/`: each integration's admin routes and webhook.
 - `src/runner.ts`: local / Cloud Run.
 - `src/worker.ts`: clone → setup → team → PR → checks → report.

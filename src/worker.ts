@@ -1066,7 +1066,8 @@ async function main(): Promise<void> {
     if (skills) timeline.add({ kind: "note", text: skillsNote(skills) });
 
     // Apps (MCP servers) assigned to the team's agents; an app that cannot be reached is left out, never fails the task.
-    const apps = await repoTaskApps(config, { configRepo: new ConfigRepo(store, masterKey), redact }).catch((err: unknown) => {
+    // Their stored tokens only: the web service renews them before the task, the worker never writes the config.
+    const apps = await repoTaskApps(config, { redact, note: (text) => timeline.add({ kind: "note", text }) }).catch((err: unknown) => {
       console.warn("[worker] apps not available:", redact(errorText(err)).slice(0, 300));
       return undefined;
     });
