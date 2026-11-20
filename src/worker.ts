@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
@@ -638,29 +638,156 @@ export type ExecFile = (file: string, args: string[], opts: { cwd: string; maxBu
 const execGit: ExecFile = (file, args, opts) => execFileAsync(file, args, opts);
 
 /**
- * git for a task. The host's credentials go on the command line of each
- * command that needs them (CodeHost.gitAuthArgs, `-c http.<host>.extraheader=…`),
- * never into .git/config or the remote URL, where the agents' own git commands
- * would find them. Errors are redacted, the auth arguments included.
+ * The whole environment of every worker git command. Git hands its `-c`
+ * options, the auth header included, to everything it starts (hooks, filters,
+ * helpers) through GIT_CONFIG_PARAMETERS, so it must never also carry the
+ * worker's own environment (MASTER_KEY, TASK_B64, cloud credentials). No
+ * system or user config is read either: HOME is an empty folder of the
+ * worker's and the global config is /dev/null.
  */
-export function gitRunner(o: { host: Pick<CodeHost, "gitAuthArgs">; cwd: string; redact: (text: string) => string; run?: ExecFile }): GitRun {
+export function gitEnv(home: string): NodeJS.ProcessEnv {
+  return {
+    PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+    HOME: home,
+    LANG: process.env.LANG ?? "C.UTF-8",
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+  };
+}
+
+/**
+ * Before every worker git command: no hooks (agents can plant .git/hooks/* or
+ * set core.hooksPath), no fsmonitor program and no signing program, whatever
+ * the repository's config says (command-line config wins).
+ */
+export const GIT_SAFETY_ARGS: readonly string[] = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "commit.gpgSign=false"];
+
+/**
+ * git for a task, with the safety arguments and the minimal environment
+ * (gitEnv) on every command. The host's credentials go on the command line of
+ * each command that needs them (CodeHost.gitAuthArgs, `-c http.<host>.extraheader=…`),
+ * never into .git/config or the remote URL. Errors are redacted, the auth
+ * arguments included.
+ */
+export function gitRunner(o: {
+  host: Pick<CodeHost, "gitAuthArgs">;
+  cwd: string;
+  /** An empty folder of the worker's, outside the checkout, for HOME. */
+  home: string;
+  redact: (text: string) => string;
+  run?: ExecFile;
+}): GitRun {
   const run = o.run ?? execGit;
   return async (args, opts = {}) => {
     const auth = opts.auth ? o.host.gitAuthArgs() : [];
     try {
-      const { stdout } = await run("git", [...auth, ...args], {
+      const { stdout } = await run("git", [...GIT_SAFETY_ARGS, ...auth, ...args], {
         cwd: opts.cwd ?? o.cwd,
         maxBuffer: 16 * 1024 * 1024,
-        env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+        env: gitEnv(o.home),
       });
       return stdout.trim();
     } catch (err) {
       const e = err as { stderr?: string; message: string };
+      // The subcommand, past global options such as `--git-dir <path>`.
+      const verb = args.find((a, i) => !a.startsWith("-") && args[i - 1] !== "--git-dir") ?? "command";
       // execFile's message repeats the whole command line, auth arguments and all.
-      throw new Error(o.redact(makeRedactor(auth)(`git ${args[0]} failed: ${e.stderr?.trim() || e.message}`)));
+      throw new Error(o.redact(makeRedactor(auth)(`git ${verb} failed: ${e.stderr?.trim() || e.message}`)));
     }
   };
 }
+
+/**
+ * Keeps the checkout's .git/config as the worker left it: saved after the
+ * checkout, before any agent runs, and returned as a function that puts it
+ * back. The worker calls it before each of its own commands on what the
+ * agents left (add, status, commit, diff): agents can run git, and filter,
+ * clean or diff drivers, fsmonitor, includes, signing programs, remotes or
+ * proxies they set there would otherwise run or apply in those commands. A
+ * .git that is no longer a plain folder fails the command (nothing is published).
+ */
+export async function snapshotGitConfig(repoDir: string): Promise<() => Promise<void>> {
+  const gitDir = join(repoDir, ".git");
+  const path = join(gitDir, "config");
+  const saved = await readFile(path);
+  return async () => {
+    const dir = await lstat(gitDir).catch(() => undefined);
+    if (!dir?.isDirectory()) throw new Error("The checkout's .git is no longer a folder, so the worker does not use it.");
+    const current = await lstat(path).then(
+      (s) => (s.isFile() ? readFile(path) : undefined),
+      () => undefined,
+    );
+    if (current?.equals(saved)) return;
+    // Replaced, never written through: the path may now be a link to somewhere else.
+    await rm(path, { recursive: true, force: true });
+    await writeFile(path, saved, { flag: "wx", mode: 0o644 });
+  };
+}
+
+/** A branch name the worker made (branchName) or kept: no refspec or option characters. */
+const SAFE_BRANCH = /^(?!-)(?!.*\.\.)(?!.*\/\/)[A-Za-z0-9._/-]{1,200}$/;
+
+/**
+ * Pushes the checkout's HEAD to `branch` on the host from a fresh bare
+ * repository the agents never touched, so nothing they wrote in the checkout
+ * (hooks, core.hooksPath, remote and push URLs, proxies, TLS settings,
+ * credential helpers) applies to the one command that carries the host's
+ * credentials. HEAD comes over by path, without credentials (git ignores hook
+ * settings such as uploadpack.packObjectsHook in the served repository's own
+ * config), and goes to the host's clone URL itself, never to "origin". Not a
+ * force push. The bare repository is removed afterwards.
+ */
+export async function publishBranch(o: {
+  host: Pick<CodeHost, "cloneUrl">;
+  repo: string;
+  repoDir: string;
+  branch: string;
+  git: GitRun;
+  /** Where the bare repository is made: outside the folders the agents are given. */
+  tmp: string;
+}): Promise<void> {
+  const url = o.host.cloneUrl(o.repo);
+  if (!isPlainHttpsUrl(url)) throw new Error(`The code host gave a push URL for ${o.repo} that is not plain https.`);
+  if (!SAFE_BRANCH.test(o.branch) || o.branch.endsWith(".lock") || o.branch.endsWith("/")) {
+    throw new Error(`Not pushing to a branch named "${o.branch}".`);
+  }
+  const ref = `refs/heads/${o.branch}`;
+  const pushDir = await mkdtemp(join(o.tmp, "army-push-"));
+  try {
+    await o.git(["init", "--quiet", "--bare", "--template=", pushDir], { cwd: pushDir });
+    // The checkout is shallow (--depth 50): without --update-shallow, fetch quietly refuses the ref.
+    await o.git(["--git-dir", pushDir, "fetch", "--quiet", "--no-tags", "--update-shallow", o.repoDir, `+HEAD:${ref}`], { cwd: pushDir });
+    await o.git(["--git-dir", pushDir, "push", "--quiet", "--no-verify", url, `${ref}:${ref}`], { cwd: pushDir, auth: true });
+  } finally {
+    await rm(pushDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/** A Jira issue key ("ACME-12"); Jira reads Smart Commit commands after one. */
+const ISSUE_KEY = /\b[A-Za-z][A-Za-z0-9_]*-\d+\b/;
+
+/**
+ * A commit message that cannot run Jira Smart Commits: a `#word` after an
+ * issue key on the same line ("ACME-1 #done", "#time 2h", "#comment …") would
+ * transition, log work on or comment on the issue when the commit is pushed.
+ * Its "#" becomes a full-width "＃". "#12" (an issue or pull request number)
+ * stays as it is.
+ */
+export function smartCommitSafe(message: string): string {
+  return message
+    .split("\n")
+    .map((line) => {
+      const key = ISSUE_KEY.exec(line);
+      if (!key) return line;
+      const at = key.index + key[0].length;
+      return line.slice(0, at) + line.slice(at).replace(/#(?=[A-Za-z])/g, "＃");
+    })
+    .join("\n");
+}
+
+/** `git commit` as the worker runs it: no hooks, the message without Smart Commit commands. */
+export const commitArgs = (message: string): string[] => ["commit", "--quiet", "--no-verify", "-m", smartCommitSafe(message)];
 
 /** An https URL without a user or password: credentials in a clone URL would be kept in .git/config. */
 function isPlainHttpsUrl(value: string): boolean {
@@ -762,7 +889,9 @@ export interface FollowChecksDeps {
   request: string;
   /** What is left of the task's budget for a fix round. */
   budgetLeft: () => number;
+  /** git on what the agents left: the worker's own config is put back first (snapshotGitConfig). */
   git: GitRun;
+  /** Publishes the branch (publishBranch). */
   push: () => Promise<unknown>;
   /** One fix round of the team; it adds the round's cost to the task and keeps its project notes. */
   runRound: (prompt: string, o: { budgetUsd: number; runMs: number; since: string; phaseLabel: string }) => Promise<{ report?: Report; failure?: string }>;
@@ -849,7 +978,7 @@ export async function followPrChecks(d: FollowChecksDeps): Promise<{ outcome: Ci
       return { outcome: last, note: `**Checks blocked: ${run.report.title}** ${truncate(run.report.summary, 800)}` };
     }
     await d.git(["add", "-A"]);
-    if ((await d.git(["status", "--porcelain"])) !== "") await d.git(["commit", "-m", `Fix failing checks: ${run.report.title}`]);
+    if ((await d.git(["status", "--porcelain"])) !== "") await d.git(commitArgs(`Fix failing checks: ${run.report.title}`));
     if (Number(await d.git(["rev-list", "--count", `${sha}..HEAD`])) === 0) {
       return { outcome: last, note: "The team changed nothing for the failing checks." };
     }
@@ -963,7 +1092,19 @@ async function main(): Promise<void> {
   const shotsDir = join(workRoot, "screenshots");
   // The skills library as a local plugin: next to the checkout as well, so no skill file is ever committed.
   const skillsDir = join(workRoot, "skills-plugin");
-  const git = gitRunner({ host, cwd: repoDir, redact });
+  // The worker's own git folder, apart from the folders the agents are given: git's HOME
+  // (empty, see gitEnv) and the bare repositories each push is made from (publishBranch).
+  const gitPrivate = await realpath(await mkdtemp(join(tmpdir(), "army-git-")));
+  const gitHome = join(gitPrivate, "home");
+  await mkdir(gitHome, { mode: 0o700 });
+  const git = gitRunner({ host, cwd: repoDir, home: gitHome, redact });
+  // Replaced right after the checkout (snapshotGitConfig); until then there is nothing the agents wrote.
+  let restoreGitConfig: () => Promise<void> = async () => {};
+  /** git on what the agents left: the checkout's config as the worker left it first. */
+  const gitAfterAgents: GitRun = async (args, opts) => {
+    await restoreGitConfig();
+    return git(args, opts);
+  };
 
   task.status = "running";
   await tasks.save(task);
@@ -996,6 +1137,8 @@ async function main(): Promise<void> {
     }
     if (!resumed) await git(["checkout", "-b", branch]);
     const startSha = await git(["rev-parse", "HEAD"]);
+    // Before the setup command and the agents, which run code that can change .git/config.
+    restoreGitConfig = await snapshotGitConfig(repoDir);
     task.branch = branch;
     await tasks.save(task);
     timeline.add({ kind: "note", text: resumed ? `Continuing on branch ${branch} (base ${base})` : `New branch ${branch} off ${base}` });
@@ -1153,15 +1296,21 @@ async function main(): Promise<void> {
     };
 
     const everyMin = config.limits.progressEveryMin;
-    // Read-only and lock-free, so it never gets in the way of the agents' own git commands.
+    // Read-only and lock-free, so it never gets in the way of the agents' own git commands. It runs while
+    // they work, so their config is left alone: without credentials or the worker's environment
+    // (gitRunner), a driver they configured could do no more here than their own commands can.
     const changedFiles = async (since: string) => {
       const [tracked, untracked] = await Promise.all([
-        git(["--no-optional-locks", "diff", "--name-only", since]),
+        git(["--no-optional-locks", "diff", "--no-ext-diff", "--no-textconv", "--name-only", since]),
         git(["--no-optional-locks", "ls-files", "--others", "--exclude-standard"]),
       ]);
       return [...new Set([...tracked.split("\n"), ...untracked.split("\n")].filter(Boolean))];
     };
-    const push = () => git(["push", "origin", `HEAD:refs/heads/${branch}`], { auth: true });
+    // From a fresh bare repository, never from the checkout the agents had (publishBranch).
+    const push = async () => {
+      await restoreGitConfig();
+      await publishBranch({ host, repo: task.repo, repoDir, branch, git, tmp: gitPrivate });
+    };
 
     /**
      * One run of the team on `runPrompt`: the first run, then each round of
@@ -1310,7 +1459,7 @@ async function main(): Promise<void> {
         branch,
         request: task.instruction,
         budgetLeft: () => taskBudgetUsd - (task.costUsd ?? 0),
-        git,
+        git: gitAfterAgents,
         push,
         runRound: extraRound,
         task,
@@ -1328,10 +1477,10 @@ async function main(): Promise<void> {
      */
     const previewOf = async (pr: PrRef, published: Report, checksFollowed: boolean): Promise<PreviewResult> => {
       const names = (out: string) => out.split("\n").filter(Boolean);
-      const files = await git(["--no-optional-locks", "diff", "--name-only", `origin/${base}...HEAD`])
-        .catch(() => git(["--no-optional-locks", "diff", "--name-only", startSha, "HEAD"]))
+      const files = await gitAfterAgents(["--no-optional-locks", "diff", "--no-ext-diff", "--no-textconv", "--name-only", `origin/${base}...HEAD`])
+        .catch(() => gitAfterAgents(["--no-optional-locks", "diff", "--no-ext-diff", "--no-textconv", "--name-only", startSha, "HEAD"]))
         .then(names);
-      const sha = await git(["rev-parse", "HEAD"]);
+      const sha = await gitAfterAgents(["rev-parse", "HEAD"]);
       const phase: TaskPhase = config.limits.ciWaitMin > 0 ? "checks" : "publish";
       return checkPreview({
         mode: config.limits.previewCheck,
@@ -1342,7 +1491,7 @@ async function main(): Promise<void> {
         host,
         repo: task.repo,
         sha,
-        since: await git(["show", "-s", "--format=%cI", "HEAD"]).catch(() => undefined),
+        since: await gitAfterAgents(["show", "-s", "--format=%cI", "HEAD"]).catch(() => undefined),
         prNumber: pr.number,
         checksFollowed,
         report: published,
@@ -1387,10 +1536,11 @@ async function main(): Promise<void> {
     if (report) await saveProjectNotes(notes, task.repo, projectNotes, report.projectNotes, redact);
 
     // ---------- 4. Publish ----------
-    await git(["add", "-A"]);
-    const dirty = (await git(["status", "--porcelain"])) !== "";
-    if (dirty) await git(["commit", "-m", failure || !report ? `Work in progress (stopped early): ${failure}` : report.title]);
-    const ahead = Number(await git(["rev-list", "--count", `${startSha}..HEAD`]));
+    // With the worker's own config back first: no filter or clean driver the agents configured runs in `add`.
+    await gitAfterAgents(["add", "-A"]);
+    const dirty = (await gitAfterAgents(["status", "--porcelain"])) !== "";
+    if (dirty) await gitAfterAgents(commitArgs(failure || !report ? `Work in progress (stopped early): ${failure}` : report.title));
+    const ahead = Number(await gitAfterAgents(["rev-list", "--count", `${startSha}..HEAD`]));
 
     // Screenshots go up first, so the pull request can point to them: into the store
     // (the console shows them, for every task) and, for Slack tasks, into the thread.
@@ -1476,7 +1626,9 @@ async function main(): Promise<void> {
             base,
             title: redact(wipTitle(task.instruction)),
             body: async () => {
-              const filesChanged = (await git(["diff", "--name-only", startSha, "HEAD"])).split("\n").filter(Boolean).length;
+              const filesChanged = (await gitAfterAgents(["diff", "--no-ext-diff", "--no-textconv", "--name-only", startSha, "HEAD"]))
+                .split("\n")
+                .filter(Boolean).length;
               return redact(draftPrBody({ reason, plan: first.plan, filesChanged, screenshots: shotsForPr(), footer, where }));
             },
             comment: redact(stoppedComment(reason, first.plan, where)),
@@ -1623,6 +1775,7 @@ async function main(): Promise<void> {
   } finally {
     clearTimeout(timer);
     await rm(workRoot, { recursive: true, force: true }).catch(() => {});
+    await rm(gitPrivate, { recursive: true, force: true }).catch(() => {});
     // The task's cost is known now: a cap it took past its alert level or 100% tells the alert channel. Never throws.
     await spending.notify();
   }

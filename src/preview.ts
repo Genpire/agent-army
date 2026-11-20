@@ -110,8 +110,12 @@ export interface PreviewFound {
   environment?: string;
   source: "deployment" | "status" | "comment";
   /**
-   * Deployed by Vercel, and found where only the repository's writers or
-   * Vercel itself can put it: only then may the bypass secret be sent to it.
+   * Reported by Vercel itself, as the host can tell (on GitHub: a deployment
+   * created by vercel[bot], a check run of the Vercel app, the vercel[bot]
+   * comment): only then is the bypass secret sent to it. Anyone who may write
+   * to the repository can post a status or comment linking their own
+   * *.vercel.app project, so a link alone never qualifies; that preview is
+   * opened without the secret.
    */
   vercel: boolean;
   /** Other ready previews of the same commit (other projects of a monorepo). */
@@ -184,14 +188,15 @@ export function deploymentState(statuses: DeploymentStatusInfo[]): { state: "rea
 /** "Preview – web" → "web"; "" for a plain "Preview". */
 const projectOf = (environment: string) => environment.replace(/^\s*preview\b\s*[–—:-]?\s*/i, "").trim().toLowerCase();
 
-const isVercelUrl = (url: string) => /(?:^|\.)vercel\.(?:app|sh)$/i.test(new URL(url).hostname);
 const isNetlifyUrl = (url: string) => /(?:^|\.)netlify\.app$/i.test(new URL(url).hostname);
 /** Where Vercel, Netlify and Cloudflare Pages serve previews: the only links a status or an unverified comment may point the browser to. */
 const isPreviewPlatformUrl = (url: string) => /(?:^|\.)(?:vercel\.app|netlify\.app|pages\.dev)$/i.test(new URL(url).hostname);
 
-/** The Vercel and Netlify bots' logins on GitHub, where only apps can hold a "[bot]" login. */
-const VERCEL_BOT = /^vercel(?:\[bot\])?$/i;
-const NETLIFY_BOT = /^netlify(?:\[bot\])?$/i;
+/** The Vercel and Netlify apps' logins on GitHub, where only an app can hold a "[bot]" login. */
+const VERCEL_BOT = "vercel[bot]";
+const NETLIFY_BOT = "netlify[bot]";
+/** The Vercel app's slug on GitHub check runs: only that app can create a check run with it. */
+const VERCEL_APP = "vercel";
 /** The metadata line Vercel's comment starts with: `[vc]: #<hash>:<base64 JSON>`. */
 const VC_META = /^\[vc\]:\s*#[^:\s]*:([A-Za-z0-9+/=_-]+)\s*$/m;
 /** A preview link in the comment's table: "[Preview](…)" now, "[Visit Preview](…)" in older comments. */
@@ -244,10 +249,11 @@ export function netlifyPreviewFromComment(body: string): string | undefined {
 
 /**
  * The newest preview in the Vercel or Netlify bot's comments. On GitHub only
- * the bots' own accounts count. On GitLab and Bitbucket the integrations
- * comment through the account that connected them, so any author counts, but
- * only for a link on the platforms' own preview domains, and the bypass
- * secret goes only to one the host marks as written by a bot account.
+ * the apps' own accounts count, and the vercel[bot] comment is Vercel itself.
+ * On GitLab and Bitbucket the integrations comment through the account that
+ * connected them, so any author counts, but only for a link on the platforms'
+ * own preview domains, and never with the bypass secret: the host cannot tell
+ * Vercel's comment from a repository writer's.
  */
 async function previewFromComments(
   host: PreviewHost,
@@ -258,18 +264,18 @@ async function previewFromComments(
   const github = (host.kind ?? "github") === "github";
   const after = since ? Date.parse(since) : NaN;
   const comments = (await host.issueComments(repo, prNumber))
-    .filter((c: IssueComment) => !github || (c.bot && (VERCEL_BOT.test(c.author) || NETLIFY_BOT.test(c.author))))
+    .filter((c: IssueComment) => !github || (c.bot && (c.author === VERCEL_BOT || c.author === NETLIFY_BOT)))
     .filter((c) => !Number.isFinite(after) || Date.parse(c.updatedAt) >= after)
     .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
   for (const c of comments) {
     if (github) {
-      const byVercel = VERCEL_BOT.test(c.author);
+      const byVercel = c.author === VERCEL_BOT;
       const url = byVercel ? vercelPreviewFromComment(c.body) : netlifyPreviewFromComment(c.body);
       if (url) return { url, vercel: byVercel };
       continue;
     }
     const vercelUrl = vercelPreviewFromComment(c.body);
-    if (vercelUrl && isPreviewPlatformUrl(vercelUrl)) return { url: vercelUrl, vercel: c.bot && isVercelUrl(vercelUrl) };
+    if (vercelUrl && isPreviewPlatformUrl(vercelUrl)) return { url: vercelUrl, vercel: false };
     const netlifyUrl = netlifyPreviewFromComment(c.body);
     if (netlifyUrl) return { url: netlifyUrl, vercel: false };
   }
@@ -281,15 +287,23 @@ async function previewFromComments(
  * Cloudflare Pages link the deployed preview there on every host, which is
  * how a preview is found where the host has no deployments (Bitbucket) or the
  * deployer creates none. Only links on the preview platforms' own domains
- * count. Setting a status takes write access to the repository.
+ * count. `vercel` (the bypass secret may go to it) only for a check run of the
+ * Vercel app on GitHub: a status says nothing about who set it (no host's
+ * status API here reports the creator), and any repository writer can set one.
  */
-export function previewsFromStatuses(data: Awaited<ReturnType<CodeHost["checksFor"]>>): string[] {
+export function previewsFromStatuses(data: Awaited<ReturnType<CodeHost["checksFor"]>>, host: CodeHostKind = "github"): { url: string; vercel: boolean }[] {
   const links = [
-    ...data.statuses.filter((s) => s.state === "success").map((s) => s.targetUrl),
-    ...data.checks.filter((c) => c.status === "completed" && c.conclusion === "success").map((c) => c.detailsUrl),
+    ...data.statuses.filter((s) => s.state === "success").map((s) => ({ link: s.targetUrl, vercel: false })),
+    ...data.checks
+      .filter((c) => c.status === "completed" && c.conclusion === "success")
+      .map((c) => ({ link: c.detailsUrl, vercel: host === "github" && c.app === VERCEL_APP })),
   ];
-  const urls = links.map((link) => webUrl(link)).filter((url): url is string => url !== undefined && isPreviewPlatformUrl(url));
-  return [...new Set(urls)];
+  const found = new Map<string, boolean>();
+  for (const { link, vercel } of links) {
+    const url = webUrl(link);
+    if (url && isPreviewPlatformUrl(url)) found.set(url, (found.get(url) ?? false) || vercel);
+  }
+  return [...found].map(([url, vercel]) => ({ url, vercel }));
 }
 
 const minutes = (ms: number) => `${Math.max(1, Math.round(ms / 60_000))} min`;
@@ -341,7 +355,8 @@ export async function findPreview(host: PreviewHost, repo: string, sha: string, 
       }
       const first = ready[0];
       if (first) {
-        const vercel = first.d.creator === "vercel[bot]" || isVercelUrl(first.url);
+        // Created by the Vercel app itself; a deployment anyone else created may point anywhere, even at *.vercel.app.
+        const vercel = kind === "github" && first.d.creator === VERCEL_BOT;
         const others = [...new Set(ready.slice(1).map((r) => r.url))].filter((u) => u !== first.url).slice(0, 3);
         return { ok: true, found: { url: first.url, environment: first.d.environment, source: "deployment", vercel, others } };
       }
@@ -360,8 +375,8 @@ export async function findPreview(host: PreviewHost, repo: string, sha: string, 
 
   if (host.checksFor) {
     try {
-      const [url, ...rest] = previewsFromStatuses(await host.checksFor(repo, sha));
-      if (url) return { ok: true, found: { url, source: "status", vercel: isVercelUrl(url), others: rest.slice(0, 3) } };
+      const [first, ...rest] = previewsFromStatuses(await host.checksFor(repo, sha), kind);
+      if (first) return { ok: true, found: { url: first.url, source: "status", vercel: first.vercel, others: rest.slice(0, 3).map((r) => r.url) } };
     } catch {
       // The statuses could not be read: the comments may still say where the preview is.
     }

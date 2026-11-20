@@ -52,7 +52,8 @@ describe("codeHostFor", () => {
     const gitlab = codeHostFor(c, "gitlab:acme/platform/web");
     expect(gitlab.ok && gitlab.host).toBeInstanceOf(GitLab);
     expect(gitlab.ok && gitlab.host.kind).toBe("gitlab");
-    expect(gitlab.ok && (gitlab.host as GitLab).options).toEqual({ token: GITLAB, baseUrl: "https://gitlab.example.com" });
+    // The allow list goes to the client too, which checks each project's real path against it.
+    expect(gitlab.ok && (gitlab.host as GitLab).options).toEqual({ token: GITLAB, baseUrl: "https://gitlab.example.com", allowed: ["acme/platform"] });
 
     const bitbucket = codeHostFor(c, "bitbucket:acme/web");
     expect(bitbucket.ok && bitbucket.host).toBeInstanceOf(Bitbucket);

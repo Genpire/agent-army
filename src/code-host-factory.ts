@@ -16,6 +16,12 @@ import { REPO_FORMAT_HINT, parseRepo } from "./repo-id.js";
 export type CodeHostResult = { ok: true; host: CodeHost } | { ok: false; error: string };
 
 /**
+ * The GitLab client's options with its allow list. `allowed` is optional
+ * here so this compiles before and after the client takes the option.
+ */
+type GitLabClientOptions = ConstructorParameters<typeof GitLab>[0] & { allowed?: string[] };
+
+/**
  * The client for `repo`, or why the platform may not work on it: not a
  * repository id, its host not connected, or not allowed by the host's allow
  * list (the same rule as every other entry point, code-host-access.ts).
@@ -29,7 +35,9 @@ export function codeHostFor(config: Config, repo: string): CodeHostResult {
     case "gitlab": {
       const token = config.gitlab.token;
       if (!token) return { ok: false, error: "GitLab is not connected. Ask the owner to connect it on the admin page." };
-      return { ok: true, host: new GitLab({ token, baseUrl: config.gitlab.baseUrl }) };
+      // With the allow list, the client checks each project's real path (after redirects and renames) against it.
+      const options: GitLabClientOptions = { token, baseUrl: config.gitlab.baseUrl, allowed: config.gitlab.allowed };
+      return { ok: true, host: new GitLab(options) };
     }
     case "bitbucket": {
       const token = config.bitbucket.token;
