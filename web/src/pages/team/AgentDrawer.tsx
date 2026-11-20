@@ -17,6 +17,7 @@ import { TextInput } from "@astryxdesign/core/TextInput";
 import { VStack } from "@astryxdesign/core/VStack";
 import { type ReactNode, useMemo, useState } from "react";
 import { ConfirmButton } from "../../components/ConfirmButton";
+import { type AgentEngine, ENGINE_NAME, type EngineId, isAgentEngine } from "../../lib/engines";
 import { href } from "../../lib/router";
 import { useConfig } from "../../lib/state";
 import { ACCESS_OPTIONS, type AgentSpec } from "../../lib/types";
@@ -141,6 +142,40 @@ function SkillsField({ value, onChange, lead }: { value: string[]; onChange: (sk
         {forEveryone.length ? `Every agent also has ${forEveryone.join(", ")}. ` : ""}
         Install skills and choose who uses them on the {manage}.
       </Text>
+    </VStack>
+  );
+}
+
+/** Claude, or a connected coding agent CLI. A CLI that is not connected is offered only when the agent is already set to it. */
+function EngineField({ value, onChange }: { value: AgentEngine; onChange: (engine: AgentEngine) => void }) {
+  const { config } = useConfig();
+  const cli = (id: EngineId, what: string) => {
+    const connected = config.engines[id].connected;
+    return {
+      value: id,
+      label: ENGINE_NAME[id],
+      description: connected ? what : value === id ? "Not connected: works as Claude until it is" : "Not connected: connect it on Integrations",
+      disabled: !connected && value !== id,
+    };
+  };
+  const options = [
+    { value: "claude", label: ENGINE_NAME.claude, description: "The team's model" },
+    cli("codex", "OpenAI's coding agent CLI"),
+    cli("gemini", "Google's coding agent CLI"),
+  ];
+  const missing = (["codex", "gemini"] as const).filter((id) => !config.engines[id].connected).map((id) => ENGINE_NAME[id]);
+  return (
+    <VStack gap={2}>
+      <Selector label="Engine" isLabelHidden options={options} value={value} onChange={(v) => isAgentEngine(v) && onChange(v)} width="100%" />
+      {missing.length > 0 && (
+        <Text type="supporting">
+          Connect {missing.join(" or ")} on the{" "}
+          <Link href={href("integrations")} isStandalone>
+            Integrations page
+          </Link>
+          .
+        </Text>
+      )}
     </VStack>
   );
 }
@@ -288,6 +323,11 @@ function AgentForm({ target, takenIds, lead, onClose, onSave, onDelete }: Omit<A
                   />
                 ))}
               </RadioList>
+            </FormSection>
+
+            <Divider />
+            <FormSection title="Engine" description="Who does its work in repo tasks. With Codex or Gemini CLI, the agent hands its assignment to that coding agent, which works in the checkout, and checks what it did. In chat it works like any other agent.">
+              <EngineField value={draft.engine} onChange={set("engine")} />
             </FormSection>
 
             <Divider />

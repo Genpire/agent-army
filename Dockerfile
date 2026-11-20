@@ -17,6 +17,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && corepack enable \
     && mkdir -p /data && chown node:node /data
+# Coding agent CLIs the team can hand repo work to (src/engines.ts), pinned.
+# ENGINES says which: "codex gemini" (the default), one of them, or "" for
+# neither (an engine whose CLI is missing is left out of tasks, with a note).
+# Codex adds about 420 MB (a native binary), Gemini CLI about 100 MB.
+ARG ENGINES="codex gemini"
+ARG CODEX_VERSION=0.171.0
+ARG GEMINI_CLI_VERSION=0.70.0
+RUN set -e; pkgs=""; \
+    for engine in $ENGINES; do \
+      case "$engine" in \
+        codex) pkgs="$pkgs @openai/codex@${CODEX_VERSION}" ;; \
+        gemini) pkgs="$pkgs @google/gemini-cli@${GEMINI_CLI_VERSION}" ;; \
+        *) echo "Unknown engine in ENGINES: $engine" >&2; exit 1 ;; \
+      esac; \
+    done; \
+    if [ -n "$pkgs" ]; then npm install -g --ignore-scripts --no-audit --no-fund $pkgs && npm cache clean --force; fi
 WORKDIR /app
 COPY --from=build /app/node_modules ./node_modules
 # Headless Chromium for browser checks in repo tasks (the Playwright MCP server).
