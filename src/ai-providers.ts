@@ -394,8 +394,10 @@ export function buildRuntime(id: AiProviderId, conn: ConnectionValues): Provider
   const files: Record<string, string> = secrets.credentialsJson ? { GOOGLE_APPLICATION_CREDENTIALS: secrets.credentialsJson } : {};
 
   if (id === "anthropic") {
-    // As before providers existed: the key, and the models and efforts as configured.
-    const env = credentialEnv(preset, secrets, settings);
+    // As before providers existed: the key, and the models and efforts as configured. Also here: a
+    // repository's .claude/settings*.json (repo tasks load project settings) cannot redirect the
+    // endpoint or the key, which would otherwise send the Anthropic key to another host.
+    const env = { ...credentialEnv(preset, secrets, settings), CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: "1" };
     return {
       provider: id,
       label: preset.short,

@@ -379,7 +379,7 @@ describe("HrService.review", () => {
       effort: "medium",
     });
     expect(HR_BUDGET_USD).toBeLessThanOrEqual(0.5);
-    expect(Object.keys(options.env ?? {}).sort()).toEqual(["ANTHROPIC_API_KEY", "CLAUDE_AGENT_SDK_CLIENT_APP", "HOME", "LANG", "PATH"]);
+    expect(Object.keys(options.env ?? {}).sort()).toEqual(["ANTHROPIC_API_KEY", "CLAUDE_AGENT_SDK_CLIENT_APP", "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST", "HOME", "LANG", "PATH"]);
     expect(options.systemPrompt).toContain(defaultHrAgent().instructions.split("\n")[0]);
     expect(options.systemPrompt).toContain("never deleted");
     // The evidence goes in the user turn, never a secret.

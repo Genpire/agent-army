@@ -392,9 +392,10 @@ export const ConfigSchema = z.object({
     // A new object each time: zod copies a default only one level deep, and `providers` is written to.
     .default(() => ({ chatProvider: "anthropic" as const, taskProvider: "anthropic" as const, providers: {} })),
   /** Coding agent CLIs the team can hand work to in repo tasks. */
+  // Factory defaults: zod copies a default object only one level deep, so a literal would be shared between configs.
   engines: z
-    .object({ codex: EngineConnectionSchema.default({ model: "" }), gemini: EngineConnectionSchema.default({ model: "" }) })
-    .default({ codex: { model: "" }, gemini: { model: "" } }),
+    .object({ codex: EngineConnectionSchema.default(() => ({ model: "" })), gemini: EngineConnectionSchema.default(() => ({ model: "" })) })
+    .default(() => ({ codex: { model: "" }, gemini: { model: "" } })),
   /** Apps connected through their MCP servers. */
   apps: z.array(AppConnectionSchema).max(MAX_APPS).default([]),
   /** Slack channel ID -> "owner/repo" default project for that channel. */

@@ -133,7 +133,7 @@ describe("findSkills", () => {
     expect(o).not.toHaveProperty("plugins");
     expect(o).not.toHaveProperty("mcpServers");
     // Only what the CLI needs: none of the service's secrets.
-    expect(Object.keys(o.env ?? {}).sort()).toEqual(["ANTHROPIC_API_KEY", "CLAUDE_AGENT_SDK_CLIENT_APP", "HOME", "LANG", "PATH"]);
+    expect(Object.keys(o.env ?? {}).sort()).toEqual(["ANTHROPIC_API_KEY", "CLAUDE_AGENT_SDK_CLIENT_APP", "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST", "HOME", "LANG", "PATH"]);
     expect(JSON.stringify(o.env)).not.toContain("github_pat");
   });
 

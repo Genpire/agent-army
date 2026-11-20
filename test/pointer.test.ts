@@ -1218,7 +1218,7 @@ describe("Pointer brain", () => {
     expect(agentTools).not.toContain("mcp__pointer__project_notes_add");
 
     // Environment replaced: only what the CLI needs, HOME in the throwaway dir.
-    expect(Object.keys(o.env ?? {}).sort()).toEqual(["ANTHROPIC_API_KEY", "CLAUDE_AGENT_SDK_CLIENT_APP", "HOME", "LANG", "PATH"]);
+    expect(Object.keys(o.env ?? {}).sort()).toEqual(["ANTHROPIC_API_KEY", "CLAUDE_AGENT_SDK_CLIENT_APP", "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST", "HOME", "LANG", "PATH"]);
     expect(o.env?.HOME).toBe(o.cwd);
     expect(o.env?.ANTHROPIC_API_KEY).toBe(SECRETS.apiKey);
     expect(o.env?.CLAUDE_AGENT_SDK_CLIENT_APP).toBe("agent-army-pointer/0.2.0");

@@ -117,8 +117,12 @@ describe("provider environments", () => {
     expect(xApiKey.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
   });
 
-  it("keep Anthropic exactly as before: only the key", () => {
-    expect(buildRuntime("anthropic", CONNECTIONS.anthropic).env).toEqual({ ANTHROPIC_API_KEY: "sk-ant-anthropic-secret-0001" });
+  it("keep Anthropic as before: the key, with settings files unable to redirect it", () => {
+    // The key, and settings files in a repository may not redirect the endpoint or the key.
+    expect(buildRuntime("anthropic", CONNECTIONS.anthropic).env).toEqual({
+      ANTHROPIC_API_KEY: "sk-ant-anthropic-secret-0001",
+      CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: "1",
+    });
     const r = anthropicRuntime("sk-ant-x-123456789");
     expect(r.model("claude-sonnet-5-5")).toBe("claude-sonnet-5-5");
     expect(r.model("")).toBeUndefined();

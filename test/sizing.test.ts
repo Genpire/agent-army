@@ -61,7 +61,7 @@ describe("estimateTaskSize", () => {
     expect(SIZING_MODEL).toBe("claude-haiku-5-5");
     expect(SIZING_BUDGET_USD).toBeLessThanOrEqual(0.05);
     // Only what the CLI needs: none of the service's own secrets.
-    expect(Object.keys(options.env ?? {}).sort()).toEqual(["ANTHROPIC_API_KEY", "CLAUDE_AGENT_SDK_CLIENT_APP", "HOME", "LANG", "PATH"]);
+    expect(Object.keys(options.env ?? {}).sort()).toEqual(["ANTHROPIC_API_KEY", "CLAUDE_AGENT_SDK_CLIENT_APP", "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST", "HOME", "LANG", "PATH"]);
     expect(q.calls[0]!.prompt).toContain("<request>\nFix the typo in the footer\n</request>");
     expect(q.calls[0]!.prompt).toContain("Started from: the admin console");
   });
