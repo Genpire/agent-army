@@ -4,8 +4,8 @@
  * Pointer may use.
  */
 import type { SearchSource, SearchableItem } from "@astryxdesign/core/Typeahead";
-import type { MondayStatusColumn } from "../../../../src/monday.js";
-import type { WebhookConnectResult } from "../../../../src/monday-automation.js";
+import type { MondayStatusColumn } from "../../../../src/integrations/monday/monday.js";
+import type { WebhookConnectResult } from "../../../../src/integrations/monday/monday-automation.js";
 import { api } from "../../lib/api";
 import type { MondayBoardSummary, PublicConfig } from "../../lib/types";
 

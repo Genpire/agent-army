@@ -6,7 +6,7 @@
 import type { publicView } from "../../../src/core/config.js";
 import type { MemoryFact } from "../../../src/chat/memory.js";
 import type { NotesRepo, ProjectNotes } from "../../../src/chat/notes.js";
-import type { MondayBoardSummary } from "../../../src/monday.js";
+import type { MondayBoardSummary } from "../../../src/integrations/monday/monday.js";
 import type { ProgressSnapshot } from "../../../src/tasks/progress.js";
 import type { CiSummary, Task } from "../../../src/tasks/tasks.js";
 import type { Access, AgentSpec, Effort, PointerSpec, Team } from "../../../src/team/team.js";

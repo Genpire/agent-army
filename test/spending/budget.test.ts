@@ -28,7 +28,7 @@ import { FsStore } from "../../src/core/store.js";
 import { type Task, TaskRepo, newTaskId } from "../../src/tasks/tasks.js";
 import { startThreadTask } from "../../src/tasks/thread-task.js";
 import { UsageRepo } from "../../src/spending/usage.js";
-import { handleGithubWebhook, resetWebhookStateForTests } from "../../src/webhook.js";
+import { handleGithubWebhook, resetWebhookStateForTests } from "../../src/integrations/code-hosts/webhook.js";
 
 const NOW = new Date("2026-11-18T12:00:00Z");
 const budget = (b: Partial<Budget> = {}): Budget => BudgetSchema.parse(b);

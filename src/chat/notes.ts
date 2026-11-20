@@ -1,5 +1,5 @@
 import { decrypt, encrypt } from "../core/crypto.js";
-import { CODE_HOST_KINDS, type CodeHostKind, REPO_FORMAT_HINT, isRepoId, repoHost, repoId, repoPath } from "../repo-id.js";
+import { CODE_HOST_KINDS, type CodeHostKind, REPO_FORMAT_HINT, isRepoId, repoHost, repoId, repoPath } from "../integrations/code-hosts/repo-id.js";
 import type { Store } from "../core/store.js";
 
 /**

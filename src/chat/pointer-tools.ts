@@ -1,12 +1,12 @@
 import { type McpSdkServerConfigWithInstance, createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
-import type { CodeHostReader } from "../code-host.js";
-import { matchesPathAllowList, repoAccessError } from "../code-host-access.js";
+import type { CodeHostReader } from "../integrations/code-hosts/code-host.js";
+import { matchesPathAllowList, repoAccessError } from "../integrations/code-hosts/code-host-access.js";
 import type { Config } from "../core/config.js";
-import type { CodeHit, GitHub, ItemState } from "../github.js";
-import { type GitHubConnection, connectionForRepo, describeAllowed, githubConnections, matchesAllowList } from "../github-access.js";
+import type { CodeHit, GitHub, ItemState } from "../integrations/github/github.js";
+import { type GitHubConnection, connectionForRepo, describeAllowed, githubConnections, matchesAllowList } from "../integrations/github/github-access.js";
 import type { MemoryRepo } from "./memory.js";
-import { MONDAY_READ_TOOL_NAMES, type MondayToolOptions, mondayTools } from "../monday.js";
+import { MONDAY_READ_TOOL_NAMES, type MondayToolOptions, mondayTools } from "../integrations/monday/monday.js";
 import type { NotesRepo } from "./notes.js";
 import type { AddAttachment, StartRepoTask } from "./pointer-types.js";
 import { prRef } from "../tasks/pr-feedback.js";
@@ -20,7 +20,7 @@ import {
   repoHost,
   repoId,
   repoPath,
-} from "../repo-id.js";
+} from "../integrations/code-hosts/repo-id.js";
 
 /**
  * Pointer's custom tools, served in-process to the Agent SDK as the MCP server

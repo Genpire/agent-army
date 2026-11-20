@@ -1,7 +1,7 @@
 import type { AgentDefinition, AgentMcpServerSpec } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import type { ProviderRuntime } from "../ai/ai-providers.js";
-import type { RepoTaskApps } from "../apps.js";
+import type { RepoTaskApps } from "../integrations/apps/apps.js";
 import type { RepoTaskEngines } from "../ai/engines.js";
 import { BROWSER_SERVER, BROWSER_TOOLS, type BrowserServerConfig } from "../tasks/browser.js";
 

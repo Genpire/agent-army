@@ -25,7 +25,7 @@ import { TimelineRecorder } from "../../src/tasks/task-events.js";
 import { type Task, TaskRepo, WEB_CHANNEL } from "../../src/tasks/tasks.js";
 import { defaultTeam } from "../../src/team/team.js";
 import { UsageRepo } from "../../src/spending/usage.js";
-import { handleGithubWebhook, resetWebhookStateForTests } from "../../src/webhook.js";
+import { handleGithubWebhook, resetWebhookStateForTests } from "../../src/integrations/code-hosts/webhook.js";
 
 const API_KEY = "sk-ant-secret-key-0123456789";
 const GH_TOKEN = "ghp_secret_token_0123456789";

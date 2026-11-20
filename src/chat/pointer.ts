@@ -15,10 +15,10 @@ import { type AttachmentInfo, type AttachmentRepo, type ThreadRef, toContentBloc
 import { type ChatIntegration, chatIntegrations, subagentIntegrationTools } from "./chat-integrations.js";
 import { PendingActions, confirmGate, conversationKey, gatedTools } from "./confirm-gate.js";
 import type { Config } from "../core/config.js";
-import { GitHub } from "../github.js";
-import { isRepoAllowedOnHost } from "../code-host-access.js";
+import { GitHub } from "../integrations/github/github.js";
+import { isRepoAllowedOnHost } from "../integrations/code-hosts/code-host-access.js";
 import type { MemoryFact } from "./memory.js";
-import { MondayClient } from "../monday.js";
+import { MondayClient } from "../integrations/monday/monday.js";
 import type { NotesRepo } from "./notes.js";
 import { ActivityMapper } from "./pointer-activity.js";
 import { createPointerToolServer, githubToolOptions } from "./pointer-tools.js";

@@ -2,9 +2,9 @@ import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Report } from "../team/agents.js";
-import type { CodeHost } from "../code-host.js";
-import type { DeploymentInfo, DeploymentStatusInfo, IssueComment } from "../github.js";
-import { type CodeHostKind, HOST_TERMS } from "../repo-id.js";
+import type { CodeHost } from "../integrations/code-hosts/code-host.js";
+import type { DeploymentInfo, DeploymentStatusInfo, IssueComment } from "../integrations/github/github.js";
+import { type CodeHostKind, HOST_TERMS } from "../integrations/code-hosts/repo-id.js";
 import type { PreviewResult } from "./tasks.js";
 
 /** Why there was nothing to check when the repository has no preview deployments at all. */

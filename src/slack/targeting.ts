@@ -1,5 +1,5 @@
-import { matchesAllowList } from "../github-access.js";
-import { repoFromInput } from "../repo-id.js";
+import { matchesAllowList } from "../integrations/github/github-access.js";
+import { repoFromInput } from "../integrations/code-hosts/repo-id.js";
 
 export type Command =
   | { kind: "help" }

@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import type { Config, ConfigRepo } from "../core/config.js";
 import { decrypt, encrypt } from "../core/crypto.js";
-import { encodePath } from "../github.js";
-import { connectionForRepo } from "../github-access.js";
+import { encodePath } from "../integrations/github/github.js";
+import { connectionForRepo } from "../integrations/github/github-access.js";
 import type { Store } from "../core/store.js";
 import { SKILLS_PLUGIN, SKILL_NAME_RE, type Team, type TeamSkills } from "../team/team.js";
 

@@ -4,7 +4,7 @@
  * project-key checks (the server checks everything again).
  */
 import type { SearchSource, SearchableItem } from "@astryxdesign/core/Typeahead";
-import type { JiraProject, JiraStatus } from "../../../../../src/jira.js";
+import type { JiraProject, JiraStatus } from "../../../../../src/integrations/jira/jira.js";
 import { api } from "../../../lib/api";
 import type { PublicConfig } from "../../../lib/types";
 import { REPO_RE, allowListRepos } from "../../projects/validation";

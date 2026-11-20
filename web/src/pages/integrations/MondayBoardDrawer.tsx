@@ -12,7 +12,7 @@ import { TextInput } from "@astryxdesign/core/TextInput";
 import { type SearchSource, type SearchableItem, Typeahead, TypeaheadItem } from "@astryxdesign/core/Typeahead";
 import { VStack } from "@astryxdesign/core/VStack";
 import { useEffect, useMemo, useState } from "react";
-import type { MondayStatusColumn } from "../../../../src/monday.js";
+import type { MondayStatusColumn } from "../../../../src/integrations/monday/monday.js";
 import { ConfirmButton } from "../../components/ConfirmButton";
 import { api, errorMessage } from "../../lib/api";
 import { useConfig } from "../../lib/state";

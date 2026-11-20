@@ -1,9 +1,9 @@
 import type { WebClient } from "@slack/web-api";
-import { refreshAppsForTask } from "../apps.js";
+import { refreshAppsForTask } from "../integrations/apps/apps.js";
 import type { TaskBudgetCheck } from "../spending/budget.js";
 import type { Config, ConfigRepo } from "../core/config.js";
-import { repoAccessError } from "../code-host-access.js";
-import { REPO_FORMAT_HINT } from "../repo-id.js";
+import { repoAccessError } from "../integrations/code-hosts/code-host-access.js";
+import { REPO_FORMAT_HINT } from "../integrations/code-hosts/repo-id.js";
 import type { Runner } from "./runner.js";
 import { repoFromToken, resolveRepo } from "../slack/targeting.js";
 import { type Task, type TaskRepo, type TaskTicket, WEB_CHANNEL, newTaskId } from "./tasks.js";

@@ -1,6 +1,6 @@
-import type { CodeHost } from "../code-host.js";
-import type { CheckInfo, StatusInfo } from "../github.js";
-import { type CodeHostKind, HOST_TERMS } from "../repo-id.js";
+import type { CodeHost } from "../integrations/code-hosts/code-host.js";
+import type { CheckInfo, StatusInfo } from "../integrations/github/github.js";
+import { type CodeHostKind, HOST_TERMS } from "../integrations/code-hosts/repo-id.js";
 import { cleanOutput, outputTail } from "./repo-setup.js";
 import type { CiSummary } from "./tasks.js";
 

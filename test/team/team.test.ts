@@ -2,7 +2,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { RepoTaskApps } from "../../src/apps.js";
+import type { RepoTaskApps } from "../../src/integrations/apps/apps.js";
 import { ConfigRepo, isChatReady, publicView } from "../../src/core/config.js";
 import { deriveKey } from "../../src/core/crypto.js";
 import { MEMORY_MAX_CHARS, MEMORY_MAX_FACTS, MemoryRepo } from "../../src/chat/memory.js";

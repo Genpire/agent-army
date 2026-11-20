@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { REPO_RE } from "../src/core/config.js";
-import { encodePath } from "../src/github.js";
+import { encodePath } from "../src/integrations/github/github.js";
 import { checkBashCommand } from "../src/tasks/guard.js";
 import { subagentReadOnlyGate } from "../src/chat/pointer.js";
 import { RESERVED_AGENT_IDS } from "../src/team/team.js";

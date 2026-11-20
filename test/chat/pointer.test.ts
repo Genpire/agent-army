@@ -10,9 +10,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { type AttachmentInfo, AttachmentRepo, type NewAttachment } from "../../src/chat/attachments.js";
 import { ConfigRepo, ConfigSchema } from "../../src/core/config.js";
 import { deriveKey } from "../../src/core/crypto.js";
-import { GitHub } from "../../src/github.js";
+import { GitHub } from "../../src/integrations/github/github.js";
 import { MemoryRepo } from "../../src/chat/memory.js";
-import { MONDAY_READ_TOOL_NAMES, MONDAY_TOOL_NAMES, MondayClient, mondayTools } from "../../src/monday.js";
+import { MONDAY_READ_TOOL_NAMES, MONDAY_TOOL_NAMES, MondayClient, mondayTools } from "../../src/integrations/monday/monday.js";
 import { NotesRepo } from "../../src/chat/notes.js";
 import { type QueryFn, buildPointerPrompt, buildPointerSystemPrompt, createPointerBrain } from "../../src/chat/pointer.js";
 import {
@@ -39,8 +39,8 @@ import { FsStore } from "../../src/core/store.js";
 import { defaultTeam } from "../../src/team/team.js";
 
 // Spy on the options the tool server hands to the monday.com tools; the real tools still run.
-vi.mock("../../src/monday.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../src/monday.js")>();
+vi.mock("../../src/integrations/monday/monday.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/integrations/monday/monday.js")>();
   return { ...actual, mondayTools: vi.fn(actual.mondayTools) };
 });
 /** The options object of the most recent mondayTools call (with addAttachment once the monday tools accept it). */

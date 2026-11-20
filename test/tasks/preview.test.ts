@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Report } from "../../src/team/agents.js";
-import { type CheckInfo, type DeploymentInfo, type DeploymentStatusInfo, GitHub, type IssueComment, type StatusInfo } from "../../src/github.js";
+import { type CheckInfo, type DeploymentInfo, type DeploymentStatusInfo, GitHub, type IssueComment, type StatusInfo } from "../../src/integrations/github/github.js";
 import {
   BYPASS_COOKIE_PARAM,
   BYPASS_PARAM,

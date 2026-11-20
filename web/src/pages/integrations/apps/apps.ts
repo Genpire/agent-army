@@ -4,8 +4,8 @@
  * browser), the MCP Registry search, and how a connected app's status reads.
  */
 import { useEffect, useState } from "react";
-import type { AppAuthKind, AppCategory, CatalogApp, CatalogUrlField } from "../../../../../src/apps-catalog.js";
-import type { RegistryApp } from "../../../../../src/apps-registry.js";
+import type { AppAuthKind, AppCategory, CatalogApp, CatalogUrlField } from "../../../../../src/integrations/apps/apps-catalog.js";
+import type { RegistryApp } from "../../../../../src/integrations/apps/apps-registry.js";
 import { api, errorMessage } from "../../../lib/api";
 import { plural } from "../../../lib/format";
 import type { AgentSpec, PublicConfig } from "../../../lib/types";

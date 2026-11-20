@@ -9,7 +9,7 @@ import type { ConfigRepo } from "../core/config.js";
 import type { ConversationService } from "../chat/conversations.js";
 import type { Store } from "../core/store.js";
 import type { TaskRepo } from "../tasks/tasks.js";
-import type { WebhookDeps } from "../webhook.js";
+import type { WebhookDeps } from "../integrations/code-hosts/webhook.js";
 
 export interface IntegrationRouteDeps {
   configRepo: ConfigRepo;

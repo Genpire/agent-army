@@ -19,14 +19,14 @@ import {
   resolveMasterKey,
 } from "./core/config.js";
 import { hashPassword, randomToken, safeEqual, sessionKey, signSession, verifyPassword, verifySession } from "./core/crypto.js";
-import { repoAccessError } from "./code-host-access.js";
-import { GITHUB_REPO_RE, REPO_FORMAT_HINT, REPO_ID_MAX, isRepoId } from "./repo-id.js";
+import { repoAccessError } from "./integrations/code-hosts/code-host-access.js";
+import { GITHUB_REPO_RE, REPO_FORMAT_HINT, REPO_ID_MAX, isRepoId } from "./integrations/code-hosts/repo-id.js";
 import { CONVERSATION_ID_RE, ConversationService, MESSAGE_MAX_CHARS, type WebThreads } from "./chat/conversations.js";
 import { handleSlackEvent, withBrainSlot } from "./slack/dispatch.js";
 import { HrService, PROPOSAL_ID_RE, REVIEW_ID_RE } from "./team/hr.js";
 import { RecentSet } from "./slack/listen.js";
 import { MEMORY_MAX_FACTS, MemoryRepo } from "./chat/memory.js";
-import { MondayClient, MondayError, checkMonday, statusColumns } from "./monday.js";
+import { MondayClient, MondayError, checkMonday, statusColumns } from "./integrations/monday/monday.js";
 import {
   TicketAutomation,
   checkBoardAutomation,
@@ -36,7 +36,7 @@ import {
   removeWebhook,
   webhookChallenge,
   webhookIds,
-} from "./monday-automation.js";
+} from "./integrations/monday/monday-automation.js";
 import { NOTES_MAX_CHARS, NotesRepo } from "./chat/notes.js";
 import { loadOffice } from "./team/office.js";
 import { type QueryFn, createPointerBrain } from "./chat/pointer.js";
@@ -50,10 +50,10 @@ import { createStore } from "./core/store.js";
 import { readTimeline } from "./tasks/task-events.js";
 import { TaskRepo } from "./tasks/tasks.js";
 import { SKILL_NAME_RE, TeamSchema } from "./team/team.js";
-import { rememberConsoleUrl } from "./ticket-sync.js";
+import { rememberConsoleUrl } from "./integrations/tickets/ticket-sync.js";
 import { checkAnthropic, checkGithub, checkSlack } from "./core/validate.js";
 import { UsageRepo } from "./spending/usage.js";
-import { handleGithubWebhook, parseGithubPayload, verifyGithubSignature } from "./webhook.js";
+import { handleGithubWebhook, parseGithubPayload, verifyGithubSignature } from "./integrations/code-hosts/webhook.js";
 import { configSecrets, makeRedactor } from "./worker.js";
 import { aiRoutes } from "./routes/ai.js";
 import { appsRoutes } from "./routes/apps.js";

@@ -21,7 +21,7 @@ import {
 import { FsStore } from "../src/core/store.js";
 import { type Conversation, pendingMilestones, taskResultMarkdown } from "../src/chat/conversations.js";
 import { type Task, decodeTaskPayload, encodeTaskPayload, newTaskId } from "../src/tasks/tasks.js";
-import { GITHUB_REPO_RE, REPO_FORMAT_HINT, REPO_RE } from "../src/repo-id.js";
+import { GITHUB_REPO_RE, REPO_FORMAT_HINT, REPO_RE } from "../src/integrations/code-hosts/repo-id.js";
 import { helpText, isRepoAllowed, messageText, parseCommand, repoFromToken, resolveRepo } from "../src/slack/targeting.js";
 import { branchName, makeRedactor } from "../src/worker.js";
 import {

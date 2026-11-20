@@ -19,18 +19,18 @@ import { Spending } from "./spending/budget.js";
 import { type Screenshot, browserAvailable, browserServer, collectScreenshots } from "./tasks/browser.js";
 import { type CiOutcome, type WaitOptions, ciFailureDetails, ciFixPrompt, ciSummary, ciSummaryLine, storedCiSummary, waitForChecks } from "./tasks/ci.js";
 import { type ProviderSession, providerProblem, providerRuntime } from "./ai/ai-providers.js";
-import { repoTaskApps } from "./apps.js";
+import { repoTaskApps } from "./integrations/apps/apps.js";
 import { repoTaskEngines } from "./ai/engines.js";
-import type { CodeHost } from "./code-host.js";
-import { allHostSecrets, codeHostFor } from "./code-host-factory.js";
+import type { CodeHost } from "./integrations/code-hosts/code-host.js";
+import { allHostSecrets, codeHostFor } from "./integrations/code-hosts/code-host-factory.js";
 import { type Config, ConfigRepo, integrationSecrets, resolveMasterKey } from "./core/config.js";
-import { type PrRef, isHumanFeedback } from "./github.js";
+import { type PrRef, isHumanFeedback } from "./integrations/github/github.js";
 import { checkBashCommand } from "./tasks/guard.js";
 import { NOTES_MAX_CHARS, NotesRepo } from "./chat/notes.js";
 import { formatFeedback } from "./tasks/pr-feedback.js";
 import { BYPASS_ENV, type PreviewResult, checkPreview, previewSlackLine } from "./tasks/preview.js";
 import { type PlanItem, ProgressTracker, formatProgress } from "./tasks/progress.js";
-import { type CodeHostKind, HOST_TERMS, repoHost } from "./repo-id.js";
+import { type CodeHostKind, HOST_TERMS, repoHost } from "./integrations/code-hosts/repo-id.js";
 import { findRepoSetup, repoSetupContext, runSetupCommand, setupEnv } from "./tasks/repo-setup.js";
 import { ScreenshotRepo } from "./tasks/screenshots.js";
 import { HISTORY_SCAN, routeRepoTask } from "./tasks/sizing.js";
@@ -40,7 +40,7 @@ import { createStore } from "./core/store.js";
 import { TimelineRecorder, checkItems, plainLine } from "./tasks/task-events.js";
 import { type Task, type TaskPhase, type TaskReport, TaskRepo, type ThreadState, decodeTaskPayload, isWebTask } from "./tasks/tasks.js";
 import { type RepoAgentOptions, type Team, type TeamSkills, agentLabel, buildRepoAgents, repoAllowedTools, skillQueryOptions } from "./team/team.js";
-import { ticketFinished, ticketPrOpened, ticketStarted, ticketStopped, ticketSyncDeps } from "./ticket-sync.js";
+import { ticketFinished, ticketPrOpened, ticketStarted, ticketStopped, ticketSyncDeps } from "./integrations/tickets/ticket-sync.js";
 import { UsageRepo } from "./spending/usage.js";
 
 const execFileAsync = promisify(execFile);
@@ -335,7 +335,7 @@ export function configSecrets(c: Config): (string | undefined)[] {
 }
 
 // Who a task's commits on GitHub are authored by; each host's client decides for its own (CodeHost.commitIdentity).
-export { FALLBACK_COMMIT_EMAIL, githubCommitIdentity as commitIdentity } from "./github.js";
+export { FALLBACK_COMMIT_EMAIL, githubCommitIdentity as commitIdentity } from "./integrations/github/github.js";
 
 // ---------- Pull request texts ----------
 

@@ -13,7 +13,7 @@ import type {
   StartRepoTask,
 } from "./pointer-types.js";
 import { describeTasks } from "../tasks/progress.js";
-import { HOST_TERMS, repoHost } from "../repo-id.js";
+import { HOST_TERMS, repoHost } from "../integrations/code-hosts/repo-id.js";
 import type { Runner } from "../tasks/runner.js";
 import type { Store } from "../core/store.js";
 import { describeTimeline, plainLine, readTimeline } from "../tasks/task-events.js";

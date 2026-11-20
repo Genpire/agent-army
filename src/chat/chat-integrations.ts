@@ -7,11 +7,11 @@
  * subagents may call, and a rule for Pointer's instructions.
  */
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
-import { appChatIntegrations } from "../apps.js";
-import { codeHostChatIntegrations } from "../code-host-tools.js";
+import { appChatIntegrations } from "../integrations/apps/apps.js";
+import { codeHostChatIntegrations } from "../integrations/code-hosts/code-host-tools.js";
 import type { Config, ConfigRepo } from "../core/config.js";
-import { jiraChatIntegration } from "../jira.js";
-import { miroChatIntegration } from "../miro.js";
+import { jiraChatIntegration } from "../integrations/jira/jira.js";
+import { miroChatIntegration } from "../integrations/miro/miro.js";
 import type { AddAttachment } from "./pointer-types.js";
 
 export interface ChatIntegration {

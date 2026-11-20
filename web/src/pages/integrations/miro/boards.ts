@@ -4,7 +4,7 @@
  * server checks them again).
  */
 import type { SearchableItem } from "@astryxdesign/core/Typeahead";
-import type { MiroBoardSummary } from "../../../../../src/miro.js";
+import type { MiroBoardSummary } from "../../../../../src/integrations/miro/miro.js";
 import { api } from "../../../lib/api";
 
 export type { MiroBoardSummary };

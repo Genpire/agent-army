@@ -20,7 +20,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Options, type Settings, query } from "@anthropic-ai/claude-agent-sdk";
-import { type FetchLike, appUrlProblem, guardedFetch } from "../apps-net.js";
+import { type FetchLike, appUrlProblem, guardedFetch } from "../integrations/apps/apps-net.js";
 import { AI_PRESETS, type AiPreset, type ModelPrice, type PresetCapabilities, QWEN_SHARED_HOSTS, compatibleBaseUrl, presetFor } from "./ai-presets.js";
 import type { AiProviderConnection, AiProviderId, Config, ModelTier } from "../core/config.js";
 import type { QueryFn } from "../chat/pointer.js";
