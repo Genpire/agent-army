@@ -44,6 +44,14 @@ RUN node node_modules/playwright/cli.js install --with-deps chromium \
     && rm -rf /var/lib/apt/lists/* \
     && chmod -R a+rX /ms-playwright
 COPY --from=build /app/dist ./dist
+# Gemini CLI's system settings (src/ai/gemini-settings.ts): merged after a
+# repository's own .gemini/settings.json, so they win. Gemini CLI reads the
+# file only when it and every folder above it are root's and not writable by
+# others, so it is written here, as root; a task checks it before Gemini runs.
+# coreutils (timeout, which enforces each CLI run's deadline) is in the base image.
+RUN mkdir -p /etc/gemini-cli \
+    && node --input-type=module -e 'import { GEMINI_SYSTEM_SETTINGS as s } from "/app/dist/ai/gemini-settings.js"; process.stdout.write(JSON.stringify(s, null, 2) + "\n");' > /etc/gemini-cli/settings.json \
+    && chmod 755 /etc/gemini-cli && chmod 644 /etc/gemini-cli/settings.json
 COPY package.json ./
 COPY --from=build /app/public ./public
 ENV NODE_ENV=production PORT=8080 DATA_DIR=/data HOME=/home/node

@@ -1,8 +1,8 @@
 /**
  * Coding agent CLI admin routes (/api/engines/:id/…, id "codex" or "gemini"):
  * connect or update (the key, checked with OpenAI or Google unless
- * SKIP_VALIDATION=1, and the model), disconnect, and add a ready-made team
- * member that works through the engine. Keys are stored encrypted with the
+ * SKIP_VALIDATION=1, the model, and whether it may run without a sandbox),
+ * disconnect, and add a ready-made team member that works through the engine. Keys are stored encrypted with the
  * config and never returned (publicView masks them).
  */
 import { type Response, Router } from "express";
@@ -28,6 +28,8 @@ const SAVE = z.object({
     .max(100)
     .regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*$|^$/, "A model id is letters, digits and . _ : / -, like the CLI's --model takes.")
     .optional(),
+  /** Run the CLI where it has no sandbox (EngineConnection.allowUnsandboxed); absent: unchanged. */
+  allowUnsandboxed: z.boolean().optional(),
 });
 
 const CHECK: Record<EngineId, (key: string) => Promise<void>> = { codex: checkOpenAiKey, gemini: checkGeminiKey };
@@ -82,17 +84,18 @@ export function enginesRoutes(deps: IntegrationRouteDeps): Router {
         ...current,
         ...(key ? { apiKey: key, checkedAt: new Date().toISOString() } : {}),
         ...(parsed.data.model !== undefined ? { model: parsed.data.model } : {}),
+        ...(parsed.data.allowUnsandboxed !== undefined ? { allowUnsandboxed: parsed.data.allowUnsandboxed } : {}),
       };
     });
     res.json({ ok: true });
   });
 
-  // Forgets the key; the model stays for a later reconnect. Agents set to this engine work as Claude meanwhile.
+  // Forgets the key, and turns running without a sandbox off (a later reconnect starts safe); the model stays. Agents set to this engine work as Claude meanwhile.
   router.post("/api/engines/:id/disconnect", requireAdmin, async (req, res) => {
     const id = engineOf(req.params.id, res);
     if (!id) return;
     await configRepo.update((c) => {
-      c.engines[id] = { ...c.engines[id], apiKey: undefined, checkedAt: undefined };
+      c.engines[id] = { ...c.engines[id], apiKey: undefined, checkedAt: undefined, allowUnsandboxed: false };
     });
     res.json({ ok: true });
   });

@@ -358,6 +358,8 @@ export const EngineConnectionSchema = z.object({
   /** The model the CLI runs; empty = the CLI's default. */
   model: z.string().trim().max(100).default(""),
   checkedAt: z.string().optional(),
+  /** The owner lets the CLI run where it has no sandbox (Gemini CLI always; Codex when its sandbox does not work in the container): the task container is then the only boundary. */
+  allowUnsandboxed: z.boolean().default(false),
 });
 export type EngineConnection = z.infer<typeof EngineConnectionSchema>;
 
@@ -442,8 +444,8 @@ export const ConfigSchema = z.object({
   /** Coding agent CLIs the team can hand work to in repo tasks. */
   // Factory defaults: zod copies a default object only one level deep, so a literal would be shared between configs.
   engines: z
-    .object({ codex: EngineConnectionSchema.default(() => ({ model: "" })), gemini: EngineConnectionSchema.default(() => ({ model: "" })) })
-    .default(() => ({ codex: { model: "" }, gemini: { model: "" } })),
+    .object({ codex: EngineConnectionSchema.default(() => ({ model: "", allowUnsandboxed: false })), gemini: EngineConnectionSchema.default(() => ({ model: "", allowUnsandboxed: false })) })
+    .default(() => ({ codex: { model: "", allowUnsandboxed: false }, gemini: { model: "", allowUnsandboxed: false } })),
   /** Apps connected through their MCP servers. */
   apps: z.array(AppConnectionSchema).max(MAX_APPS).default([]),
   /** Slack channel ID -> "owner/repo" default project for that channel. */
@@ -668,8 +670,17 @@ export function publicView(c: Config) {
       ),
     },
     engines: Object.fromEntries(
-      ENGINE_IDS.map((id) => [id, { connected: Boolean(c.engines[id].apiKey), key: mask(c.engines[id].apiKey), model: c.engines[id].model, checkedAt: c.engines[id].checkedAt ?? null }]),
-    ) as Record<EngineId, { connected: boolean; key: string | null; model: string; checkedAt: string | null }>,
+      ENGINE_IDS.map((id) => [
+        id,
+        {
+          connected: Boolean(c.engines[id].apiKey),
+          key: mask(c.engines[id].apiKey),
+          model: c.engines[id].model,
+          checkedAt: c.engines[id].checkedAt ?? null,
+          allowUnsandboxed: c.engines[id].allowUnsandboxed,
+        },
+      ]),
+    ) as Record<EngineId, { connected: boolean; key: string | null; model: string; checkedAt: string | null; allowUnsandboxed: boolean }>,
     budget: c.budget,
     bindings: c.bindings,
     limits: c.limits,

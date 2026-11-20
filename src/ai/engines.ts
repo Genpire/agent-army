@@ -6,27 +6,36 @@
  *
  * The CLIs run from an in-process MCP server ("engines"), one tool per engine
  * and mode: `<engine>_run` for agents that change things, `<engine>_run_read_only`
- * for agents that only look. Each run:
+ * for agents that only look. An engine runs only inside its own sandbox (Codex,
+ * where the container allows it) or when the owner allowed it to run without
+ * one (EngineConnection.allowUnsandboxed; Gemini CLI has none here). Unsandboxed,
+ * its commands run as the worker's user, outside the shell guard: they can read
+ * the worker's environment through /proc. Each run:
  * - spawns the CLI in the checkout with a minimal environment: PATH, LANG,
  *   CI=1, a fresh private home and temp folder for this run, and that
  *   engine's key only (never the worker's environment, never another secret);
- * - has a hard timeout that kills the CLI's whole process group;
- * - streams short, redacted progress lines to the task's timeline;
+ * - has a hard timeout that kills the CLI's whole process group, enforced
+ *   again by coreutils `timeout` so it holds even if the worker dies; the
+ *   groups are also killed when the worker exits or gets SIGTERM, SIGINT or SIGHUP;
+ * - streams short, redacted progress lines to the task's timeline (each
+ *   output line capped, and what is kept from the run capped as it arrives);
  * - ends with the CLI's final message and what changed in the checkout
  *   (`git status --porcelain`, `git diff --stat`, through the worker's
  *   hardened git), capped and redacted.
  * Neither CLI reports a dollar cost: token counts are reported when the CLI gives them.
  */
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, execFile, spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { constants } from "node:fs";
-import { access, lstat, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
-import { createInterface } from "node:readline";
-import { delimiter, isAbsolute, join } from "node:path";
+import { access, lstat, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { delimiter, dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
+import { isDeepStrictEqual, promisify } from "node:util";
 import { type AgentDefinition, type McpServerConfig, createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { type Config, ENGINE_IDS, type EngineId } from "../core/config.js";
 import { type AgentSpec, type Team, enabledAgents } from "../team/team.js";
 import { gitRunner, makeRedactor } from "../tasks/worker.js";
+import { GEMINI_SYSTEM_SETTINGS, GEMINI_SYSTEM_SETTINGS_PATH } from "./gemini-settings.js";
 
 /** What a repo task gets for its engine agents. */
 export interface RepoTaskEngines {
@@ -53,6 +62,16 @@ export interface EngineDeps {
   minuteMs?: number;
   /** Least time between two progress lines of one run (default 15 s). */
   progressEveryMs?: number;
+  /** Gemini CLI's system settings file (tests: a file of their own, not root's). Default: GEMINI_SYSTEM_SETTINGS_PATH, checked to be root's. */
+  geminiSettings?: GeminiSettingsFile;
+  /** coreutils `timeout`, which enforces a run's deadline even if the worker dies (tests: a stand-in, or null for none). Default: found on PATH. */
+  timeoutCommand?: string | null;
+}
+
+/** Where Gemini CLI's system settings are, and whether to check they are root's (Gemini CLI skips the file otherwise). */
+export interface GeminiSettingsFile {
+  path: string;
+  checkOwner: boolean;
 }
 
 /** Each CLI, for people and for the platform. */
@@ -100,6 +119,15 @@ const MAX_PROGRESS_NOTES = 30;
 /** After SIGTERM, how long the process group has before SIGKILL. */
 const KILL_GRACE_MS = 2_000;
 const PROBE_TIMEOUT_MS = 30_000;
+/** An output line longer than this (characters) is dropped before it is parsed. */
+export const LINE_MAX_CHARS = 64 * 1024;
+/** While streaming: the CLI's messages kept (the last is its answer), the characters kept of each, and of an error it reports. */
+const KEEP_MESSAGES = 2;
+const MESSAGE_KEEP_CHARS = FINAL_MAX_CHARS + 2_000;
+const ERROR_KEEP_CHARS = 2_000;
+/** coreutils `timeout` stops a run this long after the worker's own deadline (so the worker normally stops it first and says why), and SIGKILLs it after BACKSTOP_KILL_AFTER. */
+const BACKSTOP_MARGIN_S = 30;
+const BACKSTOP_KILL_AFTER = "10s";
 
 // ---------- The ready-made team members (POST /api/engines/:id/agent) ----------
 
@@ -149,16 +177,32 @@ export async function findCommand(command: string, path = process.env.PATH ?? ""
   return undefined;
 }
 
-/** Process groups still running, killed if the worker exits first (a detached group outlives its parent). */
+/**
+ * Process groups still running, killed if the worker ends first (a detached
+ * group outlives its parent): when it exits, and when it gets one of the
+ * signals that end it ("exit" does not fire for those). A worker killed with
+ * SIGKILL runs no code: coreutils `timeout` still stops each run at its deadline.
+ */
 const liveGroups = new Set<number>();
-let exitHookInstalled = false;
+const ENDING_SIGNALS = ["SIGTERM", "SIGINT", "SIGHUP"] as const;
+let hooksInstalled = false;
+const killLiveGroups = () => {
+  for (const group of liveGroups) killGroup(group, "SIGKILL");
+};
+function onEndingSignal(signal: NodeJS.Signals): void {
+  killLiveGroups();
+  // Another listener handles this signal (a graceful shutdown): it decides when the process ends.
+  if (process.listenerCount(signal) > 1) return;
+  // Ours was the only one, so without it the signal would have ended the process. With no listener left, Node restores the default action; the signal is raised again.
+  for (const s of ENDING_SIGNALS) process.removeListener(s, onEndingSignal);
+  process.kill(process.pid, signal);
+}
 function trackGroup(pid: number): void {
   liveGroups.add(pid);
-  if (exitHookInstalled) return;
-  exitHookInstalled = true;
-  process.once("exit", () => {
-    for (const group of liveGroups) killGroup(group, "SIGKILL");
-  });
+  if (hooksInstalled) return;
+  hooksInstalled = true;
+  process.once("exit", killLiveGroups);
+  for (const s of ENDING_SIGNALS) process.on(s, onEndingSignal);
 }
 function killGroup(pid: number, signal: NodeJS.Signals): void {
   try {
@@ -166,6 +210,21 @@ function killGroup(pid: number, signal: NodeJS.Signals): void {
   } catch {
     // Already gone.
   }
+}
+
+let timeoutLookup: Promise<string | undefined> | undefined;
+/** coreutils `timeout` on PATH (it takes --kill-after; the image's Debian base has it), or undefined. Looked up once. */
+export function coreutilsTimeout(): Promise<string | undefined> {
+  timeoutLookup ??= (async () => {
+    const path = await findCommand("timeout");
+    if (!path) return undefined;
+    const version = await promisify(execFile)(path, ["--version"], { env: { PATH: process.env.PATH ?? "", LANG: "C" }, timeout: 5_000 }).then(
+      (r) => r.stdout,
+      () => "",
+    );
+    return /coreutils/i.test(version) ? path : undefined;
+  })();
+  return timeoutLookup;
 }
 
 /** The end of a text, from the start of a line: a cut line could hold part of a secret that redaction no longer recognises. */
@@ -189,10 +248,43 @@ export interface CliRun {
 }
 
 /**
+ * Splits a stream into lines of at most `max` characters: a longer line is
+ * dropped whole (`onDropped`), and no more than `max` of it is ever held.
+ */
+function readLines(input: NodeJS.ReadableStream, max: number, onLine: (line: string) => void, onDropped: () => void): void {
+  let buffer = "";
+  let dropping = false;
+  input.setEncoding("utf8");
+  input.on("data", (chunk: string) => {
+    let start = 0;
+    for (let newline = chunk.indexOf("\n"); newline >= 0; newline = chunk.indexOf("\n", start)) {
+      const piece = chunk.slice(start, newline);
+      start = newline + 1;
+      if (dropping) dropping = false; // the end of a line already dropped
+      else if (buffer.length + piece.length > max) onDropped();
+      else onLine(buffer + piece);
+      buffer = "";
+    }
+    if (dropping) return;
+    const rest = chunk.slice(start);
+    if (buffer.length + rest.length > max) {
+      dropping = true;
+      buffer = "";
+      onDropped();
+    } else buffer += rest;
+  });
+  input.on("end", () => {
+    if (!dropping && buffer) onLine(buffer);
+  });
+}
+
+/**
  * Runs a CLI in its own process group, the input on stdin and each stdout
- * line to `onLine`. At the timeout (or on `signal`) the whole group gets
- * SIGTERM, then SIGKILL; when the CLI exits, whatever it left running in its
- * group (a dev server, a watcher) is killed too.
+ * line (at most LINE_MAX_CHARS) to `onLine`. At the timeout (or on `signal`)
+ * the whole group gets SIGTERM, then SIGKILL; when the CLI exits, whatever it
+ * left running in its group (a dev server, a watcher) is killed too. With a
+ * `backstop`, it runs under coreutils `timeout`, which stops the group after
+ * that many seconds even if this process is gone.
  */
 export function runCli(o: {
   command: string;
@@ -203,11 +295,16 @@ export function runCli(o: {
   timeoutMs: number;
   signal?: AbortSignal;
   onLine?: (line: string) => void;
+  /** An output line over LINE_MAX_CHARS was dropped. */
+  onDroppedLine?: () => void;
+  backstop?: { command: string; seconds: number };
 }): Promise<CliRun> {
   return new Promise((resolve) => {
+    // `timeout` leads the group: at its deadline it signals the whole group (the CLI and everything it started), then SIGKILLs it.
+    const [file, args] = o.backstop ? [o.backstop.command, [`--kill-after=${BACKSTOP_KILL_AFTER}`, `${o.backstop.seconds}s`, o.command, ...o.args]] : [o.command, o.args];
     let child: ChildProcess;
     try {
-      child = spawn(o.command, o.args, { cwd: o.cwd, env: o.env, detached: true, stdio: ["pipe", "pipe", "pipe"] });
+      child = spawn(file, args, { cwd: o.cwd, env: o.env, detached: true, stdio: ["pipe", "pipe", "pipe"] });
     } catch (err) {
       resolve({ code: null, signal: null, timedOut: false, aborted: false, stderrTail: "", spawnError: err instanceof Error ? err.message : String(err) });
       return;
@@ -251,14 +348,18 @@ export function runCli(o: {
       stderr = (stderr + chunk).slice(-4 * STDERR_TAIL_CHARS);
     });
     if (child.stdout) {
-      const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
-      lines.on("line", (line) => {
-        try {
-          o.onLine?.(line);
-        } catch {
-          // A line the parser cannot use is skipped.
-        }
-      });
+      readLines(
+        child.stdout,
+        LINE_MAX_CHARS,
+        (line) => {
+          try {
+            o.onLine?.(line.endsWith("\r") ? line.slice(0, -1) : line);
+          } catch {
+            // A line the parser cannot use is skipped.
+          }
+        },
+        () => o.onDroppedLine?.(),
+      );
     }
     // The CLI is done: nothing it started may outlive it (its output closes only once they are gone too).
     child.on("exit", () => {
@@ -269,6 +370,12 @@ export function runCli(o: {
       if (hardKill) clearTimeout(hardKill);
       o.signal?.removeEventListener("abort", onAbort);
       if (pid) liveGroups.delete(pid);
+      if (o.backstop) {
+        // `timeout` could not start the CLI (126: not executable, 127: not found; its message starts with the path it was run as), or its own deadline came first (124).
+        const notStarted = code === 126 || code === 127 ? stderr.match(/^\S*timeout: (failed to run command.*)$/m)?.[1] : undefined;
+        if (notStarted) spawnError ??= notStarted;
+        if (code === 124) timedOut = true;
+      }
       resolve({ code, signal, timedOut, aborted, stderrTail: tailLines(stderr), ...(spawnError ? { spawnError } : {}) });
     });
   });
@@ -304,6 +411,13 @@ const oneLine = (text: string, max = 100) => {
   const flat = text.replace(/\s+/g, " ").trim();
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 };
+const keep = (text: string, max: number) => (text.length > max ? text.slice(0, max) : text);
+
+/** A new message from the CLI, as it streams: only the last few are kept, each capped. */
+function addMessage(state: RunState, text: string): void {
+  state.messages.push(keep(text, MESSAGE_KEEP_CHARS));
+  if (state.messages.length > KEEP_MESSAGES) state.messages.splice(0, state.messages.length - KEEP_MESSAGES);
+}
 
 /** `codex exec --json`: thread.started, turn.*, item.* (agent_message, command_execution, file_change…), error. */
 export const parseCodexEvent: LineParser = (event, state) => {
@@ -314,18 +428,18 @@ export const parseCodexEvent: LineParser = (event, state) => {
     return undefined;
   }
   if (type === "turn.failed") {
-    state.failure = str((event.error as { message?: unknown } | undefined)?.message) || "the turn failed";
+    state.failure = keep(str((event.error as { message?: unknown } | undefined)?.message) || "the turn failed", ERROR_KEEP_CHARS);
     return undefined;
   }
   if (type === "error") {
-    state.lastError = str(event.message);
+    state.lastError = keep(str(event.message), ERROR_KEEP_CHARS);
     return undefined;
   }
   if (type !== "item.completed") return undefined;
   const item = (event.item ?? {}) as Record<string, unknown>;
   switch (str(item.type)) {
     case "agent_message":
-      if (str(item.text).trim()) state.messages.push(str(item.text));
+      if (str(item.text).trim()) addMessage(state, str(item.text));
       return undefined;
     case "command_execution": {
       const exit = typeof item.exit_code === "number" ? ` (exit ${item.exit_code})` : "";
@@ -336,7 +450,7 @@ export const parseCodexEvent: LineParser = (event, state) => {
       return paths.length ? `changed ${oneLine(paths.join(", "), 100)}` : undefined;
     }
     case "error":
-      state.lastError = str(item.message);
+      state.lastError = keep(str(item.message), ERROR_KEEP_CHARS);
       return undefined;
     default:
       return undefined;
@@ -355,10 +469,11 @@ export const parseGeminiEvent: LineParser = (event, state) => {
   if (type === "message" && event.role === "assistant") {
     // Deltas: the text between two tool calls is one message.
     if (!state.messages.length || state.split) {
-      state.messages.push("");
+      addMessage(state, "");
       state.split = false;
     }
-    state.messages[state.messages.length - 1] += str(event.content);
+    const last = state.messages.length - 1;
+    if (state.messages[last]!.length < MESSAGE_KEEP_CHARS) state.messages[last] = keep(state.messages[last] + str(event.content), MESSAGE_KEEP_CHARS);
     return undefined;
   }
   if (type === "tool_use") {
@@ -368,13 +483,13 @@ export const parseGeminiEvent: LineParser = (event, state) => {
     return geminiToolText(name, params);
   }
   if (type === "error") {
-    state.lastError = str(event.message);
+    state.lastError = keep(str(event.message), ERROR_KEEP_CHARS);
     return undefined;
   }
   if (type === "result") {
     const stats = (event.stats ?? {}) as Record<string, unknown>;
     state.usage = { input: num(stats.input_tokens), output: num(stats.output_tokens), cached: num(stats.cached) };
-    if (str(event.status) === "error") state.failure = str((event.error as { message?: unknown } | undefined)?.message) || "the run failed";
+    if (str(event.status) === "error") state.failure = keep(str((event.error as { message?: unknown } | undefined)?.message) || "the run failed", ERROR_KEEP_CHARS);
     return undefined;
   }
   return undefined;
@@ -389,12 +504,22 @@ export interface EngineRunner {
   key: string;
   model: string;
   parse: LineParser;
-  /** Why this run cannot start (in its mode), or undefined. */
+  /** Why a run in this mode cannot start, as a clause ("the checkout has …"), or undefined. Asked when the task starts (its agents then work as Claude) and again before each run. */
   refuse(mode: EngineMode): Promise<string | undefined>;
   /** The private home is ready (settings written); the arguments and environment for one run. */
   prepare(home: string, tmp: string, mode: EngineMode): Promise<{ args: string[]; env: Record<string, string> }>;
   /** A line for the summary: how the CLI ran (sandbox, approvals). */
   modeText(mode: EngineMode): string;
+}
+
+/** What both runners are made from. */
+export interface RunnerOptions {
+  command: string;
+  key: string;
+  model: string;
+  repoDir: string;
+  /** The owner lets it run without a sandbox (EngineConnection.allowUnsandboxed). */
+  allowUnsandboxed: boolean;
 }
 
 const baseEnv = (home: string, tmp: string): Record<string, string> => ({
@@ -406,20 +531,23 @@ const baseEnv = (home: string, tmp: string): Record<string, string> => ({
   NO_COLOR: "1",
 });
 
-/** Codex's sandbox modes: its own sandbox when the container allows it, else the container is the boundary. */
+/** Codex's sandbox modes: its own sandbox when the container allows it, else (when the owner allows it) none, and the container is the boundary. */
 const codexSandbox = (mode: EngineMode, sandboxWorks: boolean) => (mode === "read" ? "read-only" : sandboxWorks ? "workspace-write" : "danger-full-access");
 
-export function codexRunner(command: string, key: string, model: string, repoDir: string, sandboxWorks: boolean): EngineRunner {
+export function codexRunner(o: RunnerOptions & { sandboxWorks: boolean }): EngineRunner {
   return {
     info: ENGINES.codex,
-    command,
-    key,
-    model,
+    command: o.command,
+    key: o.key,
+    model: o.model,
     parse: parseCodexEvent,
-    refuse: async (mode) =>
-      mode === "read" && !sandboxWorks ? "Codex cannot be kept read-only here: its sandbox does not work in this container. Do the assignment with your own tools instead." : undefined,
+    refuse: async (mode) => {
+      if (o.sandboxWorks) return undefined;
+      if (mode === "read") return "Codex cannot be kept read-only here: its sandbox does not work in this container";
+      return o.allowUnsandboxed ? undefined : "Codex's sandbox does not work in this container, and running it without one is turned off (Integrations → Codex)";
+    },
     prepare: async (home, tmp, mode) => {
-      const sandbox = codexSandbox(mode, sandboxWorks);
+      const sandbox = codexSandbox(mode, o.sandboxWorks);
       return {
         args: [
           "exec",
@@ -428,8 +556,10 @@ export function codexRunner(command: string, key: string, model: string, repoDir
           "--skip-git-repo-check",
           // Nothing from the home folder's config.toml: only the settings below.
           "--ignore-user-config",
+          // No execpolicy .rules files, the user's or the project's.
+          "--ignore-rules",
           "--cd",
-          repoDir,
+          o.repoDir,
           "--sandbox",
           sandbox,
           "-c",
@@ -444,27 +574,20 @@ export function codexRunner(command: string, key: string, model: string, repoDir
           "-c",
           "shell_environment_policy.ignore_default_excludes=false",
           ...(sandbox === "workspace-write" ? ["-c", "sandbox_workspace_write.network_access=true"] : []),
-          ...(model ? ["--model", model] : []),
+          ...(o.model ? ["--model", o.model] : []),
           "-", // the assignment on stdin
         ],
-        env: { ...baseEnv(home, tmp), CODEX_HOME: home, CODEX_API_KEY: key },
+        env: { ...baseEnv(home, tmp), CODEX_HOME: home, CODEX_API_KEY: o.key },
       };
     },
     modeText: (mode) => {
-      const sandbox = codexSandbox(mode, sandboxWorks);
-      return sandbox === "danger-full-access" ? "Codex ran without its sandbox (the task container is the boundary)." : `Codex ran in its ${sandbox} sandbox.`;
+      const sandbox = codexSandbox(mode, o.sandboxWorks);
+      return sandbox === "danger-full-access"
+        ? "Codex ran without its sandbox, as the owner allows (the task container is the only boundary)."
+        : `Codex ran in its ${sandbox} sandbox.`;
     },
   };
 }
-
-/** Gemini CLI's settings for a run: no auto-update, no usage statistics or telemetry, no project .env, its key hidden from the commands it runs. */
-const GEMINI_SETTINGS = {
-  general: { enableAutoUpdate: false, enableAutoUpdateNotification: false },
-  privacy: { usageStatisticsEnabled: false },
-  telemetry: { enabled: false },
-  advanced: { ignoreLocalEnv: true },
-  security: { environmentVariableRedaction: { enabled: true, blocked: ["GEMINI_API_KEY"] } },
-};
 
 const exists = (path: string) =>
   lstat(path).then(
@@ -472,24 +595,94 @@ const exists = (path: string) =>
     () => false,
   );
 
-export function geminiRunner(command: string, key: string, model: string, repoDir: string): EngineRunner {
+/** Whether `actual` holds every value of `expected`: objects may have more keys, everything else is equal. */
+function includesSettings(actual: unknown, expected: unknown): boolean {
+  if (expected !== null && typeof expected === "object" && !Array.isArray(expected)) {
+    if (actual === null || typeof actual !== "object" || Array.isArray(actual)) return false;
+    return Object.entries(expected).every(([k, v]) => includesSettings((actual as Record<string, unknown>)[k], v));
+  }
+  return isDeepStrictEqual(actual, expected);
+}
+
+/** A path and every folder above it, up to the root. */
+function withAncestors(path: string): string[] {
+  const chain = [path];
+  for (let dir = dirname(path); dir !== chain.at(-1); dir = dirname(dir)) chain.push(dir);
+  return chain;
+}
+
+/**
+ * Why Gemini CLI would not apply the platform's system settings from `path`,
+ * or undefined. Gemini CLI skips a system settings file unless it and every
+ * folder above it (and above its real path) belong to root and are not
+ * writable by group or others, and a symlink among them belongs to root; the
+ * file must hold every setting of GEMINI_SYSTEM_SETTINGS (an image built from
+ * an older version may not).
+ */
+export async function geminiSystemSettingsProblem(path: string, o: { checkOwner?: boolean } = {}): Promise<string | undefined> {
+  let text: string;
+  try {
+    text = await readFile(path, "utf8");
+  } catch {
+    return `${path} is missing (rebuild the image)`;
+  }
+  if (o.checkOwner ?? true) {
+    try {
+      for (const p of new Set([...withAncestors(resolvePath(path)), ...withAncestors(await realpath(path))])) {
+        const link = await lstat(p);
+        if (link.isSymbolicLink() && link.uid !== 0) return `${p} is a symlink root does not own`;
+        const s = await stat(p);
+        if (s.uid !== 0) return `${p} is not owned by root`;
+        if (s.mode & 0o022) return `${p} is writable by group or others`;
+      }
+    } catch (err) {
+      return `${path} could not be checked (${err instanceof Error ? err.message : String(err)})`;
+    }
+  }
+  let settings: unknown;
+  try {
+    settings = JSON.parse(text);
+  } catch {
+    return `${path} is not valid JSON`;
+  }
+  return includesSettings(settings, GEMINI_SYSTEM_SETTINGS) ? undefined : `${path} does not hold this version's settings (rebuild the image)`;
+}
+
+export function geminiRunner(o: RunnerOptions & { systemSettings: GeminiSettingsFile }): EngineRunner {
   return {
     info: ENGINES.gemini,
-    command,
-    key,
-    model,
+    command: o.command,
+    key: o.key,
+    model: o.model,
     parse: parseGeminiEvent,
     refuse: async (mode) => {
-      // Gemini CLI loads a trusted workspace's .gemini/.env into its own environment, where it could redirect the key.
-      if (await exists(join(repoDir, ".gemini", ".env"))) return "Gemini CLI was not started: the checkout has a .gemini/.env file, which it would load into its own environment.";
-      // In a trusted workspace the project's .gemini settings and policies apply, and they can allow edits.
-      if (mode === "read" && (await exists(join(repoDir, ".gemini"))))
-        return "Gemini CLI cannot be kept read-only here: the checkout has its own .gemini settings, which could allow edits. Do the assignment with your own tools instead.";
+      if (!o.allowUnsandboxed) return "Gemini CLI has no sandbox here, and running it without one is turned off (Integrations → Gemini CLI)";
+      // The platform's settings, merged after the checkout's own (gemini-settings.ts): without them nothing keeps a repository from changing how it runs.
+      const settings = await geminiSystemSettingsProblem(o.systemSettings.path, { checkOwner: o.systemSettings.checkOwner });
+      if (settings) return `its system settings are not in place: ${settings}`;
+      // In a trusted workspace Gemini CLI loads the first .gemini/.env from the checkout up to / into its own environment, where it could set a proxy or turn off TLS checks
+      // (the variables set here stay: a .env file never overrides one). A folder above the checkout is the platform's, but an earlier unsandboxed run could have written there.
+      for (const dir of withAncestors(resolvePath(o.repoDir))) {
+        if (!(await exists(join(dir, ".gemini", ".env")))) continue;
+        return dir === resolvePath(o.repoDir)
+          ? "the checkout has a .gemini/.env file, which Gemini CLI would load into its own environment"
+          : `${join(dir, ".gemini", ".env")} is above the checkout, and Gemini CLI would load it into its own environment`;
+      }
+      // In a trusted workspace the project's .gemini settings and policies apply: in read mode they could allow edits.
+      if (mode === "read") {
+        if (await exists(join(o.repoDir, ".gemini"))) return "Gemini CLI cannot be kept read-only here: the checkout has its own .gemini settings, which could allow edits";
+        return undefined;
+      }
+      // The system settings win only for the keys they set: the checkout's own could still add what they do not cover (policy paths, context folders), and its policies apply.
+      for (const name of ["settings.json", "policies"]) {
+        if (await exists(join(o.repoDir, ".gemini", name))) return `the checkout has its own .gemini/${name}, which Gemini CLI would apply to the run`;
+      }
       return undefined;
     },
     prepare: async (home, tmp, mode) => {
+      // The user scope gets the same settings: a second copy, should the system file ever be skipped (the checkout's would still merge after it).
       await mkdir(join(home, ".gemini"), { recursive: true, mode: 0o700 });
-      await writeFile(join(home, ".gemini", "settings.json"), JSON.stringify(GEMINI_SETTINGS), { mode: 0o600 });
+      await writeFile(join(home, ".gemini", "settings.json"), JSON.stringify(GEMINI_SYSTEM_SETTINGS), { mode: 0o600 });
       return {
         args: [
           "--prompt",
@@ -499,12 +692,17 @@ export function geminiRunner(command: string, key: string, model: string, repoDi
           // Headless, "default" approves reading only: edits and commands are refused.
           "--approval-mode",
           mode === "read" ? "default" : "yolo",
-          ...(model ? ["--model", model] : []),
+          // No MCP server starts: only one with this name may, and none has it (the flag wins over every settings file).
+          "--allowed-mcp-server-names",
+          `none-${randomBytes(12).toString("hex")}`,
+          ...(o.model ? ["--model", o.model] : []),
         ],
         env: {
           ...baseEnv(home, tmp),
           GEMINI_CLI_HOME: home,
-          GEMINI_API_KEY: key,
+          GEMINI_API_KEY: o.key,
+          // The platform's settings, merged last (a .env file cannot move them: the variable is set).
+          GEMINI_CLI_SYSTEM_SETTINGS_PATH: o.systemSettings.path,
           // Headless runs need a trusted workspace; the checkout is the task's own.
           GEMINI_CLI_TRUST_WORKSPACE: "true",
           // Set (empty or off), so no .env file can set them: where requests and the key go.
@@ -515,7 +713,10 @@ export function geminiRunner(command: string, key: string, model: string, repoDi
         },
       };
     },
-    modeText: (mode) => (mode === "read" ? "Gemini CLI ran read-only (it may read, not edit or run commands)." : "Gemini CLI ran with every action approved (no sandbox: the task container is the boundary)."),
+    modeText: (mode) =>
+      mode === "read"
+        ? "Gemini CLI ran read-only (it may read, not edit or run commands)."
+        : "Gemini CLI ran with every action approved and no sandbox, as the owner allows (the task container is the only boundary).",
   };
 }
 
@@ -538,6 +739,19 @@ export function cliPrompt(task: string, mode: EngineMode): string {
 }
 
 /**
+ * Every string in a parsed event, redacted. Decoded, so a secret the JSON line
+ * escaped (quotes, backslashes, newlines) is caught too, and whole, before any
+ * of it is cut. Anything nested deeper than the parsers look is left out.
+ */
+function redactStrings(value: unknown, redact: (text: string) => string, depth = 0): unknown {
+  if (typeof value === "string") return redact(value);
+  if (value === null || typeof value !== "object") return value;
+  if (depth >= 16) return undefined;
+  if (Array.isArray(value)) return value.map((v) => redactStrings(v, redact, depth + 1));
+  return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, redactStrings(v, redact, depth + 1)]));
+}
+
+/**
  * Runs one assignment through an engine and returns the summary for the
  * agent (capped and redacted). Never throws.
  */
@@ -546,14 +760,17 @@ export async function runEngine(
   o: { task: string; mode: EngineMode; timeoutMin: number; deps: EngineDeps; root: string; signal?: AbortSignal; gitHome: string },
 ): Promise<{ ok: boolean; text: string }> {
   const { info } = runner;
-  const redact = (text: string) => makeRedactor([runner.key])(o.deps.redact(text));
+  const ownKey = makeRedactor([runner.key]);
+  const redact = (text: string) => ownKey(o.deps.redact(text));
   // Redacted before it is cut, so a cut never leaves part of a secret.
   const finish = (ok: boolean, text: string) => ({ ok, text: cap(redact(text), SUMMARY_MAX_CHARS) });
 
+  // Checked again before each run: the checkout may have changed since the task started.
   const refusal = await runner.refuse(o.mode);
   if (refusal) {
-    o.deps.note(redact(`${info.label}: ${refusal}`).slice(0, NOTE_MAX_CHARS * 2));
-    return finish(false, refusal);
+    const why = `${info.label} was not started: ${refusal}.`;
+    o.deps.note(redact(why).slice(0, NOTE_MAX_CHARS * 2));
+    return finish(false, `${why} ${o.mode === "read" ? "Do the assignment with your own tools instead." : "Say so in your report, so the work can go to another agent."}`);
   }
 
   // A fresh home and temp folder for each run (0700, next to the checkout): nothing one run writes there reaches the next.
@@ -570,25 +787,34 @@ export async function runEngine(
 
     let notes = 0;
     let lastNoteAt = 0;
+    let dropped = 0;
     const every = o.deps.progressEveryMs ?? 15_000;
+    const timeoutMs = o.timeoutMin * (o.deps.minuteMs ?? 60_000);
+    const backstop = o.deps.timeoutCommand === undefined ? await coreutilsTimeout() : (o.deps.timeoutCommand ?? undefined);
     const run = await runCli({
       command: runner.command,
       args,
       cwd: o.deps.repoDir,
       env,
       input: cliPrompt(o.task, o.mode),
-      timeoutMs: o.timeoutMin * (o.deps.minuteMs ?? 60_000),
+      timeoutMs,
       signal: o.signal,
+      backstop: backstop ? { command: backstop, seconds: Math.ceil(timeoutMs / 1000) + BACKSTOP_MARGIN_S } : undefined,
+      onDroppedLine: () => {
+        if (dropped++ === 0) o.deps.note(`${info.label}: an output line over ${LINE_MAX_CHARS / 1024} KB was left out`);
+      },
       onLine: (line) => {
         const trimmed = line.trim();
         if (!trimmed.startsWith("{")) return;
-        // Redacted as it arrives: everything kept from the run (messages, commands, errors) is.
-        const progress = runner.parse(JSON.parse(redact(trimmed)) as Record<string, unknown>, state);
+        // Redacted as it arrives, once decoded: everything kept from the run (messages, commands, errors) is.
+        const event = redactStrings(JSON.parse(trimmed), redact);
+        if (event === null || typeof event !== "object" || Array.isArray(event)) return;
+        const progress = runner.parse(event as Record<string, unknown>, state);
         const now = Date.now();
         if (progress && notes < MAX_PROGRESS_NOTES && now - lastNoteAt >= every) {
           notes++;
           lastNoteAt = now;
-          o.deps.note(`${info.label}: ${progress}`.slice(0, NOTE_MAX_CHARS));
+          o.deps.note(redact(`${info.label}: ${progress}`).slice(0, NOTE_MAX_CHARS));
         }
       },
     });
@@ -636,7 +862,9 @@ export async function runEngine(
       usage ? `Tokens: ${usageText(usage)} (billed by ${info.vendor}).` : "",
       `Changed files in the checkout (git status --porcelain):\n${cap(status || "(none)", LIST_MAX_CHARS)}`,
       diffStat ? `git diff --stat:\n${cap(diffStat, LIST_MAX_CHARS)}` : "",
-      final ? `${info.label}'s final message:\n${cap(final, FINAL_MAX_CHARS)}` : `${info.label} gave no final message.`,
+      // Redacted whole before the cut (a secret split across streamed pieces is whole only here).
+      final ? `${info.label}'s final message:\n${cap(redact(final), FINAL_MAX_CHARS)}` : `${info.label} gave no final message.`,
+      dropped ? `${dropped} output line${dropped === 1 ? "" : "s"} over ${LINE_MAX_CHARS / 1024} KB ${dropped === 1 ? "was" : "were"} left out.` : "",
       !ok && errorTail ? `The end of its error output:\n${errorTail}` : "",
     ];
     return finish(ok, parts.filter(Boolean).join("\n\n"));
@@ -728,22 +956,32 @@ export async function repoTaskEngines(config: Config, deps: EngineDeps): Promise
       deps.note(`${info.label} left out: its CLI (${info.command}) is not installed in this image, so ${names(agents)} work${agents.length === 1 ? "s" : ""} as Claude in this task.`);
       continue;
     }
+    const options: RunnerOptions = { command, key: conn.apiKey, model: conn.model, repoDir: deps.repoDir, allowUnsandboxed: conn.allowUnsandboxed };
     let runner: EngineRunner;
-    let usable = agents;
+    let sandboxed = false;
     if (id === "codex") {
-      const sandboxWorks = await probeCodexSandbox(command, await privateRoot());
-      deps.note(sandboxWorks ? "Codex runs in its own sandbox." : "Codex runs without its sandbox; the task container is the boundary.");
-      runner = codexRunner(command, conn.apiKey, conn.model, deps.repoDir, sandboxWorks);
-      if (!sandboxWorks) {
-        // A read-only Codex needs its sandbox: those agents work as Claude instead.
-        const lookers = agents.filter((a) => engineMode(a) === "read");
-        if (lookers.length) deps.note(`Codex cannot run read-only without its sandbox: ${names(lookers)} work${lookers.length === 1 ? "s" : ""} as Claude in this task.`);
-        usable = agents.filter((a) => engineMode(a) === "write");
-      }
+      sandboxed = await probeCodexSandbox(command, await privateRoot());
+      runner = codexRunner({ ...options, sandboxWorks: sandboxed });
     } else {
-      runner = geminiRunner(command, conn.apiKey, conn.model, deps.repoDir);
+      runner = geminiRunner({ ...options, systemSettings: deps.geminiSettings ?? { path: GEMINI_SYSTEM_SETTINGS_PATH, checkOwner: true } });
     }
-    if (usable.length) active.push({ id, runner, agents: usable });
+    // What would refuse a run (no sandbox and not allowed, the image, the checkout's own settings): those agents work as Claude, as they could not hand their work over.
+    const refused = new Map<string, AgentSpec[]>();
+    const usable: AgentSpec[] = [];
+    for (const mode of ["write", "read"] as const) {
+      const inMode = agents.filter((a) => engineMode(a) === mode);
+      if (!inMode.length) continue;
+      const reason = await runner.refuse(mode);
+      if (reason) refused.set(reason, [...(refused.get(reason) ?? []), ...inMode]);
+      else usable.push(...inMode);
+    }
+    for (const [reason, left] of refused) {
+      deps.note(`${info.label} left out: ${reason}. ${names(left)} work${left.length === 1 ? "s" : ""} as Claude in this task.`);
+    }
+    if (!usable.length) continue;
+    if (id === "codex") deps.note(sandboxed ? "Codex runs in its own sandbox." : "Codex runs without its sandbox, as the owner allows: the task container is the only boundary.");
+    else deps.note("Gemini CLI runs with no sandbox, as the owner allows: the task container is the only boundary.");
+    active.push({ id, runner, agents: usable });
   }
   if (!active.length) return undefined;
 

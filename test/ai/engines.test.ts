@@ -1,8 +1,9 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { AgentDefinition } from "@anthropic-ai/claude-agent-sdk";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -10,15 +11,21 @@ import { type Config, ConfigSchema } from "../../src/core/config.js";
 import {
   ENGINES_SERVER,
   type EngineDeps,
+  LINE_MAX_CHARS,
   SUMMARY_MAX_CHARS,
   codexRunner,
+  coreutilsTimeout,
   engineAgentTemplate,
   engineToolName,
   findCommand,
   geminiRunner,
+  geminiSystemSettingsProblem,
+  parseCodexEvent,
+  parseGeminiEvent,
   repoTaskEngines,
   runEngine,
 } from "../../src/ai/engines.js";
+import { GEMINI_NO_MCP_SERVER, GEMINI_SYSTEM_SETTINGS, GEMINI_SYSTEM_SETTINGS_PATH } from "../../src/ai/gemini-settings.js";
 import { createApp } from "../../src/server.js";
 import { type AgentSpec, buildRepoAgents, defaultTeam, repoAllowedTools } from "../../src/team/team.js";
 import { makeRedactor } from "../../src/tasks/worker.js";
@@ -26,6 +33,9 @@ import { makeRedactor } from "../../src/tasks/worker.js";
 const CODEX_KEY = "sk-proj-engine-test-key-0123456789abcdef";
 const GEMINI_KEY = "AIzaEngineTestKey0123456789abcdefghijk";
 const CONFIG_SECRET = "config-secret-0123456789";
+/** A secret the JSON line escapes: a quote, a backslash and a newline. */
+const ESCAPED_SECRET = 'pa"ss\\word\nnext-line-0123456789';
+const REPO_ROOT = resolve(import.meta.dirname, "../..");
 
 const sh = promisify(execFile);
 
@@ -41,11 +51,14 @@ if (args[0] === "sandbox") process.exit(behavior.sandbox ? 0 : 1);
 let input = "";
 process.stdin.on("data", (d) => (input += d));
 process.stdin.on("end", () => {
-  fs.writeFileSync(DIR + "/record.json", JSON.stringify({ cwd: process.cwd(), env: process.env, args, input }));
+  const home = process.env.GEMINI_CLI_HOME;
+  const userSettings = home && fs.existsSync(home + "/.gemini/settings.json") ? JSON.parse(fs.readFileSync(home + "/.gemini/settings.json", "utf8")) : undefined;
+  fs.writeFileSync(DIR + "/record.json", JSON.stringify({ cwd: process.cwd(), env: process.env, args, input, userSettings }));
   const emit = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
   const gemini = args.includes("--output-format");
   if (behavior.kind === "hang") {
     const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    fs.writeFileSync(DIR + "/cli.pid", String(process.pid));
     fs.writeFileSync(DIR + "/grandchild.pid", String(child.pid));
     setInterval(() => {}, 1000);
     return;
@@ -54,6 +67,8 @@ process.stdin.on("end", () => {
     process.stderr.write("fatal: the key " + (process.env.CODEX_API_KEY || process.env.GEMINI_API_KEY) + " was refused\\n");
     process.exit(3);
   }
+  for (const o of behavior.before || []) emit(o);
+  if (behavior.longLine) emit({ type: "item.completed", item: { id: "0", type: "agent_message", text: "L".repeat(behavior.longLine) } });
   fs.writeFileSync("feature.txt", "made by the engine\\n");
   const final = behavior.final || "Added feature.txt.";
   if (gemini) {
@@ -65,7 +80,7 @@ process.stdin.on("end", () => {
     emit({ type: "result", status: "success", stats: { input_tokens: 1200, output_tokens: 300, cached: 100, total_tokens: 1500 } });
   } else {
     emit({ type: "thread.started", thread_id: "t1" });
-    emit({ type: "item.completed", item: { id: "1", type: "command_execution", command: "npm test", aggregated_output: "", exit_code: 0, status: "completed" } });
+    emit({ type: "item.completed", item: { id: "1", type: "command_execution", command: behavior.command || "npm test", aggregated_output: "", exit_code: 0, status: "completed" } });
     emit({ type: "item.completed", item: { id: "2", type: "file_change", changes: [{ path: "feature.txt", kind: "add" }], status: "completed" } });
     emit({ type: "item.completed", item: { id: "3", type: "agent_message", text: final } });
     emit({ type: "turn.completed", usage: { input_tokens: 1200, cached_input_tokens: 100, output_tokens: 300, reasoning_output_tokens: 0 } });
@@ -74,12 +89,63 @@ process.stdin.on("end", () => {
 `;
 }
 
+/** A stand-in for coreutils `timeout`: records its arguments, then runs the command (or fails as behavior.json says). */
+function fakeTimeoutSource(dir: string): string {
+  return `#!${process.execPath}
+const fs = require("node:fs");
+const { spawn } = require("node:child_process");
+const DIR = ${JSON.stringify(dir)};
+const behavior = JSON.parse(fs.readFileSync(DIR + "/behavior.json", "utf8"));
+const args = process.argv.slice(2);
+fs.writeFileSync(DIR + "/timeout-record.json", JSON.stringify(args));
+if (behavior.timeoutExit === 127) {
+  process.stderr.write(process.argv[1] + ": failed to run command '" + args[2] + "': No such file or directory\\n");
+  process.exit(127);
+}
+if (behavior.timeoutExit === 124) process.exit(124);
+const child = spawn(args[2], args.slice(3), { stdio: "inherit" });
+child.on("exit", (code) => process.exit(code ?? 1));
+`;
+}
+
+/** A worker in a process of its own: runs a hanging CLI through runCli, then waits (to be signalled or killed). */
+function workerSource(dir: string): string {
+  return `import { runCli } from ${JSON.stringify(join(REPO_ROOT, "src/ai/engines.ts"))};
+const [fake, mode, timeoutCommand] = process.argv.slice(2);
+if (mode === "graceful") process.on("SIGTERM", () => setTimeout(() => process.exit(7), 300));
+const run = runCli({
+  command: fake,
+  args: ["exec"],
+  cwd: ${JSON.stringify(dir)},
+  env: { PATH: process.env.PATH ?? "" },
+  input: "",
+  timeoutMs: 120_000,
+  ...(mode === "backstop" ? { backstop: { command: timeoutCommand, seconds: 1 } } : {}),
+});
+await run;
+`;
+}
+
 interface Record_ {
   cwd: string;
   env: Record<string, string>;
   args: string[];
   input: string;
+  userSettings?: unknown;
 }
+
+const alive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+const until = async (check: () => boolean, ms = 10_000) => {
+  for (const end = Date.now() + ms; !check() && Date.now() < end; ) await new Promise((r) => setTimeout(r, 50));
+  return check();
+};
 
 describe("coding agent CLIs in a repo task", () => {
   let root = "";
@@ -88,20 +154,35 @@ describe("coding agent CLIs in a repo task", () => {
   let engineRoot = "";
   let gitHome = "";
   let fake = "";
+  let fakeTimeout = "";
+  let settingsFile = "";
   let notes: string[] = [];
   const saved = { MASTER_KEY: process.env.MASTER_KEY, ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY };
 
-  const behave = (b: { kind?: "ok" | "hang" | "fail"; sandbox?: boolean; final?: string }) => writeFile(join(root, "behavior.json"), JSON.stringify({ kind: "ok", sandbox: true, ...b }));
+  const behave = (b: {
+    kind?: "ok" | "hang" | "fail";
+    sandbox?: boolean;
+    final?: string;
+    command?: string;
+    before?: unknown[];
+    longLine?: number;
+    timeoutExit?: number;
+  }) => writeFile(join(root, "behavior.json"), JSON.stringify({ kind: "ok", sandbox: true, ...b }));
   const record = async (): Promise<Record_> => JSON.parse(await readFile(join(root, "record.json"), "utf8"));
   const deps = (extra: Partial<EngineDeps> = {}): EngineDeps => ({
     repoDir,
     workRoot,
-    redact: makeRedactor([CONFIG_SECRET]),
+    redact: makeRedactor([CONFIG_SECRET, ESCAPED_SECRET]),
     note: (text) => notes.push(text),
     commands: { codex: fake, gemini: fake },
     progressEveryMs: 0,
+    geminiSettings: { path: settingsFile, checkOwner: false },
     ...extra,
   });
+  const codex = (o: Partial<Parameters<typeof codexRunner>[0]> = {}) =>
+    codexRunner({ command: fake, key: CODEX_KEY, model: "", repoDir, allowUnsandboxed: false, sandboxWorks: true, ...o });
+  const gemini = (o: Partial<Parameters<typeof geminiRunner>[0]> = {}) =>
+    geminiRunner({ command: fake, key: GEMINI_KEY, model: "", repoDir, allowUnsandboxed: true, systemSettings: { path: settingsFile, checkOwner: false }, ...o });
   const run = (runner: ReturnType<typeof codexRunner>, mode: "read" | "write", extra: Partial<Parameters<typeof runEngine>[1]> = {}) =>
     runEngine(runner, { task: "Add feature.txt with a line of text.", mode, timeoutMin: 1, deps: deps(), root: engineRoot, gitHome, ...extra });
 
@@ -121,6 +202,12 @@ describe("coding agent CLIs in a repo task", () => {
     fake = join(root, "fake-cli.cjs");
     await writeFile(fake, fakeCliSource(root));
     await chmod(fake, 0o755);
+    // Named like the real one: its messages start with the path it runs as.
+    fakeTimeout = join(root, "timeout");
+    await writeFile(fakeTimeout, fakeTimeoutSource(root));
+    await chmod(fakeTimeout, 0o755);
+    settingsFile = join(root, "gemini-system-settings.json");
+    await writeFile(settingsFile, JSON.stringify(GEMINI_SYSTEM_SETTINGS));
     await behave({});
     notes = [];
     // The worker's own secrets: never in a CLI's environment.
@@ -144,13 +231,13 @@ describe("coding agent CLIs in a repo task", () => {
 
   it("says so when the CLI cannot start", async () => {
     const notExecutable = join(root, "behavior.json");
-    const result = await run(codexRunner(notExecutable, CODEX_KEY, "", repoDir, true), "write");
+    const result = await run(codex({ command: notExecutable }), "write");
     expect(result.ok).toBe(false);
     expect(result.text).toMatch(/Codex failed after .*: it could not start \(/);
   });
 
   it("runs Codex in the checkout with a minimal environment and reports what changed", async () => {
-    const result = await run(codexRunner(fake, CODEX_KEY, "gpt-test", repoDir, true), "write");
+    const result = await run(codex({ model: "gpt-test" }), "write");
     const r = await record();
     expect(r.cwd).toBe(repoDir);
     const keys = Object.keys(r.env)
@@ -163,7 +250,9 @@ describe("coding agent CLIs in a repo task", () => {
     expect(r.env.HOME.startsWith(engineRoot)).toBe(true);
     expect(JSON.stringify(r.env)).not.toContain("should-not-leak");
     expect(r.args.slice(0, 2)).toEqual(["exec", "--json"]);
-    expect(r.args).toEqual(expect.arrayContaining(["--ephemeral", "--ignore-user-config", "--cd", repoDir, "--model", "gpt-test", "shell_environment_policy.ignore_default_excludes=false"]));
+    expect(r.args).toEqual(
+      expect.arrayContaining(["--ephemeral", "--ignore-user-config", "--ignore-rules", "--cd", repoDir, "--model", "gpt-test", "shell_environment_policy.ignore_default_excludes=false"]),
+    );
     expect(r.args[r.args.indexOf("--sandbox") + 1]).toBe("workspace-write");
     expect(r.args.at(-1)).toBe("-");
     expect(r.input).toContain("Add feature.txt with a line of text.");
@@ -171,6 +260,7 @@ describe("coding agent CLIs in a repo task", () => {
 
     expect(result.ok).toBe(true);
     expect(result.text).toContain("Codex finished");
+    expect(result.text).toContain("Codex ran in its workspace-write sandbox.");
     expect(result.text).toContain("?? feature.txt");
     expect(result.text).toContain("Added feature.txt.");
     expect(result.text).toContain("Tokens: 1200 in (100 cached), 300 out");
@@ -180,58 +270,128 @@ describe("coding agent CLIs in a repo task", () => {
     expect(notes.at(-1)).toMatch(/^Codex finished after .* · 1 file changed in the checkout · tokens 1200 in/);
   });
 
-  it("runs Codex without its sandbox when the container has none, and read-only only with it", async () => {
-    await run(codexRunner(fake, CODEX_KEY, "", repoDir, false), "write");
+  it("runs Codex without its sandbox only when the owner allows it, and read-only only with it", async () => {
+    const refused = await run(codex({ sandboxWorks: false }), "write");
+    expect(refused.ok).toBe(false);
+    expect(refused.text).toContain("Codex was not started: Codex's sandbox does not work in this container, and running it without one is turned off");
+    expect(refused.text).toContain("Say so in your report");
+    expect(notes.at(-1)).toMatch(/^Codex was not started: /);
+    await expect(readFile(join(root, "record.json"))).rejects.toThrow();
+
+    const allowed = await run(codex({ sandboxWorks: false, allowUnsandboxed: true }), "write");
     let r = await record();
     expect(r.args[r.args.indexOf("--sandbox") + 1]).toBe("danger-full-access");
     expect(r.args).not.toContain("--model");
+    expect(allowed.text).toContain("Codex ran without its sandbox, as the owner allows (the task container is the only boundary).");
 
-    await run(codexRunner(fake, CODEX_KEY, "", repoDir, true), "read");
+    await run(codex(), "read");
     r = await record();
     expect(r.args[r.args.indexOf("--sandbox") + 1]).toBe("read-only");
     expect(r.input).toContain("Work read-only");
 
     await rm(join(root, "record.json"));
-    const refused = await run(codexRunner(fake, CODEX_KEY, "", repoDir, false), "read");
-    expect(refused.ok).toBe(false);
-    expect(refused.text).toContain("cannot be kept read-only");
+    for (const allowUnsandboxed of [false, true]) {
+      const readOnly = await run(codex({ sandboxWorks: false, allowUnsandboxed }), "read");
+      expect(readOnly.ok).toBe(false);
+      expect(readOnly.text).toContain("cannot be kept read-only");
+      expect(readOnly.text).toContain("Do the assignment with your own tools instead.");
+    }
     await expect(readFile(join(root, "record.json"))).rejects.toThrow();
   });
 
-  it("runs Gemini CLI headless with its own home, trusted workspace and yolo or read-only approvals", async () => {
-    const result = await run(geminiRunner(fake, GEMINI_KEY, "gemini-test", repoDir), "write");
+  it("runs Gemini CLI headless with its own home, the platform's system settings, no MCP servers and yolo or read-only approvals", async () => {
+    const result = await run(gemini({ model: "gemini-test" }), "write");
     const r = await record();
     expect(r.cwd).toBe(repoDir);
     expect(r.args).toEqual(expect.arrayContaining(["--output-format", "stream-json", "--model", "gemini-test"]));
     expect(r.args[r.args.indexOf("--approval-mode") + 1]).toBe("yolo");
-    expect(r.env).toMatchObject({ GEMINI_API_KEY: GEMINI_KEY, GEMINI_CLI_TRUST_WORKSPACE: "true", GOOGLE_GEMINI_BASE_URL: "", GOOGLE_GENAI_USE_VERTEXAI: "false" });
+    expect(r.env).toMatchObject({
+      GEMINI_API_KEY: GEMINI_KEY,
+      GEMINI_CLI_SYSTEM_SETTINGS_PATH: settingsFile,
+      GEMINI_CLI_TRUST_WORKSPACE: "true",
+      GOOGLE_GEMINI_BASE_URL: "",
+      GOOGLE_GENAI_USE_VERTEXAI: "false",
+    });
     expect(r.env.GEMINI_CLI_HOME).toBe(r.env.HOME);
     expect(JSON.stringify(r.env)).not.toContain("should-not-leak");
     expect(r.env.CODEX_API_KEY).toBeUndefined();
+    // The user scope gets the same settings.
+    expect(r.userSettings).toEqual(GEMINI_SYSTEM_SETTINGS);
+    // Only an MCP server with a random name may start: none has it.
+    const mcpName = r.args[r.args.indexOf("--allowed-mcp-server-names") + 1]!;
+    expect(mcpName).toMatch(/^none-[0-9a-f]{24}$/);
     expect(result.ok).toBe(true);
     expect(result.text).toContain("Added feature.txt.");
     expect(result.text).toContain("Tokens: 1200 in (100 cached), 300 out");
+    expect(result.text).toContain("Gemini CLI ran with every action approved and no sandbox, as the owner allows");
     expect(notes).toContain("Gemini CLI: write_file feature.txt");
 
-    await run(geminiRunner(fake, GEMINI_KEY, "", repoDir), "read");
-    expect((await record()).args[(await record()).args.indexOf("--approval-mode") + 1]).toBe("default");
+    await run(gemini(), "read");
+    const again = await record();
+    expect(again.args[again.args.indexOf("--approval-mode") + 1]).toBe("default");
+    expect(again.args[again.args.indexOf("--allowed-mcp-server-names") + 1]).not.toBe(mcpName);
   });
 
-  it("does not start Gemini CLI where the checkout's own .gemini could change it", async () => {
-    await mkdir(join(repoDir, ".gemini"));
-    const readOnly = await run(geminiRunner(fake, GEMINI_KEY, "", repoDir), "read");
-    expect(readOnly.ok).toBe(false);
-    expect(readOnly.text).toContain("cannot be kept read-only");
+  it("does not start Gemini CLI without the owner's leave, without its system settings, or where the checkout's own .gemini could change it", async () => {
+    const refusal = async (runner: ReturnType<typeof geminiRunner>, mode: "read" | "write") => {
+      const result = await run(runner, mode);
+      expect(result.ok).toBe(false);
+      return result.text;
+    };
+    expect(await refusal(gemini({ allowUnsandboxed: false }), "write")).toContain("Gemini CLI has no sandbox here, and running it without one is turned off");
+    expect(await refusal(gemini({ allowUnsandboxed: false }), "read")).toContain("Gemini CLI has no sandbox here");
+    expect(await refusal(gemini({ systemSettings: { path: join(root, "missing.json"), checkOwner: false } }), "write")).toContain("its system settings are not in place");
+    await writeFile(settingsFile, JSON.stringify({ ...GEMINI_SYSTEM_SETTINGS, hooksConfig: { enabled: true } }));
+    expect(await refusal(gemini(), "write")).toContain("does not hold this version's settings");
+    await writeFile(settingsFile, JSON.stringify(GEMINI_SYSTEM_SETTINGS));
+
+    // A .gemini folder with neither settings nor policies: a write run starts, a read-only one does not.
+    await mkdir(join(repoDir, ".gemini", "commands"), { recursive: true });
+    expect((await run(gemini(), "write")).ok).toBe(true);
+    await rm(join(root, "record.json"));
+    expect(await refusal(gemini(), "read")).toContain("cannot be kept read-only");
+
+    await writeFile(join(repoDir, ".gemini", "settings.json"), JSON.stringify({ mcpServers: { evil: { command: "sh" } } }));
+    expect(await refusal(gemini(), "write")).toContain("the checkout has its own .gemini/settings.json, which Gemini CLI would apply to the run");
+    await rm(join(repoDir, ".gemini", "settings.json"));
+    await mkdir(join(repoDir, ".gemini", "policies"));
+    expect(await refusal(gemini(), "write")).toContain("the checkout has its own .gemini/policies");
+
     await writeFile(join(repoDir, ".gemini", ".env"), "GOOGLE_GEMINI_BASE_URL=https://example.invalid\n");
-    const write = await run(geminiRunner(fake, GEMINI_KEY, "", repoDir), "write");
-    expect(write.ok).toBe(false);
-    expect(write.text).toContain(".gemini/.env");
+    expect(await refusal(gemini(), "write")).toContain("the checkout has a .gemini/.env file");
+    // One in a folder above the checkout is loaded too (the first found, walking up).
+    await rm(join(repoDir, ".gemini"), { recursive: true });
+    await mkdir(join(workRoot, ".gemini"));
+    await writeFile(join(workRoot, ".gemini", ".env"), "HTTPS_PROXY=http://127.0.0.1:9\n");
+    expect(await refusal(gemini(), "write")).toContain(`${join(workRoot, ".gemini", ".env")} is above the checkout`);
     await expect(readFile(join(root, "record.json"))).rejects.toThrow();
+  });
+
+  it("runs under coreutils `timeout`, which holds the deadline past the worker's own", async () => {
+    await run(codex(), "write", { deps: deps({ timeoutCommand: fakeTimeout }) });
+    const args = JSON.parse(await readFile(join(root, "timeout-record.json"), "utf8")) as string[];
+    // 1 min plus the margin, then the CLI and its own arguments.
+    expect(args.slice(0, 4)).toEqual(["--kill-after=10s", "90s", fake, "exec"]);
+    expect((await record()).args[0]).toBe("exec");
+
+    await rm(join(root, "timeout-record.json"));
+    expect((await run(codex(), "write", { deps: deps({ timeoutCommand: null }) })).ok).toBe(true);
+    expect(existsSync(join(root, "timeout-record.json"))).toBe(false);
+
+    await behave({ timeoutExit: 127 });
+    expect((await run(codex(), "write", { deps: deps({ timeoutCommand: fakeTimeout }) })).text).toContain(`it could not start (failed to run command '${fake}': No such file or directory)`);
+    await behave({ timeoutExit: 124 });
+    expect((await run(codex(), "write", { deps: deps({ timeoutCommand: fakeTimeout }) })).text).toContain("it timed out after 1 min");
+
+    // The image's: GNU coreutils, found on PATH (none on a Mac without coreutils).
+    const found = await findCommand("timeout");
+    const version = found ? (await sh(found, ["--version"]).catch(() => ({ stdout: "" }))).stdout : "";
+    expect(await coreutilsTimeout()).toBe(found && /coreutils/i.test(version) ? found : undefined);
   });
 
   it("kills the CLI and everything it started at the timeout", { timeout: 20_000 }, async () => {
     await behave({ kind: "hang" });
-    const result = await runEngine(codexRunner(fake, CODEX_KEY, "", repoDir, true), {
+    const result = await runEngine(codex(), {
       task: "Never finish.",
       mode: "write",
       timeoutMin: 1,
@@ -242,21 +402,51 @@ describe("coding agent CLIs in a repo task", () => {
     expect(result.ok).toBe(false);
     expect(result.text).toContain("timed out after 1 min");
     const pid = Number(await readFile(join(root, "grandchild.pid"), "utf8"));
-    const alive = () => {
-      try {
-        process.kill(pid, 0);
-        return true;
-      } catch {
-        return false;
-      }
-    };
-    for (let i = 0; i < 40 && alive(); i++) await new Promise((r) => setTimeout(r, 50));
-    expect(alive()).toBe(false);
+    expect(await until(() => !alive(pid), 2_000)).toBe(true);
+  });
+
+  describe("when the worker ends first", () => {
+    /** Starts a worker that runs a hanging CLI; resolves once the CLI and its child are up. */
+    async function startWorker(mode: "plain" | "graceful" | "backstop", timeoutCommand = "") {
+      await behave({ kind: "hang" });
+      const script = join(root, "worker.mts");
+      await writeFile(script, workerSource(repoDir));
+      const child = spawn(process.execPath, ["--import", "tsx", script, fake, mode, timeoutCommand], { cwd: REPO_ROOT, stdio: ["ignore", "ignore", "pipe"] });
+      let stderr = "";
+      child.stderr.on("data", (d: Buffer) => (stderr += d.toString()));
+      const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((done) => child.on("exit", (code, signal) => done({ code, signal })));
+      expect(await until(() => existsSync(join(root, "grandchild.pid")), 15_000), stderr).toBe(true);
+      const pids = { cli: Number(await readFile(join(root, "cli.pid"), "utf8")), grandchild: Number(await readFile(join(root, "grandchild.pid"), "utf8")) };
+      return { child, exited, pids };
+    }
+
+    it("kills the CLIs on SIGTERM, then ends by that signal", { timeout: 30_000 }, async () => {
+      const { child, exited, pids } = await startWorker("plain");
+      child.kill("SIGTERM");
+      expect(await exited).toEqual({ code: null, signal: "SIGTERM" });
+      expect(await until(() => !alive(pids.cli) && !alive(pids.grandchild), 2_000)).toBe(true);
+    });
+
+    it("leaves the exit to the worker's own SIGTERM handler, after killing the CLIs", { timeout: 30_000 }, async () => {
+      const { child, exited, pids } = await startWorker("graceful");
+      child.kill("SIGTERM");
+      expect(await until(() => !alive(pids.cli) && !alive(pids.grandchild), 2_000)).toBe(true);
+      expect(await exited).toEqual({ code: 7, signal: null });
+    });
+
+    it.skipIf(!existsSync("/usr/bin/timeout"))("is stopped by coreutils `timeout` at its deadline when the worker is SIGKILLed", { timeout: 30_000 }, async () => {
+      const real = (await coreutilsTimeout())!;
+      const { child, exited, pids } = await startWorker("backstop", real);
+      child.kill("SIGKILL");
+      await exited;
+      // The worker ran no code: `timeout` stops the group after its 1 s.
+      expect(await until(() => !alive(pids.cli) && !alive(pids.grandchild), 15_000)).toBe(true);
+    });
   });
 
   it("caps and redacts what it returns and writes to the timeline", async () => {
     await behave({ final: `Done. The key is ${CODEX_KEY} and the config has ${CONFIG_SECRET}. ${"x".repeat(50_000)}` });
-    const result = await run(codexRunner(fake, CODEX_KEY, "", repoDir, true), "write", { task: `Use ${CONFIG_SECRET} nowhere.` });
+    const result = await run(codex(), "write", { task: `Use ${CONFIG_SECRET} nowhere.` });
     expect(result.text.length).toBeLessThanOrEqual(SUMMARY_MAX_CHARS);
     expect(result.text).not.toContain(CODEX_KEY);
     expect(result.text).not.toContain(CONFIG_SECRET);
@@ -267,16 +457,109 @@ describe("coding agent CLIs in a repo task", () => {
 
     // A key right where the final message is cut (6 000 characters) is redacted first, never left in part.
     await behave({ final: `${"x".repeat(5_950)}${CODEX_KEY}${"y".repeat(200)}` });
-    const atCut = await run(codexRunner(fake, CODEX_KEY, "", repoDir, true), "write");
+    const atCut = await run(codex(), "write");
     expect(atCut.text).not.toContain(CODEX_KEY.slice(0, 10));
     expect(atCut.text).toContain("x[redacted]");
 
     await behave({ kind: "fail" });
-    const failed = await run(codexRunner(fake, CODEX_KEY, "", repoDir, true), "write");
+    const failed = await run(codex(), "write");
     expect(failed.ok).toBe(false);
     expect(failed.text).toContain("exited with code 3");
     expect(failed.text).toContain("fatal: the key [redacted] was refused");
     expect(failed.text).not.toContain(CODEX_KEY);
+  });
+
+  it("redacts a secret the JSON line escapes, and one where a progress line is cut", async () => {
+    // Escaped in the raw line (\\" \\\\ \\n): only the decoded text holds it as it is.
+    await behave({ command: `curl -d '${ESCAPED_SECRET}' https://example.invalid`, final: `Sent ${ESCAPED_SECRET}.` });
+    const result = await run(codex(), "write");
+    const all = [...notes, result.text].join("\n");
+    expect(all).not.toContain(ESCAPED_SECRET);
+    expect(all).not.toContain("next-line-0123456789");
+    expect(notes).toContain("Codex: ran `curl -d '[redacted]' https://example.invalid` (exit 0)");
+    expect(result.text).toContain("Sent [redacted].");
+
+    // A command whose secret straddles the 80 characters a progress line keeps: redacted whole, then cut.
+    notes = [];
+    await behave({ command: `${"a".repeat(70)} ${CONFIG_SECRET}` });
+    await run(codex(), "write");
+    const ran = notes.find((n) => n.startsWith("Codex: ran"))!;
+    expect(ran).toContain(" [redac");
+    expect(ran).not.toContain(CONFIG_SECRET.slice(0, 6));
+  });
+
+  it("drops an output line over 64 KB, with a note, and keeps the rest", async () => {
+    await behave({ longLine: LINE_MAX_CHARS + 10, before: [{ type: "item.completed", item: { type: "agent_message", text: "x".repeat(LINE_MAX_CHARS - 200) } }] });
+    const result = await run(codex(), "write");
+    expect(result.ok).toBe(true);
+    expect(notes).toContain("Codex: an output line over 64 KB was left out");
+    expect(result.text).toContain("1 output line over 64 KB was left out.");
+    // The lines after it still count: the command, the change, the final message.
+    expect(notes).toContain("Codex: ran `npm test` (exit 0)");
+    expect(result.text).toContain("Added feature.txt.");
+  });
+
+  it("keeps only the last messages, each capped, while streaming", () => {
+    const codexState = { messages: [] as string[] };
+    for (let i = 0; i < 50; i++) parseCodexEvent({ type: "item.completed", item: { type: "agent_message", text: `message ${i} ${"m".repeat(20_000)}` } }, codexState);
+    expect(codexState.messages).toHaveLength(2);
+    expect(codexState.messages[1]).toMatch(/^message 49 /);
+    expect(codexState.messages.every((m) => m.length <= 8_000)).toBe(true);
+    parseCodexEvent({ type: "turn.failed", error: { message: "e".repeat(50_000) } }, codexState);
+    expect((codexState as { failure?: string }).failure!.length).toBeLessThanOrEqual(2_000);
+
+    const geminiState = { messages: [] as string[] };
+    for (let i = 0; i < 500; i++) parseGeminiEvent({ type: "message", role: "assistant", content: "d".repeat(1_000), delta: true }, geminiState);
+    expect(geminiState.messages).toEqual(["d".repeat(8_000)]);
+    for (let i = 0; i < 10; i++) {
+      parseGeminiEvent({ type: "tool_use", tool_name: "read_file", parameters: { file_path: `f${i}` } }, geminiState);
+      parseGeminiEvent({ type: "message", role: "assistant", content: `after ${i}` }, geminiState);
+    }
+    expect(geminiState.messages).toEqual(["after 8", "after 9"]);
+  });
+
+  describe("Gemini CLI's system settings", () => {
+    it("lock down what a repository's own settings could change", () => {
+      const s = GEMINI_SYSTEM_SETTINGS;
+      expect(GEMINI_SYSTEM_SETTINGS_PATH).toBe("/etc/gemini-cli/settings.json");
+      expect(s.advanced.ignoreLocalEnv).toBe(true);
+      expect(s.security.environmentVariableRedaction).toEqual({ enabled: true, allowed: [], blocked: ["GEMINI_API_KEY"] });
+      expect(s.security.auth).toMatchObject({ selectedType: "gemini-api-key", enforcedType: "gemini-api-key" });
+      // An empty allowlist means "no limit" in Gemini CLI 0.70.0: it names a server that does not exist.
+      expect(s.mcp).toEqual({ allowed: [GEMINI_NO_MCP_SERVER], serverCommand: "" });
+      expect(s.hooksConfig.enabled).toBe(false);
+      expect(s.tools).toEqual({ sandbox: false, discoveryCommand: "", callCommand: "" });
+      expect(s.telemetry.enabled).toBe(false);
+      expect(s.privacy.usageStatisticsEnabled).toBe(false);
+    });
+
+    it("are written into the image, as root, from this module", async () => {
+      const dockerfile = await readFile(join(REPO_ROOT, "Dockerfile"), "utf8");
+      const user = dockerfile.indexOf("\nUSER node");
+      const write = dockerfile.indexOf(`> ${GEMINI_SYSTEM_SETTINGS_PATH}`);
+      expect(write).toBeGreaterThan(0);
+      expect(write).toBeLessThan(user);
+      expect(dockerfile).toContain('import { GEMINI_SYSTEM_SETTINGS as s } from "/app/dist/ai/gemini-settings.js"');
+    });
+
+    it("must be in place, whole and root's before Gemini CLI runs", async () => {
+      expect(await geminiSystemSettingsProblem(settingsFile, { checkOwner: false })).toBeUndefined();
+      // More settings than the platform's are fine (an image may add its own).
+      await writeFile(settingsFile, JSON.stringify({ ...GEMINI_SYSTEM_SETTINGS, ui: { hideBanner: true }, security: { ...GEMINI_SYSTEM_SETTINGS.security, disableYoloMode: false } }));
+      expect(await geminiSystemSettingsProblem(settingsFile, { checkOwner: false })).toBeUndefined();
+      await writeFile(settingsFile, JSON.stringify({ ...GEMINI_SYSTEM_SETTINGS, mcp: { allowed: [], serverCommand: "" } }));
+      expect(await geminiSystemSettingsProblem(settingsFile, { checkOwner: false })).toContain("does not hold this version's settings");
+      await writeFile(settingsFile, "{ not json");
+      expect(await geminiSystemSettingsProblem(settingsFile, { checkOwner: false })).toContain("is not valid JSON");
+      expect(await geminiSystemSettingsProblem(join(root, "missing.json"))).toContain("is missing");
+      // Root's file, root's folders: the owner check passes, and the content is what fails.
+      expect(await geminiSystemSettingsProblem("/etc/passwd")).toContain("is not valid JSON");
+    });
+
+    it.skipIf(process.getuid?.() === 0)("is refused when it is not root's (Gemini CLI would skip it)", async () => {
+      await writeFile(settingsFile, JSON.stringify(GEMINI_SYSTEM_SETTINGS));
+      expect(await geminiSystemSettingsProblem(settingsFile)).toMatch(/is not owned by root|writable by group or others/);
+    });
   });
 
   describe("repoTaskEngines", () => {
@@ -286,11 +569,14 @@ describe("coding agent CLIs in a repo task", () => {
       access,
       engine,
     });
-    const configWith = (agents: AgentSpec[], keys: { codex?: string; gemini?: string } = {}): Config => {
+    const configWith = (agents: AgentSpec[], keys: { codex?: string; gemini?: string } = {}, allow: { codex?: boolean; gemini?: boolean } = {}): Config => {
       const team = defaultTeam();
       return ConfigSchema.parse({
         team: { ...team, agents: [...team.agents, ...agents] },
-        engines: { codex: { apiKey: keys.codex, model: "" }, gemini: { apiKey: keys.gemini, model: "" } },
+        engines: {
+          codex: { apiKey: keys.codex, model: "", allowUnsandboxed: allow.codex ?? false },
+          gemini: { apiKey: keys.gemini, model: "", allowUnsandboxed: allow.gemini ?? false },
+        },
       });
     };
 
@@ -313,9 +599,9 @@ describe("coding agent CLIs in a repo task", () => {
     it("gives engine agents a light subagent with the run tool and the server at the top level", async () => {
       const coder = agent("codex", "codex", "write");
       const looker = agent("gemini", "gemini", "read");
-      const config = configWith([coder, looker], { codex: CODEX_KEY, gemini: GEMINI_KEY });
+      const config = configWith([coder, looker], { codex: CODEX_KEY, gemini: GEMINI_KEY }, { gemini: true });
       const engines = (await repoTaskEngines(config, deps()))!;
-      expect(notes).toEqual(["Codex runs in its own sandbox."]);
+      expect(notes).toEqual(["Codex runs in its own sandbox.", "Gemini CLI runs with no sandbox, as the owner allows: the task container is the only boundary."]);
       expect(Object.keys(engines.servers)).toEqual([ENGINES_SERVER]);
       expect(engines.allToolNames).toEqual([engineToolName("codex", "write"), engineToolName("gemini", "read")]);
       expect(engines.allToolNames).toEqual(["mcp__engines__codex_run", "mcp__engines__gemini_run_read_only"]);
@@ -345,14 +631,53 @@ describe("coding agent CLIs in a repo task", () => {
       expect(repoAllowedTools(config.team, { engines })).toEqual(expect.arrayContaining(engines.allToolNames));
     });
 
-    it("works without Codex's sandbox, leaving read-only Codex agents on Claude", async () => {
+    it("leaves Codex agents on Claude where its sandbox does not work, unless the owner allows it to run without one", async () => {
       await behave({ sandbox: false });
       const coder = agent("codex", "codex", "write");
       const reviewer = agent("checker", "codex", "read");
-      const engines = (await repoTaskEngines(configWith([coder, reviewer], { codex: CODEX_KEY }), deps()))!;
-      expect(notes).toEqual(["Codex runs without its sandbox; the task container is the boundary.", "Codex cannot run read-only without its sandbox: Checker works as Claude in this task."]);
+      expect(await repoTaskEngines(configWith([coder, reviewer], { codex: CODEX_KEY }), deps())).toBeUndefined();
+      expect(notes).toEqual([
+        "Codex left out: Codex's sandbox does not work in this container, and running it without one is turned off (Integrations → Codex). Codex works as Claude in this task.",
+        "Codex left out: Codex cannot be kept read-only here: its sandbox does not work in this container. Checker works as Claude in this task.",
+      ]);
+
+      notes = [];
+      const engines = (await repoTaskEngines(configWith([coder, reviewer], { codex: CODEX_KEY }, { codex: true }), deps()))!;
+      expect(notes).toEqual([
+        "Codex left out: Codex cannot be kept read-only here: its sandbox does not work in this container. Checker works as Claude in this task.",
+        "Codex runs without its sandbox, as the owner allows: the task container is the only boundary.",
+      ]);
       expect(engines.allToolNames).toEqual(["mcp__engines__codex_run"]);
       expect(engines.agentDefinition(reviewer, { description: "d", prompt: "p" })).toBeUndefined();
+    });
+
+    it("leaves Gemini agents on Claude without the owner's leave, without the system settings, or with the checkout's own .gemini settings", async () => {
+      const coder = agent("gemini", "gemini", "write");
+      const looker = agent("reader", "gemini", "read");
+      expect(await repoTaskEngines(configWith([coder, looker], { gemini: GEMINI_KEY }), deps())).toBeUndefined();
+      expect(notes).toEqual([
+        "Gemini CLI left out: Gemini CLI has no sandbox here, and running it without one is turned off (Integrations → Gemini CLI). Gemini, Reader work as Claude in this task.",
+      ]);
+
+      notes = [];
+      const allowed = configWith([coder, looker], { gemini: GEMINI_KEY }, { gemini: true });
+      expect(await repoTaskEngines(allowed, deps({ geminiSettings: { path: join(root, "missing.json"), checkOwner: false } }))).toBeUndefined();
+      expect(notes).toEqual([`Gemini CLI left out: its system settings are not in place: ${join(root, "missing.json")} is missing (rebuild the image). Gemini, Reader work as Claude in this task.`]);
+      // By default the image's file, root's: not on a test machine (or not yet written).
+      notes = [];
+      if (!existsSync(GEMINI_SYSTEM_SETTINGS_PATH)) {
+        expect(await repoTaskEngines(allowed, deps({ geminiSettings: undefined }))).toBeUndefined();
+        expect(notes[0]).toContain(`its system settings are not in place: ${GEMINI_SYSTEM_SETTINGS_PATH} is missing`);
+      }
+
+      notes = [];
+      await mkdir(join(repoDir, ".gemini"));
+      await writeFile(join(repoDir, ".gemini", "settings.json"), "{}");
+      expect(await repoTaskEngines(allowed, deps())).toBeUndefined();
+      expect(notes).toEqual([
+        "Gemini CLI left out: the checkout has its own .gemini/settings.json, which Gemini CLI would apply to the run. Gemini works as Claude in this task.",
+        "Gemini CLI left out: Gemini CLI cannot be kept read-only here: the checkout has its own .gemini settings, which could allow edits. Reader works as Claude in this task.",
+      ]);
     });
   });
 });
@@ -430,8 +755,30 @@ describe("Engines admin API", () => {
     expect((await post("/api/engines/codex", { model: "" })).status).toBe(200);
     expect(calls.length).toBe(before);
     const s = await state();
-    expect(s.config.engines.codex).toEqual({ connected: true, key: `••••${CODEX_KEY.slice(-4)}`, model: "", checkedAt: expect.any(String) });
+    expect(s.config.engines.codex).toEqual({ connected: true, key: `••••${CODEX_KEY.slice(-4)}`, model: "", checkedAt: expect.any(String), allowUnsandboxed: false });
     expect(JSON.stringify(s)).not.toContain(CODEX_KEY);
+  });
+
+  it("lets the owner allow running without a sandbox, off by default and again after a disconnect", async () => {
+    expect(ConfigSchema.parse({}).engines.gemini.allowUnsandboxed).toBe(false);
+    // A configuration saved before the setting existed.
+    expect(ConfigSchema.parse({ engines: { codex: { apiKey: CODEX_KEY, model: "" } } }).engines.codex.allowUnsandboxed).toBe(false);
+
+    expect(await reply(await post("/api/engines/gemini", { allowUnsandboxed: true }))).toEqual({ status: 400, body: { error: "Paste a Gemini API key to connect Gemini CLI." } });
+    expect((await post("/api/engines/gemini", { apiKey: GEMINI_KEY, model: "gemini-test" })).status).toBe(200);
+    expect((await state()).config.engines.gemini).toMatchObject({ connected: true, allowUnsandboxed: false });
+    expect((await post("/api/engines/gemini", { allowUnsandboxed: "yes" })).status).toBe(400);
+    expect(await reply(await post("/api/engines/gemini", { allowUnsandboxed: true }))).toEqual({ status: 200, body: { ok: true } });
+    expect((await state()).config.engines.gemini).toMatchObject({ connected: true, model: "gemini-test", allowUnsandboxed: true });
+    // Changing the model alone leaves it as it is.
+    expect((await post("/api/engines/gemini", { model: "gemini-other" })).status).toBe(200);
+    expect((await state()).config.engines.gemini).toMatchObject({ model: "gemini-other", allowUnsandboxed: true });
+    expect((await post("/api/engines/gemini", { allowUnsandboxed: false })).status).toBe(200);
+    expect((await state()).config.engines.gemini).toMatchObject({ allowUnsandboxed: false });
+
+    expect((await post("/api/engines/gemini", { allowUnsandboxed: true })).status).toBe(200);
+    expect((await post("/api/engines/gemini/disconnect", {})).status).toBe(200);
+    expect((await state()).config.engines.gemini).toMatchObject({ connected: false, allowUnsandboxed: false });
   });
 
   it("adds a ready-made team member once, and only when connected", async () => {
@@ -448,6 +795,6 @@ describe("Engines admin API", () => {
     expect((await post("/api/engines/gemini", { apiKey: GEMINI_KEY, model: "gemini-test" })).status).toBe(200);
     expect(await reply(await post("/api/engines/gemini/disconnect", {}))).toEqual({ status: 200, body: { ok: true } });
     const s = await state();
-    expect(s.config.engines.gemini).toEqual({ connected: false, key: null, model: "gemini-test", checkedAt: null });
+    expect(s.config.engines.gemini).toEqual({ connected: false, key: null, model: "gemini-test", checkedAt: null, allowUnsandboxed: false });
   });
 });
