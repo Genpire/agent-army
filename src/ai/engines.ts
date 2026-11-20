@@ -371,14 +371,27 @@ export function runCli(o: {
       o.signal?.removeEventListener("abort", onAbort);
       if (pid) liveGroups.delete(pid);
       if (o.backstop) {
-        // `timeout` could not start the CLI (126: not executable, 127: not found; its message starts with the path it was run as), or its own deadline came first (124).
-        const notStarted = code === 126 || code === 127 ? stderr.match(/^\S*timeout: (failed to run command.*)$/m)?.[1] : undefined;
+        // `timeout` could not start the CLI, or its own deadline came first (124).
+        const notStarted = timeoutStartFailure(code, stderr);
         if (notStarted) spawnError ??= notStarted;
         if (code === 124) timedOut = true;
       }
       resolve({ code, signal, timedOut, aborted, stderrTail: tailLines(stderr), ...(spawnError ? { spawnError } : {}) });
     });
   });
+}
+
+/**
+ * Why `timeout` could not start the CLI (exit 126: not executable, 127: not
+ * found), from its own line on stderr, or undefined. GNU coreutils says
+ * "failed to run command …", the Rust coreutils some distributions ship say
+ * "failed to execute process: … (os error 13)"; either way the line starts
+ * with the path `timeout` was run as. Only that line counts: the CLI itself
+ * may exit 126 or 127 for its own reasons.
+ */
+export function timeoutStartFailure(code: number | null, stderr: string): string | undefined {
+  if (code !== 126 && code !== 127) return undefined;
+  return stderr.match(/^\S*timeout: (failed to (?:run command|execute process).*)$/m)?.[1] ?? stderr.match(/^\S*timeout: (.+)$/m)?.[1];
 }
 
 // ---------- What each CLI says (JSONL on stdout) ----------

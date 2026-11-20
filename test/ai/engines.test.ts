@@ -24,6 +24,7 @@ import {
   parseGeminiEvent,
   repoTaskEngines,
   runEngine,
+  timeoutStartFailure,
 } from "../../src/ai/engines.js";
 import { GEMINI_NO_MCP_SERVER, GEMINI_SYSTEM_SETTINGS, GEMINI_SYSTEM_SETTINGS_PATH } from "../../src/ai/gemini-settings.js";
 import { createApp } from "../../src/server.js";
@@ -227,6 +228,14 @@ describe("coding agent CLIs in a repo task", () => {
     expect(await findCommand(fake)).toBe(fake);
     expect(await findCommand("codex-not-installed-here", root)).toBeUndefined();
     expect(await findCommand(join(root, "missing"))).toBeUndefined();
+  });
+
+  it("reads why timeout could not start the CLI, in GNU and Rust coreutils wording, and only from timeout's own line", () => {
+    expect(timeoutStartFailure(126, "/usr/bin/timeout: failed to run command '/x/codex': Permission denied\n")).toBe("failed to run command '/x/codex': Permission denied");
+    expect(timeoutStartFailure(126, "timeout: failed to execute process: Permission denied (os error 13)\n")).toBe("failed to execute process: Permission denied (os error 13)");
+    expect(timeoutStartFailure(127, "/usr/bin/timeout: failed to run command 'codex': No such file or directory")).toMatch(/No such file/);
+    expect(timeoutStartFailure(126, "codex: refusing to run here\n")).toBeUndefined();
+    expect(timeoutStartFailure(1, "timeout: failed to execute process: Permission denied")).toBeUndefined();
   });
 
   it("says so when the CLI cannot start", async () => {
