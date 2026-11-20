@@ -61,6 +61,12 @@ export function JiraAutomation() {
   const projectName = (key: string) => names[key] ?? key;
   const rows: ProjectRow[] = Object.entries(auto.projects).map(([key, project]) => ({ key, name: projectName(key), project }));
 
+  const toggleSigned = async (signed: boolean) => {
+    await save(() => api.post("/api/jira/automation", { signed }), {
+      success: signed ? "Deliveries must now be signed with the secret." : "Unsigned deliveries are accepted again (the secret in the address still applies).",
+    });
+  };
+
   const toggle = async (enabled: boolean) => {
     await save(() => api.post("/api/jira/automation", { enabled }), {
       success: enabled ? "Issue automation is on." : "Issue automation is off: issues no longer start tasks, and Jira's deliveries are refused.",
@@ -105,8 +111,12 @@ export function JiraAutomation() {
         label="What happens to an issue"
         steps={[
           <>
-            Someone moves the issue to the project's start status. {name} reads the issue again from Jira (the notification itself is not trusted) and starts the team on the
-            project's repository, with the issue's summary, description and latest comments.
+            A team member moves the issue to the project's start status. {name} reads the issue and its history again from Jira (the notification itself is not trusted) and
+            starts the team on the project's repository, with the issue's summary, description and latest comments.
+          </>,
+          <>
+            Only a person with an Atlassian account starts the team: when a Jira Service Management customer or an app (an automation rule, an integration) made the move, the
+            issue is left as it is.
           </>,
           <>The issue moves to the "working" status, with a comment linking the task's conversation.</>,
           <>When the pull request opens, its link is posted and the issue moves to the "in review" status.</>,
@@ -185,12 +195,23 @@ export function JiraAutomation() {
       <VStack gap={3}>
         <HStack gap={3} hAlign="between" vAlign="center" wrap="wrap">
           <Heading level={4}>Webhook</Heading>
-          <StatusLine tone={auto.webhookConfigured ? "success" : "neutral"} text={auto.webhookConfigured ? "Set up" : "Not set up"} />
+          <StatusLine
+            tone={auto.webhookConfigured ? (auto.signed ? "success" : "warning") : "neutral"}
+            text={auto.webhookConfigured ? (auto.signed ? "Set up · signed" : "Set up · not signed") : "Not set up"}
+          />
         </HStack>
         <Text color="secondary">
           Jira tells {name} when an issue changes. Connecting registers a webhook in Jira for the projects above, pointing at this deployment and signed with its secret; it
           needs the account to be a Jira administrator, otherwise you get the steps to add it by hand. Connect again after adding a project.
         </Text>
+        <Switch
+          label="Jira signs deliveries"
+          description="On: every delivery must carry Jira's signature made with the secret; others are refused. Turned on when the webhook is registered from here. Added by hand: paste the secret into the webhook in Jira first, then turn this on."
+          value={auto.signed}
+          isDisabled={!auto.webhookConfigured}
+          disabledMessage="Connect the webhook first."
+          changeAction={toggleSigned}
+        />
         <FormActions>
           <Button label={auto.webhookConfigured ? "Connect again" : "Connect webhook"} variant="primary" isDisabled={rows.length === 0} clickAction={() => connect(false)} />
           {auto.webhookConfigured && rows.length > 0 && (
@@ -220,7 +241,7 @@ function WebhookResult({ result }: { result: WebhookResponse }) {
   const fields = (
     <VStack gap={3}>
       <CopyField label="Webhook URL" value={result.url} description="Secret: anyone with this address can send issue changes. Paste it only into Jira." />
-      <CopyField label="Secret" value={result.secret} description="The same secret is at the end of the URL. Jira signs deliveries with it when it is set on the webhook." />
+      <CopyField label="Secret" value={result.secret} description="Paste it into the webhook's Secret field in Jira, then turn on Jira signs deliveries above." />
     </VStack>
   );
   if (result.ok) {

@@ -37,6 +37,8 @@ interface TicketTracker {
   post: string;
   /** The status a milestone sets; "" leaves it alone (none set, or the board or project is no longer automated). */
   statusFor(label: TicketLabel): string;
+  /** Checked before anything is written; throws (a short, plain reason) when the ticket must be left alone. */
+  ready?(): Promise<void>;
   setStatus(status: string): Promise<void>;
   addComment(text: string): Promise<void>;
 }
@@ -57,18 +59,31 @@ function mondayTracker(config: Config, client: TicketClient | undefined, ticket:
   };
 }
 
-/** A Jira issue: moved through its workflow by status name, and a comment. */
+/**
+ * A Jira issue: moved through its workflow by status name, and a comment.
+ * Jira answers the old key of a moved issue, so the issue's project is read
+ * first and must still be one Pointer may use.
+ */
 function jiraTracker(config: Config, client: JiraTicketClient | undefined, ticket: TaskTicket): TicketTracker | undefined {
   if (!client) return undefined;
   const project = config.jira.automation.projects[ticket.boardId];
+  let key = ticket.itemId;
   return {
     post: "comment",
     statusFor: (label) => (project ? project[JIRA_STATUS[label]].trim() : ""),
+    ready: async () => {
+      const where = await client.issueProject(ticket.itemId);
+      const allowed = config.jira.allowedProjectKeys;
+      if (allowed.length > 0 && !allowed.includes(where.projectKey)) {
+        throw new Error(`the issue is now in project ${where.projectKey}, which ${config.team.pointer.name} may not use`);
+      }
+      key = where.key;
+    },
     setStatus: async (status) => {
-      await client.transitionTo(ticket.itemId, status);
+      await client.transitionTo(key, status);
     },
     addComment: async (text) => {
-      await client.addComment(ticket.itemId, text);
+      await client.addComment(key, text);
     },
   };
 }
@@ -142,6 +157,14 @@ export async function updateTicket(
       const tool = jira ? "Jira" : "monday.com";
       await record(deps, { text: `Ticket ${name} not updated: ${tool} is not connected`, ok: false });
       console.log(`[ticket] ${ref}: ${change.what}: skipped, ${tool} is not connected`);
+      return { ok: false };
+    }
+    try {
+      await tracker.ready?.();
+    } catch (err) {
+      const why = plainLine(redact(errorText(err)), 160);
+      await record(deps, { text: `Ticket ${name} not updated: ${why}`, ok: false, ...(ticket.url ? { url: ticket.url } : {}) });
+      console.log(`[ticket] ${ref}: ${change.what}: skipped, ${why}`);
       return { ok: false };
     }
     const status = change.label ? tracker.statusFor(change.label) : "";
