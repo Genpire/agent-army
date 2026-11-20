@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BOT_MARKER, FILE_MAX_CHARS, LOG_MAX_CHARS, type CheckInfo, isHumanFeedback } from "../src/github.js";
-import { GitLab, GitLabError, associationForAccess, draftTitle, isGitLabBot, stripDraft } from "../src/gitlab.js";
+import { GitLab, GitLabError, associationForAccess, draftTitle, isGitLabBot, neutralizeQuickActions, stripDraft } from "../src/gitlab.js";
 
 const TOKEN = "glpat-test-token-0123456789abcdef";
 const BASE = "https://gitlab.example.com";
@@ -572,5 +572,57 @@ describe("GitLab client: admin calls", () => {
     ]);
     expect(await client().installWebhook(REPO, url, "s3cret-value-0123456789")).toBe("updated");
     expect(calls.map((c) => c.method)).toEqual(["GET", "PUT"]);
+  });
+});
+
+describe("GitLab client: safety", () => {
+  const ZWSP = "​";
+
+  it("neutralises quick actions at the start of any line, and only there", () => {
+    expect(neutralizeQuickActions("/merge")).toBe(`${ZWSP}/merge`);
+    expect(neutralizeQuickActions("Done.\n  /approve\n\t/target_branch release")).toBe(`Done.\n  ${ZWSP}/approve\n\t${ZWSP}/target_branch release`);
+    expect(neutralizeQuickActions("```\n/close\n```")).toBe(`\`\`\`\n${ZWSP}/close\n\`\`\``);
+    expect(neutralizeQuickActions("See src/app.ts and a/b")).toBe("See src/app.ts and a/b");
+    // Applying it twice changes nothing more.
+    const once = neutralizeQuickActions("/merge\r\n/label ~x");
+    expect(neutralizeQuickActions(once)).toBe(once);
+  });
+
+  it("never sends a description, comment or title that GitLab would run as a quick action", async () => {
+    const calls = fakeGitLab([
+      { method: "POST", path: `/projects/${PROJECT}/merge_requests`, body: mr() },
+      { method: "POST", path: `/projects/${PROJECT}/merge_requests/7/notes`, body: { id: 1 } },
+      { method: "PUT", path: `/projects/${PROJECT}/merge_requests/7`, body: mr() },
+      { path: `/projects/${PROJECT}/merge_requests/7`, body: mr() },
+    ]);
+    await client().createPr(REPO, { title: "/merge\nnow", body: "Summary\n/merge\n /approve", head: "army/x", base: "main" });
+    await client().commentOnPr(REPO, 7, "Fixed.\n/close");
+    await client().updatePr(REPO, 7, { title: "/target_branch release", body: "/merge" });
+    const sent = calls
+      .filter((c) => c.method !== "GET")
+      .flatMap((c) => Object.values((c.body ?? {}) as Record<string, unknown>))
+      .filter((v): v is string => typeof v === "string");
+    for (const text of sent) expect(text).not.toMatch(/(^|[\r\n])[^\S\r\n]*\//);
+    expect(sent.some((t) => t.includes(`${ZWSP}/merge`))).toBe(true);
+  });
+
+  it("with an allow list, checks GitLab's own path for the project and refuses moved or uncovered projects", async () => {
+    const calls = fakeGitLab([
+      { path: `/projects/${PROJECT}`, body: { path_with_namespace: "acme/platform/web", default_branch: "main" } },
+      { path: "/projects/acme%2Fold", body: { path_with_namespace: "elsewhere/old", default_branch: "main" } },
+      { path: "/projects/other%2Fapi", body: { path_with_namespace: "other/api", default_branch: "main" } },
+    ]);
+    const guarded = new GitLab({ token: TOKEN, baseUrl: BASE, allowed: ["acme"] });
+    // Cloning needs the check first; any project call does it.
+    expect(() => guarded.cloneUrl(REPO)).toThrow(/checked against the allow list/);
+    expect(await guarded.defaultBranch(REPO)).toBe("main");
+    expect(guarded.cloneUrl(REPO)).toBe(`${BASE}/acme/platform/web.git`);
+    // The check runs once (then it is remembered); each defaultBranch is its own call.
+    await guarded.defaultBranch(REPO);
+    expect(calls.filter((c) => c.path === `/projects/${PROJECT}`).length).toBe(3);
+    await expect(guarded.defaultBranch("gitlab:acme/old")).rejects.toThrow(/has moved to elsewhere\/old/);
+    await expect(guarded.defaultBranch("gitlab:other/api")).rejects.toThrow(/Not allowed to work on gitlab:other\/api/);
+    // Without an allow list, paths are used as given.
+    expect(client().cloneUrl(REPO)).toBe(`${BASE}/acme/platform/web.git`);
   });
 });
