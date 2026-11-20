@@ -2,9 +2,9 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { deriveKey } from "../src/core/crypto.js";
-import { NOTES_MAX_CHARS, NotesRepo } from "../src/notes.js";
-import { FsStore } from "../src/core/store.js";
+import { deriveKey } from "../../src/core/crypto.js";
+import { NOTES_MAX_CHARS, NotesRepo } from "../../src/chat/notes.js";
+import { FsStore } from "../../src/core/store.js";
 
 const setup = async () => {
   const store = new FsStore(await mkdtemp(join(tmpdir(), "army-notes-")));

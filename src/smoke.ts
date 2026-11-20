@@ -1,9 +1,9 @@
 import { resolve } from "node:path";
 import { ConfigRepo, resolveMasterKey } from "./core/config.js";
-import { MemoryRepo } from "./memory.js";
-import { NotesRepo } from "./notes.js";
-import { createPointerBrain } from "./pointer.js";
-import type { PointerContext, PointerReply, PointerRequest } from "./pointer-types.js";
+import { MemoryRepo } from "./chat/memory.js";
+import { NotesRepo } from "./chat/notes.js";
+import { createPointerBrain } from "./chat/pointer.js";
+import type { PointerContext, PointerReply, PointerRequest } from "./chat/pointer-types.js";
 import { createStore } from "./core/store.js";
 
 /**

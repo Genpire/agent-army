@@ -14,7 +14,7 @@ import {
   orchestratorPrompt,
   parseReport,
 } from "./team/agents.js";
-import { AttachmentRepo, type ThreadRef, classify, expandZip } from "./attachments.js";
+import { AttachmentRepo, type ThreadRef, classify, expandZip } from "./chat/attachments.js";
 import { Spending } from "./spending/budget.js";
 import { type Screenshot, browserAvailable, browserServer, collectScreenshots } from "./browser.js";
 import { type CiOutcome, type WaitOptions, ciFailureDetails, ciFixPrompt, ciSummary, ciSummaryLine, storedCiSummary, waitForChecks } from "./ci.js";
@@ -26,7 +26,7 @@ import { allHostSecrets, codeHostFor } from "./code-host-factory.js";
 import { type Config, ConfigRepo, integrationSecrets, resolveMasterKey } from "./core/config.js";
 import { type PrRef, isHumanFeedback } from "./github.js";
 import { checkBashCommand } from "./guard.js";
-import { NOTES_MAX_CHARS, NotesRepo } from "./notes.js";
+import { NOTES_MAX_CHARS, NotesRepo } from "./chat/notes.js";
 import { formatFeedback } from "./pr-feedback.js";
 import { BYPASS_ENV, type PreviewResult, checkPreview, previewSlackLine } from "./preview.js";
 import { type PlanItem, ProgressTracker, formatProgress } from "./progress.js";

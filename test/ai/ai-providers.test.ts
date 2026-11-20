@@ -17,7 +17,7 @@ import {
   testConnection,
 } from "../../src/ai/ai-providers.js";
 import { AI_PROVIDER_IDS, type AiProviderId, type Config, ConfigSchema, isChatReady, isReady, publicView } from "../../src/core/config.js";
-import type { QueryFn } from "../../src/pointer.js";
+import type { QueryFn } from "../../src/chat/pointer.js";
 import { createApp } from "../../src/server.js";
 import { estimateTaskSize } from "../../src/sizing.js";
 import { buildRepoAgents } from "../../src/team/team.js";

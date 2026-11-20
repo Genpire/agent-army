@@ -6,7 +6,7 @@ import { z } from "zod";
 import type { Spending } from "../spending/budget.js";
 import type { Budget, Config } from "../core/config.js";
 import { type ProviderRuntime, defaultModel, providerRuntime } from "../ai/ai-providers.js";
-import type { QueryFn } from "../pointer.js";
+import type { QueryFn } from "../chat/pointer.js";
 import { modelName } from "../sizing.js";
 import type { Store } from "../core/store.js";
 import { type Task, type TaskRepo, newTaskId } from "../tasks.js";

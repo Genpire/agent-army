@@ -1,4 +1,4 @@
-import type { ConversationSummary } from "../conversations.js";
+import type { ConversationSummary } from "../chat/conversations.js";
 import type { AgentProgress } from "../progress.js";
 import type { Store } from "../core/store.js";
 import { type TaskEvent, type TaskTimeline, currentPhase, plainLine, readTimeline } from "../task-events.js";

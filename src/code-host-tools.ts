@@ -9,12 +9,12 @@
 import { createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { Bitbucket } from "./bitbucket.js";
-import type { ChatIntegration, ChatIntegrationContext } from "./chat-integrations.js";
+import type { ChatIntegration, ChatIntegrationContext } from "./chat/chat-integrations.js";
 import type { CodeHostReader } from "./code-host.js";
 import { describeAllowedOnHost, isHostConnected, isRepoAllowedOnHost } from "./code-host-access.js";
 import type { Config } from "./core/config.js";
 import { GitLab } from "./gitlab.js";
-import { type CodeToolHost, codeHostReadTools } from "./pointer-tools.js";
+import { type CodeToolHost, codeHostReadTools } from "./chat/pointer-tools.js";
 import { BITBUCKET_REPO_RE, GITLAB_REPO_RE, HOST_TERMS, parseRepo, repoHost, repoId } from "./repo-id.js";
 import { repoFromToken } from "./slack/targeting.js";
 

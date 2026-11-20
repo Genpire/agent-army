@@ -29,7 +29,7 @@ import {
   taskOutcome,
   validateProposals,
 } from "../../src/team/hr.js";
-import type { QueryFn } from "../../src/pointer.js";
+import type { QueryFn } from "../../src/chat/pointer.js";
 import { createApp } from "../../src/server.js";
 import { FsStore } from "../../src/core/store.js";
 import { type Task, TaskRepo, newTaskId } from "../../src/tasks.js";

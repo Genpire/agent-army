@@ -2,11 +2,11 @@ import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { describe, expect, it, vi } from "vitest";
-import type { ChatIntegration, ChatIntegrationContext } from "../src/chat-integrations.js";
+import type { ChatIntegration, ChatIntegrationContext } from "../src/chat/chat-integrations.js";
 import type { CodeHostReader } from "../src/code-host.js";
 import { type CodeHostClients, codeHostChatIntegrations, codeToolHost, repoOnHost } from "../src/code-host-tools.js";
 import { type Config, ConfigSchema } from "../src/core/config.js";
-import { codeListPulls, codeListRepos, codeReadFile, codeRecentCommits, codeSearchCode } from "../src/pointer-tools.js";
+import { codeListPulls, codeListRepos, codeReadFile, codeRecentCommits, codeSearchCode } from "../src/chat/pointer-tools.js";
 
 const GITLAB_TOKEN = "glpat-test-token-0000000000";
 const BITBUCKET_TOKEN = "ATATT-test-token-0000000000";

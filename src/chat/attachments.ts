@@ -1,8 +1,8 @@
 import { randomBytes } from "node:crypto";
 import type { ContentBlockParam } from "@anthropic-ai/sdk/resources";
 import { unzipSync } from "fflate";
-import { decrypt, encrypt } from "./core/crypto.js";
-import type { Store } from "./core/store.js";
+import { decrypt, encrypt } from "../core/crypto.js";
+import type { Store } from "../core/store.js";
 
 /**
  * Files people share with Pointer (Slack uploads, monday.com item files).

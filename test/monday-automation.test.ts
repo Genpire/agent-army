@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { type Config, ConfigSchema, type MondayBoardAutomation } from "../src/core/config.js";
-import type { DirectTaskResult } from "../src/conversations.js";
+import type { DirectTaskResult } from "../src/chat/conversations.js";
 import { FsStore } from "../src/core/store.js";
 import { MONDAY_API_URL, type MondayItemDetails } from "../src/monday.js";
 import {

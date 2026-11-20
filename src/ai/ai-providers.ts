@@ -23,7 +23,7 @@ import { type Options, type Settings, query } from "@anthropic-ai/claude-agent-s
 import { type FetchLike, appUrlProblem, guardedFetch } from "../apps-net.js";
 import { AI_PRESETS, type AiPreset, type ModelPrice, type PresetCapabilities, QWEN_SHARED_HOSTS, compatibleBaseUrl, presetFor } from "./ai-presets.js";
 import type { AiProviderConnection, AiProviderId, Config, ModelTier } from "../core/config.js";
-import type { QueryFn } from "../pointer.js";
+import type { QueryFn } from "../chat/pointer.js";
 import { EFFORT_LEVELS, type Effort } from "../team/team.js";
 
 export { AI_PRESETS, presetFor };

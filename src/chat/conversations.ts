@@ -1,8 +1,8 @@
 import { randomBytes } from "node:crypto";
-import { providerProblem } from "./ai/ai-providers.js";
-import type { Spending } from "./spending/budget.js";
-import type { Config, ConfigRepo } from "./core/config.js";
-import { KeyedQueue } from "./slack/listen.js";
+import { providerProblem } from "../ai/ai-providers.js";
+import type { Spending } from "../spending/budget.js";
+import type { Config, ConfigRepo } from "../core/config.js";
+import { KeyedQueue } from "../slack/listen.js";
 import type {
   ActivityKind,
   ConversationMessage,
@@ -12,15 +12,15 @@ import type {
   PointerRequest,
   StartRepoTask,
 } from "./pointer-types.js";
-import { describeTasks } from "./progress.js";
-import { HOST_TERMS, repoHost } from "./repo-id.js";
-import type { Runner } from "./runner.js";
-import type { Store } from "./core/store.js";
-import { describeTimeline, plainLine, readTimeline } from "./task-events.js";
-import { type Task, type TaskRepo, type TaskTicket, type ThreadState, WEB_CHANNEL, newTaskId } from "./tasks.js";
-import { type ThreadTaskResult, resolveTaskRepo, startThreadTask } from "./thread-task.js";
-import type { UsageRepo } from "./spending/usage.js";
-import { configSecrets, makeRedactor } from "./worker.js";
+import { describeTasks } from "../progress.js";
+import { HOST_TERMS, repoHost } from "../repo-id.js";
+import type { Runner } from "../runner.js";
+import type { Store } from "../core/store.js";
+import { describeTimeline, plainLine, readTimeline } from "../task-events.js";
+import { type Task, type TaskRepo, type TaskTicket, type ThreadState, WEB_CHANNEL, newTaskId } from "../tasks.js";
+import { type ThreadTaskResult, resolveTaskRepo, startThreadTask } from "../thread-task.js";
+import type { UsageRepo } from "../spending/usage.js";
+import { configSecrets, makeRedactor } from "../worker.js";
 
 /**
  * Conversations with Pointer from the admin console. Each is one JSON file

@@ -1,6 +1,6 @@
 import { strToU8, zipSync } from "fflate";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ATTACHMENT_LIMITS, type NewAttachment } from "../src/attachments.js";
+import { ATTACHMENT_LIMITS, type NewAttachment } from "../src/chat/attachments.js";
 import {
   MONDAY_API_URL,
   MONDAY_API_VERSION,
@@ -12,7 +12,7 @@ import {
   mondayTools,
   type MondayToolOptions,
 } from "../src/monday.js";
-import type { AddAttachment } from "../src/pointer-types.js";
+import type { AddAttachment } from "../src/chat/pointer-types.js";
 
 const TOKEN = "eyJtest-monday-token-0123456789";
 

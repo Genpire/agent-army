@@ -23,7 +23,7 @@ import { catalogApp } from "./apps-catalog.js";
 import { type NetGuardOptions, AppUrlError, assertPublicUrl } from "./apps-net.js";
 import { AppSignInError, type FreshTokenDeps, freshAccessToken } from "./apps-oauth.js";
 import { type AppProxy, type ProxyScope, type ProxySource, appProxy, listAllTools, openUpstream } from "./apps-proxy.js";
-import type { ChatIntegration, ChatIntegrationContext } from "./chat-integrations.js";
+import type { ChatIntegration, ChatIntegrationContext } from "./chat/chat-integrations.js";
 import type { AppConnection, AppTool, Config, ConfigRepo } from "./core/config.js";
 import { type AgentSpec, enabledAgents } from "./team/team.js";
 

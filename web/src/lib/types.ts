@@ -4,8 +4,8 @@
  * page and the API cannot drift apart.
  */
 import type { publicView } from "../../../src/core/config.js";
-import type { MemoryFact } from "../../../src/memory.js";
-import type { NotesRepo, ProjectNotes } from "../../../src/notes.js";
+import type { MemoryFact } from "../../../src/chat/memory.js";
+import type { NotesRepo, ProjectNotes } from "../../../src/chat/notes.js";
 import type { MondayBoardSummary } from "../../../src/monday.js";
 import type { ProgressSnapshot } from "../../../src/progress.js";
 import type { CiSummary, Task } from "../../../src/tasks.js";
@@ -57,19 +57,19 @@ export type {
   ConversationView,
   LiveReply,
   TaskMilestone,
-} from "../../../src/conversations.js";
+} from "../../../src/chat/conversations.js";
 export type { CheckItem, CheckState, PhaseInfo, PhaseState, TaskEvent, TaskEventKind, TaskTimeline } from "../../../src/task-events.js";
 export type { TaskPhase, TaskReport } from "../../../src/tasks.js";
-export type { ActivityKind } from "../../../src/pointer-types.js";
+export type { ActivityKind } from "../../../src/chat/pointer-types.js";
 
 /** GET /api/conversations: newest activity first. */
 export interface ConversationList {
-  conversations: import("../../../src/conversations.js").ConversationSummary[];
+  conversations: import("../../../src/chat/conversations.js").ConversationSummary[];
 }
 
 /** POST /api/conversations and POST /api/conversations/:id/messages (202). */
 export interface ConversationSent {
-  conversation: import("../../../src/conversations.js").Conversation;
+  conversation: import("../../../src/chat/conversations.js").Conversation;
 }
 
 /** POST /api/tasks (202): a repo task straight from the console, in a new conversation. */

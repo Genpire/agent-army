@@ -1,7 +1,7 @@
 import { tool, type SdkMcpToolDefinition } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
-import { ATTACHMENT_LIMITS, classify, expandZip } from "./attachments.js";
-import type { AddAttachment } from "./pointer-types.js";
+import { ATTACHMENT_LIMITS, classify, expandZip } from "./chat/attachments.js";
+import type { AddAttachment } from "./chat/pointer-types.js";
 
 /**
  * monday.com for Pointer: a small GraphQL client, the token check used by the

@@ -1,6 +1,6 @@
 import { createSdkMcpServer, tool, type SdkMcpToolDefinition } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
-import type { ChatIntegration, ChatIntegrationContext } from "./chat-integrations.js";
+import type { ChatIntegration, ChatIntegrationContext } from "./chat/chat-integrations.js";
 import { MIRO_BOARD_ID_RE, type Config } from "./core/config.js";
 import { type CallToolResult, htmlToText, textToHtml } from "./monday.js";
 

@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { decrypt, encrypt } from "./core/crypto.js";
-import type { Store } from "./core/store.js";
+import { decrypt, encrypt } from "../core/crypto.js";
+import type { Store } from "../core/store.js";
 
 /**
  * Facts Pointer remembers across conversations ("my main repo is X").

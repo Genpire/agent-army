@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { type Config, ConfigSchema, type JiraProjectAutomation } from "../src/core/config.js";
-import type { DirectTaskResult } from "../src/conversations.js";
+import type { DirectTaskResult } from "../src/chat/conversations.js";
 import type { JiraIssueDetails } from "../src/jira.js";
 import {
   JiraAutomation,

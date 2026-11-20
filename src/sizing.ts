@@ -5,7 +5,7 @@ import { type Options, query } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { type ProviderRuntime, anthropicRuntime } from "./ai/ai-providers.js";
 import type { Config } from "./core/config.js";
-import type { QueryFn } from "./pointer.js";
+import type { QueryFn } from "./chat/pointer.js";
 import type { Task } from "./tasks.js";
 import { type Effort, type Route, type Routing, TASK_SIZES, type TaskSize } from "./team/team.js";
 

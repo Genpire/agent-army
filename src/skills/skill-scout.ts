@@ -6,7 +6,7 @@ import { z } from "zod";
 import { defaultModel, providerRuntime } from "../ai/ai-providers.js";
 import type { Spending } from "../spending/budget.js";
 import type { Config } from "../core/config.js";
-import type { QueryFn } from "../pointer.js";
+import type { QueryFn } from "../chat/pointer.js";
 import { parseGitHubSkillUrl } from "./skills.js";
 import { type Team, enabledAgents } from "../team/team.js";
 import type { UsageRepo } from "../spending/usage.js";

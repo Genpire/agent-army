@@ -18,11 +18,11 @@ import {
   taskDecision,
 } from "../../src/spending/budget.js";
 import { type Budget, BudgetSchema, type Config, ConfigRepo } from "../../src/core/config.js";
-import { ConversationService } from "../../src/conversations.js";
+import { ConversationService } from "../../src/chat/conversations.js";
 import { deriveKey } from "../../src/core/crypto.js";
 import { handleSlackEvent, resetDispatchStateForTests } from "../../src/slack/dispatch.js";
-import { MemoryRepo } from "../../src/memory.js";
-import type { PointerBrain, PointerContext, PointerReply, PointerRequest, SlackMessageEvent, StartRepoTaskResult } from "../../src/pointer-types.js";
+import { MemoryRepo } from "../../src/chat/memory.js";
+import type { PointerBrain, PointerContext, PointerReply, PointerRequest, SlackMessageEvent, StartRepoTaskResult } from "../../src/chat/pointer-types.js";
 import { createApp } from "../../src/server.js";
 import { FsStore } from "../../src/core/store.js";
 import { type Task, TaskRepo, newTaskId } from "../../src/tasks.js";

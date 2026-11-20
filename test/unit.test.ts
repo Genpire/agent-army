@@ -7,7 +7,7 @@ import { parseReport } from "../src/team/agents.js";
 import { ConfigRepo, ConfigSchema, publicView } from "../src/core/config.js";
 import { decrypt, deriveKey, encrypt, hashPassword, signSession, verifyPassword, verifySession } from "../src/core/crypto.js";
 import { checkBashCommand } from "../src/guard.js";
-import { ATTACHMENT_LIMITS } from "../src/attachments.js";
+import { ATTACHMENT_LIMITS } from "../src/chat/attachments.js";
 import {
   buildManifest,
   downloadSlackFile,
@@ -19,7 +19,7 @@ import {
   verifySlackSignature,
 } from "../src/slack/slack.js";
 import { FsStore } from "../src/core/store.js";
-import { type Conversation, pendingMilestones, taskResultMarkdown } from "../src/conversations.js";
+import { type Conversation, pendingMilestones, taskResultMarkdown } from "../src/chat/conversations.js";
 import { type Task, decodeTaskPayload, encodeTaskPayload, newTaskId } from "../src/tasks.js";
 import { GITHUB_REPO_RE, REPO_FORMAT_HINT, REPO_RE } from "../src/repo-id.js";
 import { helpText, isRepoAllowed, messageText, parseCommand, repoFromToken, resolveRepo } from "../src/slack/targeting.js";

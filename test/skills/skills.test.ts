@@ -7,9 +7,9 @@ import type { Options, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { describe, expect, it } from "vitest";
 import { type Config, ConfigRepo, ConfigSchema } from "../../src/core/config.js";
 import { deriveKey } from "../../src/core/crypto.js";
-import { MemoryRepo } from "../../src/memory.js";
-import { type QueryFn, buildPointerSystemPrompt, createPointerBrain } from "../../src/pointer.js";
-import type { PointerRequest } from "../../src/pointer-types.js";
+import { MemoryRepo } from "../../src/chat/memory.js";
+import { type QueryFn, buildPointerSystemPrompt, createPointerBrain } from "../../src/chat/pointer.js";
+import type { PointerRequest } from "../../src/chat/pointer-types.js";
 import { createApp } from "../../src/server.js";
 import {
   type FetchLike,

@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { AttachmentRepo } from "./attachments.js";
+import { AttachmentRepo } from "./chat/attachments.js";
 import { Spending } from "./spending/budget.js";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { z } from "zod";
@@ -21,11 +21,11 @@ import {
 import { hashPassword, randomToken, safeEqual, sessionKey, signSession, verifyPassword, verifySession } from "./core/crypto.js";
 import { repoAccessError } from "./code-host-access.js";
 import { GITHUB_REPO_RE, REPO_FORMAT_HINT, REPO_ID_MAX, isRepoId } from "./repo-id.js";
-import { CONVERSATION_ID_RE, ConversationService, MESSAGE_MAX_CHARS, type WebThreads } from "./conversations.js";
+import { CONVERSATION_ID_RE, ConversationService, MESSAGE_MAX_CHARS, type WebThreads } from "./chat/conversations.js";
 import { handleSlackEvent, withBrainSlot } from "./slack/dispatch.js";
 import { HrService, PROPOSAL_ID_RE, REVIEW_ID_RE } from "./team/hr.js";
 import { RecentSet } from "./slack/listen.js";
-import { MEMORY_MAX_FACTS, MemoryRepo } from "./memory.js";
+import { MEMORY_MAX_FACTS, MemoryRepo } from "./chat/memory.js";
 import { MondayClient, MondayError, checkMonday, statusColumns } from "./monday.js";
 import {
   TicketAutomation,
@@ -37,10 +37,10 @@ import {
   webhookChallenge,
   webhookIds,
 } from "./monday-automation.js";
-import { NOTES_MAX_CHARS, NotesRepo } from "./notes.js";
+import { NOTES_MAX_CHARS, NotesRepo } from "./chat/notes.js";
 import { loadOffice } from "./team/office.js";
-import { type QueryFn, createPointerBrain } from "./pointer.js";
-import type { PointerBrain, SlackDeps, SlackMessageEvent } from "./pointer-types.js";
+import { type QueryFn, createPointerBrain } from "./chat/pointer.js";
+import type { PointerBrain, SlackDeps, SlackMessageEvent } from "./chat/pointer-types.js";
 import { type Runner, createRunner } from "./runner.js";
 import { SCREENSHOT_NAME_RE, ScreenshotRepo, TASK_ID_RE, screenshotType } from "./screenshots.js";
 import { SCOUT_NEED_MAX_CHARS, findSkills } from "./skills/skill-scout.js";

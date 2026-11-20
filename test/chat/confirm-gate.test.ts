@@ -1,6 +1,6 @@
 import type { HookCallback } from "@anthropic-ai/claude-agent-sdk";
 import { describe, expect, it } from "vitest";
-import type { ChatIntegration } from "../src/chat-integrations.js";
+import type { ChatIntegration } from "../../src/chat/chat-integrations.js";
 import {
   PENDING_TTL_MS,
   PendingActions,
@@ -9,7 +9,7 @@ import {
   gatedTools,
   inputHash,
   isConfirmation,
-} from "../src/confirm-gate.js";
+} from "../../src/chat/confirm-gate.js";
 
 const MEMORY_SAVE = "mcp__pointer__memory_save";
 const NOTES_ADD = "mcp__pointer__project_notes_add";

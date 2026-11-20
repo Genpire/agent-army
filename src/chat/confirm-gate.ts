@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { HookCallback, SyncHookJSONOutput } from "@anthropic-ai/claude-agent-sdk";
 import type { ChatIntegration } from "./chat-integrations.js";
-import { APP_ID_RE } from "./core/config.js";
+import { APP_ID_RE } from "../core/config.js";
 import type { PointerRequest } from "./pointer-types.js";
 
 /**

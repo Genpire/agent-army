@@ -10,21 +10,21 @@ import {
   query,
 } from "@anthropic-ai/claude-agent-sdk";
 import type { ContentBlockParam } from "@anthropic-ai/sdk/resources";
-import { defaultModel, fitContentBlocks, providerRuntime } from "./ai/ai-providers.js";
+import { defaultModel, fitContentBlocks, providerRuntime } from "../ai/ai-providers.js";
 import { type AttachmentInfo, type AttachmentRepo, type ThreadRef, toContentBlocks } from "./attachments.js";
 import { type ChatIntegration, chatIntegrations, subagentIntegrationTools } from "./chat-integrations.js";
 import { PendingActions, confirmGate, conversationKey, gatedTools } from "./confirm-gate.js";
-import type { Config } from "./core/config.js";
-import { GitHub } from "./github.js";
-import { isRepoAllowedOnHost } from "./code-host-access.js";
+import type { Config } from "../core/config.js";
+import { GitHub } from "../github.js";
+import { isRepoAllowedOnHost } from "../code-host-access.js";
 import type { MemoryFact } from "./memory.js";
-import { MondayClient } from "./monday.js";
+import { MondayClient } from "../monday.js";
 import type { NotesRepo } from "./notes.js";
 import { ActivityMapper } from "./pointer-activity.js";
 import { createPointerToolServer, githubToolOptions } from "./pointer-tools.js";
 import type { PointerBrain, PointerBrainDeps, PointerReply, PointerRequest } from "./pointer-types.js";
-import { SKILL_TOOL, type TeamSkills, buildChatAgents, pluginSkillName, rosterText, skillQueryOptions } from "./team/team.js";
-import { configSecrets, makeRedactor } from "./worker.js";
+import { SKILL_TOOL, type TeamSkills, buildChatAgents, pluginSkillName, rosterText, skillQueryOptions } from "../team/team.js";
+import { configSecrets, makeRedactor } from "../worker.js";
 
 /**
  * Pointer's brain: one Agent SDK query per Slack message, locked down to web
