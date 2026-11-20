@@ -1,10 +1,11 @@
 /**
  * The integrations Pointer uses in chat beyond its own tool server
  * (pointer-tools.ts: GitHub, memory, notes, monday.com, repo tasks): GitLab
- * and Bitbucket code tools, Jira and Confluence, Miro, and apps connected
- * through their MCP servers. Each one brings an MCP server (in-process or
- * remote), the tool names Pointer may call, the read-only ones its chat
- * subagents may call, and a rule for Pointer's instructions.
+ * and Bitbucket code tools, Jira and Confluence, Miro, Slack (finding people
+ * and sending messages), and apps connected through their MCP servers. Each
+ * one brings an MCP server (in-process or remote), the tool names Pointer may
+ * call, the read-only ones its chat subagents may call, and a rule for
+ * Pointer's instructions.
  */
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { appChatIntegrations } from "../integrations/apps/apps.js";
@@ -12,6 +13,7 @@ import { codeHostChatIntegrations } from "../integrations/code-hosts/code-host-t
 import type { Config, ConfigRepo } from "../core/config.js";
 import { jiraChatIntegration } from "../integrations/jira/jira.js";
 import { miroChatIntegration } from "../integrations/miro/miro.js";
+import { slackChatIntegration } from "../slack/slack-tools.js";
 import type { AddAttachment } from "./pointer-types.js";
 
 export interface ChatIntegration {
@@ -36,6 +38,8 @@ export interface ChatIntegrationContext {
   configRepo: ConfigRepo;
   /** Who is asking (Slack user name or id, or the console's owner): recorded on tickets and stickies created. */
   requester: string;
+  /** The requester's Slack user id when the request came from Slack; absent in the console (no Slack user there). */
+  requesterSlackId?: string;
   /** Stores a file in this conversation (e.g. a Jira issue's attachments); absent = not available here. */
   addAttachment?: AddAttachment;
   redact: (text: string) => string;
@@ -60,6 +64,7 @@ export async function chatIntegrations(config: Config, ctx: ChatIntegrationConte
   await add("GitLab/Bitbucket", () => codeHostChatIntegrations(config, ctx));
   await add("Jira", () => jiraChatIntegration(config, ctx));
   await add("Miro", () => miroChatIntegration(config, ctx));
+  await add("Slack", () => slackChatIntegration(config, ctx));
   await add("apps", () => appChatIntegrations(config, ctx));
   return out;
 }

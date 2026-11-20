@@ -230,6 +230,8 @@ describe("slack", () => {
       "groups:history",
       "im:history",
       "users:read",
+      "channels:read",
+      "groups:read",
       "reactions:write",
       "files:read",
       "files:write",

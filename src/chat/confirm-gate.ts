@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { HookCallback, SyncHookJSONOutput } from "@anthropic-ai/claude-agent-sdk";
 import type { ChatIntegration } from "./chat-integrations.js";
 import { APP_ID_RE } from "../core/config.js";
+import { SLACK_SEND_TOOL, isSelfTarget } from "../slack/slack-tools.js";
 import type { PointerRequest } from "./pointer-types.js";
 
 /**
@@ -11,12 +12,16 @@ import type { PointerRequest } from "./pointer-types.js";
  * Pointer runs headless with its tools approved in advance, and in one turn
  * it may read a Jira issue, a web page or an app's records and then write.
  * What it read could ask for a memory fact or a project note (both reach
- * every later prompt, and notes every repo task there) or for a change in a
- * connected app (a refund, an edit in a tracker). So once a query has called
+ * every later prompt, and notes every repo task there), for a change in a
+ * connected app (a refund, an edit in a tracker), or for a Slack message that
+ * carries what Pointer knows to someone else. So once a query has called
  * a tool that returns outside content, those writes are denied and recorded
  * as pending. Pointer shows the user what it wants to do; when the user's
  * next message in the conversation is a short "yes", the same tool with the
  * same input goes through once.
+ *
+ * A Slack message to the person asking ("me", or their own Slack user id)
+ * is not held: it reaches nobody else.
  *
  * Not gated: Jira, monday.com and Miro writes, and start_repo_task. They are
  * bounded by allow lists, visible where they land (the issue, item or board
@@ -40,22 +45,30 @@ const MAX_CONFIRMATION_WORDS = 4;
 /** Writes that reach future prompts and repo tasks: always gated after outside content. */
 export const PERSISTENT_WRITE_TOOLS = ["mcp__pointer__memory_save", "mcp__pointer__project_notes_add"];
 
+/** Tools that send what Pointer knows to other people: gated after outside content when connected. */
+export const OUTBOUND_TOOLS = [SLACK_SEND_TOOL];
+
 /**
  * Tools whose output holds nothing from outside, so calling them never
  * taints a query; every other tool does, the Agent/Task tool included
- * (subagents read outside content and report it back). memory_save and
- * project_notes_add only echo what Pointer wrote: without them here,
- * "remember A and B" would need a confirmation for B.
+ * (subagents read outside content and report it back), and so does Slack's
+ * member directory (names and titles are written by people). memory_save,
+ * project_notes_add and slack_send_message only echo what Pointer wrote:
+ * without them here, "remember A and B" would need a confirmation for B.
  */
 export const TRUSTED_TOOLS: ReadonlySet<string> = new Set([
   "mcp__pointer__repo_task_status",
   "mcp__pointer__memory_forget",
   ...PERSISTENT_WRITE_TOOLS,
+  ...OUTBOUND_TOOLS,
   "TodoWrite",
   "Skill",
 ]);
 
-/** The tools that need a confirmation after outside content: memory, project notes and every app tool that is not read-only. */
+/**
+ * The tools that need a confirmation after outside content: memory, project
+ * notes, every app tool that is not read-only, and sending Slack messages.
+ */
 export function gatedTools(integrations: ChatIntegration[]): Set<string> {
   const appWrites = integrations
     .filter((i) => APP_ID_RE.test(i.key))
@@ -63,7 +76,8 @@ export function gatedTools(integrations: ChatIntegration[]): Set<string> {
       const readOnly = new Set(i.readOnlyToolNames);
       return i.allToolNames.filter((t) => !readOnly.has(t));
     });
-  return new Set([...PERSISTENT_WRITE_TOOLS, ...appWrites]);
+  const outbound = integrations.flatMap((i) => i.allToolNames).filter((t) => OUTBOUND_TOOLS.includes(t));
+  return new Set([...PERSISTENT_WRITE_TOOLS, ...appWrites, ...outbound]);
 }
 
 /**
@@ -185,6 +199,8 @@ export interface ConfirmGateOptions {
   message: string;
   /** Tools that need a confirmation once the query has read outside content (gatedTools). */
   gated: ReadonlySet<string>;
+  /** The requester's Slack user id (requesterSlackId); absent in the console. A Slack message to them is never held. */
+  requesterSlackId?: string;
 }
 
 const deny = (tool: string): SyncHookJSONOutput => ({
@@ -192,7 +208,7 @@ const deny = (tool: string): SyncHookJSONOutput => ({
     hookEventName: "PreToolUse",
     permissionDecision: "deny",
     permissionDecisionReason:
-      `Not done: this turn read outside content (web pages, code hosts, tickets, boards, apps or a team member's report), so ${tool} needs the user's confirmation first. ` +
+      `Not done: this turn read outside content (web pages, code hosts, tickets, boards, apps, Slack's member directory or a team member's report), so ${tool} needs the user's confirmation first. ` +
       "Do not call it again now. Show the user exactly what you want to save or do (quote the arguments) and ask them to confirm. " +
       "If they reply yes, call the same tool with exactly the same arguments, without reading anything first.",
   },
@@ -209,7 +225,7 @@ const deny = (tool: string): SyncHookJSONOutput => ({
  * untrusted tool on, conservatively: a write in the same batch of parallel
  * calls as a read may be held too.
  */
-export function confirmGate({ pending, conversation, message, gated }: ConfirmGateOptions): HookCallback {
+export function confirmGate({ pending, conversation, message, gated, requesterSlackId }: ConfirmGateOptions): HookCallback {
   const taken = pending.take(conversation);
   const confirmed = isConfirmation(message) ? taken : [];
   let tainted = false;
@@ -233,7 +249,9 @@ export function confirmGate({ pending, conversation, message, gated }: ConfirmGa
     if (input.hook_event_name !== "PreToolUse" || input.agent_id) return {};
     const tool = input.tool_name;
     try {
-      const denied = gated.has(tool) ? check(tool, input.tool_input) : undefined;
+      // A Slack message to the person asking reaches nobody else: never held, and no confirmation used up.
+      const toSelf = tool === SLACK_SEND_TOOL && isSelfTarget(input.tool_input, requesterSlackId);
+      const denied = gated.has(tool) && !toSelf ? check(tool, input.tool_input) : undefined;
       if (denied) return denied;
     } catch {
       // A failing hook lets the call through, so a gated call is denied here instead.

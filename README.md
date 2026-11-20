@@ -207,7 +207,7 @@ Pointer can hold several GitHub tokens: the primary one on **Integrations → Gi
 
 The **Chat** page (second in the admin page's menu, `#/chat/<conversation>`) is a second way to talk to Pointer, next to Slack. Only the signed-in admin uses it, and Slack is not needed for it: Claude is enough to chat, and GitHub to start repo tasks.
 
-- **Conversations.** Start one with a message; Pointer answers with the same brain, tools and team as in Slack (web search, GitHub, memory, project notes, monday.com, repo tasks) and within the same limit of answers at once. The list keeps your conversations, newest first; deleting one takes two clicks. A new message waits until Pointer has answered the last one.
+- **Conversations.** Start one with a message; Pointer answers with the same brain, tools and team as in Slack (web search, GitHub, memory, project notes, monday.com, repo tasks, and [Slack messages](#slack-tools) when Slack is connected) and within the same limit of answers at once. The list keeps your conversations, newest first; deleting one takes two clicks. A new message waits until Pointer has answered the last one.
 - **Live while Pointer answers.** The reply appears as it is written, with each step Pointer takes ("Searching the web for …", "Reading acme/web: src/app.tsx", "Asking Rita (Researcher)…", "Starting a repo task on acme/web"). The finished reply keeps its steps ("Used 5 tools") and its cost.
 - **Repo tasks.** Ask for a change in the chat and Pointer starts a repo task, or use **New repo task** to start one directly (a repository and an instruction; same checks as Slack: GitHub connected, allow lists). Each task appears as a card in the conversation: its status, what the team is doing now, the plan, the pull request, the checks, the cost and the screenshots from browser checks. Open it for the full timeline: the steps (clone, setup, plan, build, verify, publish, checks), each agent's work and how long it took, files changed, commands run, each CI check's state, and the screenshots full size.
 - **No Slack thread.** A task started from the console has no Slack thread: its progress, result (summary, verification, risks, checks), screenshots and milestones (pull request opened, checks failing and being fixed, done, stopped with a draft) are in the conversation and on the pull request. Reply in the conversation (for example `continue`, or "how is it going?") and Pointer follows up on the same branch, as in a Slack thread. Reviews and `/pointer` comments on its pull request start follow-ups in the conversation (with the GitHub webhook set up).
@@ -241,6 +241,8 @@ Pointer reacts with :eyes: while it works, then :white_check_mark: or :x:. Messa
 | `what's open on gitlab:acme/web?` | Lists merge requests and issues on GitLab (likewise `bitbucket:…`) |
 | `which Jira bugs in WEB are still open for the release?` | Searches Jira with JQL and reads the issues |
 | `draw our deploy pipeline on the Architecture board` | Draws a diagram on Miro |
+| `remind me on Slack to check customer credits` | Sends you a DM from Pointer (see [Slack tools](#slack-tools)) |
+| `tell Dana on Slack that the deploy is done` | Finds Dana in the workspace, asks which Dana if several match, and sends her a DM with a link back |
 | `which Sentry errors spiked since yesterday?` | Uses a connected app (here Sentry) through its MCP server |
 | `who's on the team?` | Describes the agents |
 | `fix the flaky checkout test` | Starts a repo task on this channel's default project |
@@ -250,6 +252,18 @@ Pointer reacts with :eyes: while it works, then :white_check_mark: or :x:. Messa
 | on GitHub, request changes on the team's PR, or comment `/pointer rename the flag` | Starts a follow-up task in the task's thread (webhook set up, see [Pull request reviews](#pull-request-reviews)) |
 
 Pointer hands a question to a team agent when the agent's description fits (in conversation, agents can only search the web and read GitHub). For any code change, Pointer starts a repo task: on the repo you name, else the one this thread already works on, else the channel's default; when there is none, it asks.
+
+### Slack tools
+
+Slack is also a tool Pointer uses, from Slack and from the admin console's chat, whenever Slack is connected:
+
+- **Find people** (`slack_find_user`): by @handle, display name or real name, with their title and whether they are a bot, deactivated or a guest. Emails are never read (the app has no `users:read.email`).
+- **Send a message** (`slack_send_message`): a DM from Pointer to a person, to yourself ("me", when you ask from Slack), or a post in a channel Pointer is in and only when you ask for that channel. In the console there is no Slack account for you, so Pointer finds yours by the name you give. Each message is in Slack formatting, at most 4 000 characters, ends with a small "Sent by Pointer at Dana's request" line, never pings `@here` or `@channel`, does not unfurl links, and Pointer replies with its link.
+- **Find a channel** (`slack_list_channels`): by name, the ones Pointer is in first. To post in a channel Pointer is not in, invite it there first.
+- **Confirmation:** a message to anyone but you, after Pointer has read outside content in the same answer (web pages, tickets, apps, and Slack's member directory itself), needs your "yes" first, like other writes. So "tell Dana that …" from the console shows you who and what before it goes; "remind me" never waits.
+- **Allowed users:** when the Slack allowlist is set, Pointer only sends DMs to the people on it.
+
+Finding channels needs the `channels:read` and `groups:read` scopes: apps created before this feature must update their manifest (see [Updating an existing Slack app](#updating-an-existing-slack-app)); finding people and sending messages work without it.
 
 ### Files you share
 
@@ -676,13 +690,13 @@ The platform still commits and publishes, as for every task. If the image has no
 
 ## Updating an existing Slack app
 
-Apps created before Pointer only receive @mentions, apps created before file support cannot download shared files, and apps created before browser checks cannot post screenshots. To let Pointer receive DMs and channel messages, add reactions, read files and post screenshots, update the app once:
+Apps created before Pointer only receive @mentions, apps created before file support cannot download shared files, apps created before browser checks cannot post screenshots, and apps created before the [Slack tools](#slack-tools) cannot find channels by name. To let Pointer receive DMs and channel messages, add reactions, read files, post screenshots and find channels, update the app once:
 
 1. On the admin page, open **Slack → Already created the app? Update it** and copy the manifest.
 2. At [api.slack.com/apps](https://api.slack.com/apps), open your app → **App Manifest**, replace the JSON with the copy, **Save**.
-3. **Install App → Reinstall** to grant the new scopes (`im:history`, `reactions:write`, `files:read`, `files:write`).
+3. **Install App → Reinstall** to grant the new scopes (`im:history`, `reactions:write`, `files:read`, `files:write`, `channels:read`, `groups:read`).
 
-Until you do, @mentions still work, but DMs, Pointer channels and unmentioned thread replies are not received, reactions are skipped, Pointer answers without the files, saying it is "missing files:read permission", and screenshots from browser checks are not posted. Update it again whenever you rename Pointer.
+Until you do, @mentions still work, but DMs, Pointer channels and unmentioned thread replies are not received, reactions are skipped, Pointer answers without the files, saying it is "missing files:read permission", screenshots from browser checks are not posted, and Pointer cannot list channels (it says the app lacks `channels:read`; posting in a channel by its link or #mention still works). Update it again whenever you rename Pointer.
 
 ## Security model
 
@@ -698,7 +712,7 @@ Until you do, @mentions still work, but DMs, Pointer channels and unmentioned th
 
 Known limits, stated plainly:
 
-- **Prompt injection:** a web page, issue or file Pointer reads could try to steer it into saving a memory fact or project note, opening or editing a monday.com ticket, or starting a repo task. Saving to memory or project notes, and changing things in a connected app, after Pointer has read outside content in the same answer needs the user's confirmation: Pointer shows what it will do and goes ahead only after a "yes". The damage is bounded: tasks only touch allowed owners and repos, stop at the per-task budget and end as a pull request a human must merge; memory and project notes are visible and editable on the page; monday.com changes are limited to the allowed boards, never delete anything and are recorded in the item's activity log.
+- **Prompt injection:** a web page, issue or file Pointer reads could try to steer it into saving a memory fact or project note, opening or editing a monday.com ticket, sending a Slack message, or starting a repo task. Saving to memory or project notes, changing things in a connected app, and sending a Slack message to anyone but the person asking, after Pointer has read outside content in the same answer needs the user's confirmation: Pointer shows what it will do and goes ahead only after a "yes". The damage is bounded: tasks only touch allowed owners and repos, stop at the per-task budget and end as a pull request a human must merge; memory and project notes are visible and editable on the page; monday.com changes are limited to the allowed boards, never delete anything and are recorded in the item's activity log.
 - **Pull request feedback and CI output are untrusted content too.** Review comments come only from people with write access, but they, the pages the browser opens and the CI logs the team reads in fix rounds are given to the team as data, not instructions, and are bounded the same way: same repo, same budget, and the result is still a pull request a human must merge.
 - **Exfiltration through web fetch:** Pointer can read private data (private repos, monday.com items, memory, project notes) and fetch any URL. Injected content could try to make it send that data to an outside address. Subagents are read-only and the prompt treats fetched content as data, but there is no URL allowlist. Keep the GitHub tokens and monday.com token scoped to what Pointer needs.
 - **The repo-task container is not a boundary for platform secrets.** The worker process holds the master key and its service account can read the bucket and the secret; the agents' shell runs as the same user. The shell guard blocks the obvious paths (`/proc/*/environ`, the metadata server), but a determined agent following injected instructions could get around it. Repo tasks can be started by Pointer from conversation, so treat the content Pointer reads (web pages, issues, repos) as part of the trust boundary, and give this deployment its own GCP project for anything sensitive.
@@ -853,7 +867,7 @@ Layout: `src/` is grouped into modules, one folder per area, and `test/` mirrors
   - `attachments.ts`: encrypted per-thread files and how Pointer reads them.
   - `conversations.ts`: the admin console's chat (conversations, Pointer's answers and live activity, task milestones); `pointer-activity.ts`: Pointer's steps in words.
   - `chat-integrations.ts`: the integrations Pointer uses in chat beyond its own tools; `confirm-gate.ts`: the user's confirmation for lasting writes after Pointer has read outside content.
-- `src/slack/`: `listen.ts`: when Pointer answers, queues, dedupe; `dispatch.ts`: Slack event → command or Pointer; `targeting.ts`: commands and which project; `slack.ts`: the Slack client, which also downloads shared files.
+- `src/slack/`: `listen.ts`: when Pointer answers, queues, dedupe; `dispatch.ts`: Slack event → command or Pointer; `targeting.ts`: commands and which project; `slack.ts`: the Slack client, which also downloads shared files; `slack-tools.ts`: Slack as Pointer's tool (find people and channels, send messages).
 - `src/team/`: `team.ts`: team model, defaults and tool access; `agents.ts`: the repo-task prompt and report; `hr.ts`: HR's reviews of the team; `office.ts`: the virtual office.
 - `src/skills/`: `skills.ts`: the team's skills library; `skill-scout.ts`: the Skills Scout, which searches the web for skills.
 - `src/tasks/`: repo tasks.

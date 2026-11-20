@@ -728,6 +728,8 @@ const GITHUB_TOOLS = [
 const READ_ONLY_TOOLS = [...GITHUB_TOOLS, "project_notes_read", ...MONDAY_READ_TOOL_NAMES];
 const ALL_TOOLS = [...READ_ONLY_TOOLS, "project_notes_add", "memory_save", "memory_forget", "start_repo_task", "repo_task_status", ...MONDAY_TOOL_NAMES.filter((n) => !MONDAY_READ_TOOL_NAMES.includes(n))];
 const full = (names: string[]) => names.map((n) => `mcp__pointer__${n}`);
+const SLACK_READ_TOOLS = ["mcp__slack__slack_find_user", "mcp__slack__slack_list_channels"];
+const SLACK_TOOLS = [...SLACK_READ_TOOLS, "mcp__slack__slack_send_message"];
 
 describe("pointer tool server", () => {
   it("exposes every tool under mcp__pointer__ and lists the read-only ones", async () => {
@@ -1199,7 +1201,8 @@ describe("Pointer brain", () => {
     expect(o.settingSources).toEqual([]);
     expect(o.strictMcpConfig).toBe(true);
     expect(o.persistSession).toBe(false);
-    expect(Object.keys(o.mcpServers ?? {})).toEqual(["pointer"]);
+    // Slack is connected in setup(): its tools (find people, list channels, send) come with it.
+    expect(Object.keys(o.mcpServers ?? {})).toEqual(["pointer", "slack"]);
     expect(o.maxTurns).toBe(33);
     expect(o.maxBudgetUsd).toBe(2.5);
     expect(o.model).toBe("claude-opus-5-5");
@@ -1208,12 +1211,14 @@ describe("Pointer brain", () => {
     expect(o.systemPrompt as string).toContain("reviewer");
 
     expect(o.allowedTools).toEqual(expect.arrayContaining(full(ALL_TOOLS)));
-    expect(o.allowedTools).toHaveLength(4 + ALL_TOOLS.length);
+    expect(o.allowedTools).toEqual(expect.arrayContaining(SLACK_TOOLS));
+    expect(o.allowedTools).toHaveLength(4 + ALL_TOOLS.length + SLACK_TOOLS.length);
 
     const agentTools = o.agents?.coder?.tools ?? [];
     expect(Object.keys(o.agents ?? {})).toEqual(["coder", "reviewer", "qa", "researcher", "writer", "hr", "scout"]);
     expect(agentTools.slice(0, 2)).toEqual(["WebSearch", "WebFetch"]);
-    expect([...agentTools.slice(2)].sort()).toEqual(full(READ_ONLY_TOOLS).sort());
+    expect([...agentTools.slice(2)].sort()).toEqual([...full(READ_ONLY_TOOLS), ...SLACK_READ_TOOLS].sort());
+    expect(agentTools).not.toContain("mcp__slack__slack_send_message");
     expect(agentTools).not.toContain("mcp__pointer__monday_create_item");
     expect(agentTools).not.toContain("mcp__pointer__project_notes_add");
 
@@ -1808,5 +1813,28 @@ describe("Pointer brain: confirmation after outside content", () => {
     });
     await createPointerBrain(deps, { queryFn }).reply(baseReq({ text: "remember that we deploy on Fridays" }), ctx);
     expect(decisions).toEqual(["allow"]);
+  });
+
+  it("lets a Slack message to the requester through after outside content and holds one to someone else", async () => {
+    const deps = await setup();
+    const send = "mcp__slack__slack_send_message";
+    const decisions: string[] = [];
+    const { queryFn, calls } = fakeQuery(async function* (call) {
+      decisions.push(await preToolUse(call.options, "WebFetch", { url: "https://example.com/acme-12" }));
+      decisions.push(await preToolUse(call.options, send, { to: "me", text: "ACME-12 summary" }));
+      decisions.push(await preToolUse(call.options, send, { to: "U0ANN001", text: "ACME-12 summary" }));
+      decisions.push(await preToolUse(call.options, send, { to: "U0DANA01", text: "ACME-12 summary" }));
+      yield result();
+    });
+    const brain = createPointerBrain(deps, { queryFn });
+
+    await brain.reply(baseReq({ text: "summarise ACME-12 and DM it to me", userId: "U0ANN001" }), ctx);
+    expect(decisions.splice(0)).toEqual(["allow", "allow", "allow", "deny"]);
+    expect(calls[0]!.options.systemPrompt as string).toContain('send to "me"');
+
+    // The console has no Slack user: its id is nobody's, and Pointer is told to find the owner's account.
+    await brain.reply(baseReq({ text: "summarise ACME-12 and DM it to me", userId: "U0ANN001", surface: "web", channel: "web", channelType: "im" }), ctx);
+    expect(decisions.splice(0)).toEqual(["allow", "allow", "deny", "deny"]);
+    expect(calls[1]!.options.systemPrompt as string).toContain("find their own Slack account with slack_find_user");
   });
 });
