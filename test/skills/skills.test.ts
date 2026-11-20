@@ -5,12 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Options, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { describe, expect, it } from "vitest";
-import { type Config, ConfigRepo, ConfigSchema } from "../src/core/config.js";
-import { deriveKey } from "../src/core/crypto.js";
-import { MemoryRepo } from "../src/memory.js";
-import { type QueryFn, buildPointerSystemPrompt, createPointerBrain } from "../src/pointer.js";
-import type { PointerRequest } from "../src/pointer-types.js";
-import { createApp } from "../src/server.js";
+import { type Config, ConfigRepo, ConfigSchema } from "../../src/core/config.js";
+import { deriveKey } from "../../src/core/crypto.js";
+import { MemoryRepo } from "../../src/memory.js";
+import { type QueryFn, buildPointerSystemPrompt, createPointerBrain } from "../../src/pointer.js";
+import type { PointerRequest } from "../../src/pointer-types.js";
+import { createApp } from "../../src/server.js";
 import {
   type FetchLike,
   PLUGIN_MANIFEST,
@@ -27,10 +27,10 @@ import {
   parseSkillMd,
   safeSkillPath,
   skillView,
-} from "../src/skills.js";
-import { FsStore } from "../src/core/store.js";
-import { SKILLS_PLUGIN, type TeamSkills, agentSkills, buildChatAgents, buildRepoAgents, defaultTeam, repoAllowedTools } from "../src/team.js";
-import { prepareSkills, skillsNote, teamQueryOptions } from "../src/worker.js";
+} from "../../src/skills/skills.js";
+import { FsStore } from "../../src/core/store.js";
+import { SKILLS_PLUGIN, type TeamSkills, agentSkills, buildChatAgents, buildRepoAgents, defaultTeam, repoAllowedTools } from "../../src/team.js";
+import { prepareSkills, skillsNote, teamQueryOptions } from "../../src/worker.js";
 
 const KEY = deriveKey("k");
 const tmp = (prefix: string) => mkdtemp(join(tmpdir(), prefix));

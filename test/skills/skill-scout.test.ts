@@ -5,9 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Options, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { describe, expect, it } from "vitest";
-import { type Config, ConfigSchema } from "../src/core/config.js";
-import type { QueryFn } from "../src/pointer.js";
-import { createApp } from "../src/server.js";
+import { type Config, ConfigSchema } from "../../src/core/config.js";
+import type { QueryFn } from "../../src/pointer.js";
+import { createApp } from "../../src/server.js";
 import {
   CANDIDATES_SCHEMA,
   KNOWN_SOURCE,
@@ -15,9 +15,9 @@ import {
   findSkills,
   parseCandidates,
   scoutSystemPrompt,
-} from "../src/skill-scout.js";
-import { defaultTeam } from "../src/team.js";
-import { monthKey } from "../src/spending/usage.js";
+} from "../../src/skills/skill-scout.js";
+import { defaultTeam } from "../../src/team.js";
+import { monthKey } from "../../src/spending/usage.js";
 
 const PDF = "https://github.com/anthropics/skills/tree/main/skills/pdf";
 

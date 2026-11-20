@@ -34,7 +34,7 @@ import { type CodeHostKind, HOST_TERMS, repoHost } from "./repo-id.js";
 import { findRepoSetup, repoSetupContext, runSetupCommand, setupEnv } from "./repo-setup.js";
 import { ScreenshotRepo } from "./screenshots.js";
 import { HISTORY_SCAN, routeRepoTask } from "./sizing.js";
-import { SkillLibrary, materializeSkills } from "./skills.js";
+import { SkillLibrary, materializeSkills } from "./skills/skills.js";
 import { slackClient, slackErrorCode, toMrkdwn, truncate, uploadThreadFiles } from "./slack.js";
 import { createStore } from "./core/store.js";
 import { TimelineRecorder, checkItems, plainLine } from "./task-events.js";
