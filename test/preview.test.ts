@@ -306,10 +306,26 @@ describe("finding the preview on any code host", () => {
     expect(host.issueComments).not.toHaveBeenCalled();
   });
 
-  it("lets a status's Vercel preview have the bypass: setting statuses takes write access", async () => {
-    const host = hostWithout({ kind: "gitlab", statuses: [commitStatus("Vercel", "https://web-git-army-x-acme.vercel.app")] });
-    const found = await findOn(host);
-    expect(found.ok && found.found).toMatchObject({ url: "https://web-git-army-x-acme.vercel.app/", source: "status", vercel: true });
+  it("never sends the bypass to a status's *.vercel.app link: any repository writer can set one", async () => {
+    for (const kind of ["github", "gitlab", "bitbucket"] as const) {
+      const host = hostWithout({ kind, statuses: [commitStatus("Vercel – web", "https://someone-elses-project.vercel.app")] });
+      const found = await findOn(host, kind === "github" ? "acme/web" : `${kind}:acme/web`);
+      expect(found.ok && found.found).toMatchObject({ url: "https://someone-elses-project.vercel.app/", source: "status", vercel: false });
+    }
+  });
+
+  it("sends the bypass to a link only the Vercel app reported on GitHub: its check run", async () => {
+    const checks = [ciCheck("Vercel – web", "https://web-git-army-x-acme.vercel.app", { app: "vercel" })];
+    const github = await findOn(hostWithout({ kind: "github", checks }), "acme/web");
+    expect(github.ok && github.found).toMatchObject({ url: "https://web-git-army-x-acme.vercel.app/", source: "status", vercel: true });
+    // Another app's check, or a check on a host whose app names are not Vercel's own, does not qualify.
+    const other = await findOn(hostWithout({ kind: "github", checks: [{ ...checks[0]!, app: "my-ci" }] }), "acme/web");
+    expect(other.ok && other.found.vercel).toBe(false);
+    const gitlab = await findOn(hostWithout({ kind: "gitlab", checks }));
+    expect(gitlab.ok && gitlab.found.vercel).toBe(false);
+    // A status and the Vercel app's check pointing at the same preview: the check vouches for it.
+    const both = await findOn(hostWithout({ kind: "github", checks, statuses: [commitStatus("Vercel", "https://web-git-army-x-acme.vercel.app")] }), "acme/web");
+    expect(both.ok && both.found).toMatchObject({ vercel: true, others: [] });
   });
 
   it("reads statuses only as links on the preview platforms, successful, without credentials", () => {
@@ -333,8 +349,9 @@ describe("finding the preview on any code host", () => {
     // The integrations comment through the account that connected them: a person's comment never gets the bypass.
     expect(vercel).toEqual({ ok: true, found: { url: "https://web-git-army-sidebar-acme.vercel.app/", source: "comment", vercel: false, others: [] } });
 
+    // A bot account there (a project access token's) is still a repository writer's, not Vercel's.
     const byBot = await findOn(hostWithout({ kind: "gitlab", comments: [vercelComment(READY_TABLE, undefined, { author: "project_12_bot", bot: true })] }));
-    expect(byBot.ok && byBot.found.vercel).toBe(true);
+    expect(byBot.ok && byBot.found).toMatchObject({ source: "comment", vercel: false });
 
     const elsewhere = vercelComment(vcMeta("preview.evil.example.com", "DEPLOYED"), undefined, byPerson);
     expect(await findOn(hostWithout({ kind: "gitlab", comments: [elsewhere] }))).toEqual({ ok: false, note: "No preview deployment was found for this commit." });
@@ -711,6 +728,39 @@ describe("checkPreview", () => {
     await checkPreview(d);
     expect(prompts[0]).toContain("https://deploy-preview-12--acme.netlify.app/");
     expect(prompts[0]).not.toContain("127.0.0.1");
+  });
+
+  it("opens a *.vercel.app preview Vercel did not report without the secret: a writer's deployment, status or comment", async () => {
+    const lookalike = "https://someone-elses-project.vercel.app";
+    const sources: [string, PreviewHost & Pick<PreviewCheckDeps["host"], "commentOnPr">][] = [
+      ["a deployment by a person", fake({ deployments: [[deployment(7, "Preview", { creator: "octo-dev" })]], statuses: { 7: [[status("success", lookalike)]] } }).github],
+      ["a status", { ...hostWithout({ kind: "github", statuses: [commitStatus("Vercel", lookalike)] }), commentOnPr: vi.fn(async () => {}) }],
+      ["a GitLab comment", { ...hostWithout({ kind: "gitlab", comments: [vercelComment(READY_TABLE.replace("https://web-git-army-sidebar-acme.vercel.app", lookalike))] }), commentOnPr: vi.fn(async () => {}) }],
+    ];
+    for (const [what, host] of sources) {
+      let redirectHit = false;
+      const { d, prompts } = deps({
+        host,
+        bypassSecret: SECRET,
+        runRound: vi.fn(async (prompt: string) => {
+          prompts.push(prompt);
+          redirectHit = /127\.0\.0\.1/.test(prompt);
+          return { report: report({ summary: "Preview: checked\nFine." }) };
+        }),
+      });
+      expect((await checkPreview(d)).url, what).toBe(`${lookalike}/`);
+      expect(prompts[0], what).toContain(`${lookalike}/`);
+      expect(redirectHit, what).toBe(false);
+      expect(prompts[0], what).not.toContain(SECRET);
+      // The team is told how the owner can give it the secret instead.
+      expect(prompts[0], what).toContain("Protection Bypass for Automation");
+    }
+  });
+
+  it("sends the secret to a preview the Vercel app reported: its deployment on GitHub", async () => {
+    const { d, prompts } = deps({ bypassSecret: SECRET });
+    await checkPreview(d);
+    expect(prompts[0]).toMatch(/Open http:\/\/127\.0\.0\.1:\d+\/[0-9a-f]+ first/);
   });
 
   it("is unavailable without a comment when no preview is found or the round stops early", async () => {

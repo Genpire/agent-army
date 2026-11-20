@@ -1,6 +1,8 @@
-import { mkdtemp, readFile, readdir } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
+import { promisify } from "node:util";
 import { strToU8, zipSync } from "fflate";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { REPORT_SCHEMA, type Report, type SharedFile, orchestratorPrompt, parseReport } from "../src/agents.js";
@@ -21,8 +23,10 @@ import {
   FALLBACK_COMMIT_EMAIL,
   FIX_RUN_MAX_MS,
   type FollowChecksDeps,
+  GIT_SAFETY_ARGS,
   type GitRun,
   checkoutRepo,
+  commitArgs,
   commitIdentity,
   configSecrets,
   draftPrBody,
@@ -30,6 +34,7 @@ import {
   fixComment,
   fixRunTimeoutMs,
   followPrChecks,
+  gitEnv,
   gitRunner,
   jobDeadline,
   makeRedactor,
@@ -39,10 +44,13 @@ import {
   prFooter,
   prLabel,
   prRef,
+  publishBranch,
   publishPr,
   resultHeadline,
   saveProjectNotes,
   saveUnfinishedPr,
+  smartCommitSafe,
+  snapshotGitConfig,
   screenshotFailureLine,
   screenshotsSection,
   stoppedComment,
@@ -687,36 +695,62 @@ function fakeHost(kind: CodeHostKind = "gitlab") {
 describe("git through the code host", () => {
   it("clones with the host's URL and auth arguments, only on commands that need them, and authors commits as the host says", async () => {
     const host = fakeHost();
-    const calls: { args: string[]; cwd: string; prompt?: string }[] = [];
+    const calls: { args: string[]; cwd: string; env: NodeJS.ProcessEnv }[] = [];
     const run: ExecFile = async (_file, args, opts) => {
-      calls.push({ args, cwd: opts.cwd, prompt: opts.env.GIT_TERMINAL_PROMPT });
+      calls.push({ args, cwd: opts.cwd, env: opts.env });
       return { stdout: "\n" };
     };
-    const git = gitRunner({ host, cwd: "/work/repo", redact: makeRedactor(host.secrets()), run });
+    const git = gitRunner({ host, cwd: "/work/repo", home: "/work-git/home", redact: makeRedactor(host.secrets()), run });
     const out = await checkoutRepo({ host, repo: "gitlab:acme/platform/web", dir: "/work/repo", workRoot: "/work", git, pointerName: "Pointer", redact: (t) => t });
 
     expect(out).toEqual({ base: "main", author: { name: "Pointer (via octo-dev)", email: "octo-dev@example.com" } });
-    expect(calls[0]).toEqual({
-      args: [
-        "-c",
-        `http.https://gitlab.example.com/.extraheader=${HOST_HEADER}`,
-        "clone",
-        "--depth",
-        "50",
-        "--no-tags",
-        "https://gitlab.example.com/acme/platform/web.git",
-        "/work/repo",
-      ],
-      cwd: "/work",
-      prompt: "0",
-    });
+    expect(calls[0]!.args).toEqual([
+      ...GIT_SAFETY_ARGS,
+      "-c",
+      `http.https://gitlab.example.com/.extraheader=${HOST_HEADER}`,
+      "clone",
+      "--depth",
+      "50",
+      "--no-tags",
+      "https://gitlab.example.com/acme/platform/web.git",
+      "/work/repo",
+    ]);
+    expect(calls[0]!.cwd).toBe("/work");
     // Only the clone carries the credentials; nothing is written into .git/config.
     expect(calls.slice(1).map((c) => c.args)).toEqual([
-      ["config", "user.name", "Pointer (via octo-dev)"],
-      ["config", "user.email", "octo-dev@example.com"],
+      [...GIT_SAFETY_ARGS, "config", "user.name", "Pointer (via octo-dev)"],
+      [...GIT_SAFETY_ARGS, "config", "user.email", "octo-dev@example.com"],
     ]);
     expect(calls.slice(1).every((c) => c.cwd === "/work/repo")).toBe(true);
     expect(host.defaultBranch).toHaveBeenCalledWith("gitlab:acme/platform/web");
+  });
+
+  it("runs every git command with no hooks, no fsmonitor and only a minimal environment, never the worker's", async () => {
+    expect(GIT_SAFETY_ARGS).toEqual(["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "commit.gpgSign=false"]);
+    const envs: NodeJS.ProcessEnv[] = [];
+    const run: ExecFile = async (_file, _args, opts) => {
+      envs.push(opts.env);
+      return { stdout: "" };
+    };
+    const saved = { MASTER_KEY: process.env.MASTER_KEY, TASK_B64: process.env.TASK_B64 };
+    process.env.MASTER_KEY = "master-key-of-the-worker-000000";
+    process.env.TASK_B64 = "eyJ0YXNrSWQiOiJ0LTEifQ==";
+    try {
+      const git = gitRunner({ host: fakeHost(), cwd: "/w/repo", home: "/w-git/home", redact: (t) => t, run });
+      await git(["status"]);
+      await git(["fetch", "origin", "main"], { auth: true });
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+    for (const env of envs) {
+      expect(Object.keys(env).sort()).toEqual(["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT", "HOME", "LANG", "PATH"]);
+      expect(env).toMatchObject({ HOME: "/w-git/home", GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" });
+      expect(JSON.stringify(env)).not.toMatch(/master-key-of-the-worker|eyJ0YXNrSWQi|GIT_CONFIG_PARAMETERS/);
+    }
+    expect(gitEnv("/h")).not.toHaveProperty("GIT_CONFIG_PARAMETERS");
   });
 
   it("refuses a clone URL that carries credentials or is not https, before running git", async () => {
@@ -750,11 +784,206 @@ describe("git through the code host", () => {
       throw Object.assign(new Error(`Command failed: git ${args.join(" ")}`), { stderr: "" });
     };
     for (const redact of [makeRedactor(host.secrets()), (t: string) => t]) {
-      const git = gitRunner({ host, cwd: "/w/repo", redact, run });
+      const git = gitRunner({ host, cwd: "/w/repo", home: "/w-git/home", redact, run });
       const err = (await git(["push", "origin", "HEAD:refs/heads/army/x"], { auth: true }).catch((e: Error) => e)) as Error;
       expect(err.message).toMatch(/^git push failed: Command failed: git /);
       for (const secret of [HOST_TOKEN, HOST_HEADER, HOST_HEADER.split(" ").pop()!]) expect(err.message).not.toContain(secret);
     }
+  });
+});
+
+describe("the worker's git against what the agents planted (real git)", () => {
+  const plainGit = promisify(execFile);
+  /** The test's own git, for setting up and for playing an agent: no user or system config. */
+  const testEnv = (home: string) => ({ PATH: process.env.PATH ?? "", HOME: home, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0" });
+  const HOOKS = ["pre-commit", "prepare-commit-msg", "commit-msg", "post-commit", "pre-push", "post-checkout", "reference-transaction", "pre-auto-gc"];
+
+  it("commits and publishes without running planted hooks, filters or fsmonitor, and pushes only to the host", { timeout: 60_000 }, async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "army-git-test-")));
+    try {
+      const home = join(root, "home");
+      await mkdir(home);
+      const sh = async (cwd: string, ...args: string[]) =>
+        (await plainGit("git", ["-c", "user.name=Test", "-c", "user.email=test@example.com", ...args], { cwd, env: testEnv(home) })).stdout.trim();
+
+      // The host's repository, with more history than the worker's depth-50 clone takes, and one the agents would push to instead.
+      const remote = join(root, "remote.git");
+      const attacker = join(root, "attacker.git");
+      const seed = join(root, "seed");
+      await sh(root, "init", "--quiet", "--bare", remote);
+      await sh(root, "init", "--quiet", "--bare", attacker);
+      // So the control push below (from the shallow checkout) is accepted there.
+      await sh(root, "--git-dir", attacker, "config", "receive.shallowUpdate", "true");
+      await sh(root, "init", "--quiet", seed);
+      await writeFile(join(seed, "README.md"), "# web\n");
+      await sh(seed, "add", "-A");
+      for (let i = 0; i < 55; i += 1) await sh(seed, "commit", "--quiet", "--allow-empty", "-m", `commit ${i}`);
+      await sh(seed, "push", "--quiet", remote, "HEAD:refs/heads/main");
+      await sh(remote, "symbolic-ref", "HEAD", "refs/heads/main");
+
+      // The host: an https URL that the auth arguments point at the local repository (url.insteadOf),
+      // next to the auth header, so every authenticated command carries the header as it would.
+      const header = `Authorization: Basic ${Buffer.from(`oauth2:${HOST_TOKEN}`).toString("base64")}`;
+      const basic = header.split(" ").pop()!;
+      const host = fakeHost();
+      host.cloneUrl.mockReturnValue("https://gitlab.example.com/acme/web.git");
+      host.gitAuthArgs.mockReturnValue([
+        "-c",
+        `url.file://${remote}.insteadOf=https://gitlab.example.com/acme/web.git`,
+        "-c",
+        `http.https://gitlab.example.com/.extraheader=${header}`,
+      ]);
+      const gitHome = join(root, "git-private", "home");
+      await mkdir(gitHome, { recursive: true });
+      const repoDir = join(root, "work", "repo");
+      await mkdir(join(root, "work"));
+      const git = gitRunner({ host, cwd: repoDir, home: gitHome, redact: makeRedactor([HOST_TOKEN, header, basic]) });
+      await checkoutRepo({ host, repo: "gitlab:acme/web", dir: repoDir, workRoot: join(root, "work"), git, pointerName: "Pointer", redact: (t) => t });
+      expect(await readFile(join(repoDir, ".git", "shallow"), "utf8")).not.toBe("");
+      await git(["checkout", "--quiet", "-b", "army/sidebar"]);
+      const restore = await snapshotGitConfig(repoDir);
+
+      // What an agent could leave behind: hooks in .git/hooks and in a core.hooksPath folder, a clean
+      // filter for every file, an fsmonitor program, a pack-objects hook, a signing program, and remote,
+      // push and proxy settings. Each program writes its environment to a ran-* file.
+      const evil = join(root, "evil");
+      await mkdir(evil);
+      const ran = (name: string) => join(root, `ran-${name}`);
+      const program = async (path: string, name: string, passThrough = false) => {
+        await writeFile(path, `#!/bin/sh\nenv > "${ran(name)}"\n${passThrough ? "cat\n" : "exit 0\n"}`);
+        await chmod(path, 0o755);
+      };
+      for (const hook of HOOKS) {
+        await program(join(evil, hook), `hooks-path-${hook}`);
+        await program(join(repoDir, ".git", "hooks", hook), `hooks-${hook}`);
+      }
+      for (const name of ["fsmonitor", "pack-hook", "gpg"]) await program(join(evil, name), name);
+      await program(join(evil, "filter"), "filter", true);
+      const plant = async () => {
+        for (const [key, value] of [
+          ["core.hooksPath", evil],
+          ["remote.origin.url", `file://${attacker}`],
+          ["remote.origin.pushurl", `file://${attacker}`],
+          ["filter.evil.clean", join(evil, "filter")],
+          ["filter.evil.required", "true"],
+          ["core.fsmonitor", join(evil, "fsmonitor")],
+          ["uploadpack.packObjectsHook", join(evil, "pack-hook")],
+          ["commit.gpgSign", "true"],
+          ["gpg.program", join(evil, "gpg")],
+          ["http.proxy", "http://127.0.0.1:9"],
+        ]) {
+          await sh(repoDir, "config", key!, value!);
+        }
+      };
+      await plant();
+      await writeFile(join(repoDir, ".gitattributes"), "* filter=evil\n");
+      await writeFile(join(repoDir, "app.txt"), "hello\n");
+
+      // The worker's publish: its own config back before each command, then a push from a fresh bare repository.
+      const afterAgents: GitRun = async (args, opts) => {
+        await restore();
+        return git(args, opts);
+      };
+      await afterAgents(["add", "-A"]);
+      expect(await afterAgents(["status", "--porcelain"])).not.toBe("");
+      await afterAgents(commitArgs("Collapse the sidebar (ACME-12 #done)"));
+      // A process the agents left running plants it all again before the push.
+      await plant();
+      const privateDir = join(root, "git-private");
+      await publishBranch({ host, repo: "gitlab:acme/web", repoDir, branch: "army/sidebar", git, tmp: privateDir });
+
+      // A fix round: another commit, pushed again (a fast-forward of the same branch).
+      await writeFile(join(repoDir, "app.txt"), "hello again\n");
+      await afterAgents(["add", "-A"]);
+      await afterAgents(commitArgs("Fix failing checks: ACME-12 #time 1h"));
+      await plant();
+      await publishBranch({ host, repo: "gitlab:acme/web", repoDir, branch: "army/sidebar", git, tmp: privateDir });
+
+      const inRemote = (...args: string[]) => sh(root, "--git-dir", remote, ...args);
+      expect(await inRemote("log", "--format=%s", "-2", "refs/heads/army/sidebar")).toBe(
+        "Fix failing checks: ACME-12 ＃time 1h\nCollapse the sidebar (ACME-12 ＃done)",
+      );
+      expect(await inRemote("show", "refs/heads/army/sidebar:app.txt")).toBe("hello again");
+      expect(await inRemote("rev-parse", "refs/heads/army/sidebar")).toBe(await sh(repoDir, "rev-parse", "HEAD"));
+      // Nothing went where the agents pointed origin, nothing they planted ran, and no bare repository is left over.
+      expect(await sh(root, "--git-dir", attacker, "for-each-ref")).toBe("");
+      expect((await readdir(root)).filter((f) => f.startsWith("ran-"))).toEqual([]);
+      expect(await readdir(privateDir)).toEqual(["home"]);
+      // The worker's own config is back in the checkout after its commands.
+      await restore();
+      expect(await sh(repoDir, "config", "--get", "core.hooksPath").catch(() => "")).toBe("");
+
+      // Control: the same push as an agent would run it does fire the traps, with the header in reach.
+      await plant();
+      await plainGit("git", ["-c", `http.https://gitlab.example.com/.extraheader=${header}`, "push", "--quiet", "origin", "HEAD:refs/heads/stolen"], {
+        cwd: repoDir,
+        env: testEnv(home),
+      });
+      expect(await sh(root, "--git-dir", attacker, "for-each-ref", "--format=%(refname)")).toBe("refs/heads/stolen");
+      expect(await readFile(ran("hooks-path-pre-push"), "utf8")).toContain(basic);
+      // …and a plain `git add` with their config runs their clean filter.
+      await writeFile(join(repoDir, "app.txt"), "changed\n");
+      await sh(repoDir, "add", "-A");
+      expect((await readdir(root)).filter((f) => f.startsWith("ran-"))).toContain("ran-filter");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to push to an unsafe branch name or a URL that is not plain https, before running git", async () => {
+    const git = vi.fn(async (_args: string[]) => "");
+    const host = fakeHost();
+    for (const branch of ["+refs/heads/main", "main:refs/heads/other", "-delete", "a..b", "x.lock", "a b", "feature/"]) {
+      await expect(publishBranch({ host, repo: "gitlab:acme/web", repoDir: "/w/repo", branch, git, tmp: tmpdir() })).rejects.toThrow("Not pushing");
+    }
+    host.cloneUrl.mockReturnValue(`https://oauth2:${HOST_TOKEN}@gitlab.example.com/acme/web.git`);
+    const err = (await publishBranch({ host, repo: "gitlab:acme/web", repoDir: "/w/repo", branch: "army/x", git, tmp: tmpdir() }).catch((e: Error) => e)) as Error;
+    expect(err.message).toContain("not plain https");
+    expect(err.message).not.toContain(HOST_TOKEN);
+    expect(git).not.toHaveBeenCalled();
+  });
+
+  it("puts the worker's .git/config back, and refuses a .git that is no longer a folder", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "army-config-test-")));
+    try {
+      const repoDir = join(root, "repo");
+      await mkdir(join(repoDir, ".git"), { recursive: true });
+      await writeFile(join(repoDir, ".git", "config"), "[user]\n\tname = Pointer\n");
+      const restore = await snapshotGitConfig(repoDir);
+      await writeFile(join(repoDir, ".git", "config"), "[filter \"x\"]\n\tclean = ./steal\n");
+      await restore();
+      expect(await readFile(join(repoDir, ".git", "config"), "utf8")).toBe("[user]\n\tname = Pointer\n");
+
+      // A config that is now a link elsewhere is replaced, never written through.
+      const elsewhere = join(root, "elsewhere");
+      await writeFile(elsewhere, "untouched");
+      await rm(join(repoDir, ".git", "config"));
+      await symlink(elsewhere, join(repoDir, ".git", "config"));
+      await restore();
+      expect(await readFile(elsewhere, "utf8")).toBe("untouched");
+      expect(await readFile(join(repoDir, ".git", "config"), "utf8")).toBe("[user]\n\tname = Pointer\n");
+
+      await rm(join(repoDir, ".git"), { recursive: true });
+      await writeFile(join(repoDir, ".git"), "gitdir: /elsewhere\n");
+      await expect(restore()).rejects.toThrow("no longer a folder");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("commit messages and Jira Smart Commits", () => {
+  it("neutralises a #command after an issue key, on every line, and leaves the rest alone", () => {
+    expect(smartCommitSafe("ACME-1 #done")).toBe("ACME-1 ＃done");
+    expect(smartCommitSafe("Fix the login (ACME-12) #comment fixed it #time 2h #resolve")).toBe("Fix the login (ACME-12) ＃comment fixed it ＃time 2h ＃resolve");
+    expect(smartCommitSafe("Fixes #12 and #34, see #docs")).toBe("Fixes #12 and #34, see #docs");
+    expect(smartCommitSafe("ACME-1: fixes #12")).toBe("ACME-1: fixes #12");
+    expect(smartCommitSafe("#done before ACME-1")).toBe("#done before ACME-1");
+    expect(smartCommitSafe("Title\n\nBody without a key #done\nacme-7 #close")).toBe("Title\n\nBody without a key #done\nacme-7 ＃close");
+  });
+
+  it("commits without hooks and with the neutralised message", () => {
+    expect(commitArgs("Ship it: ACME-3 #done")).toEqual(["commit", "--quiet", "--no-verify", "-m", "Ship it: ACME-3 ＃done"]);
   });
 });
 
