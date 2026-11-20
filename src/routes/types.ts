@@ -5,11 +5,11 @@
  * outside /api and parse their own raw bodies.
  */
 import type { Request, RequestHandler } from "express";
-import type { ConfigRepo } from "../config.js";
-import type { ConversationService } from "../conversations.js";
-import type { Store } from "../store.js";
-import type { TaskRepo } from "../tasks.js";
-import type { WebhookDeps } from "../webhook.js";
+import type { ConfigRepo } from "../core/config.js";
+import type { ConversationService } from "../chat/conversations.js";
+import type { Store } from "../core/store.js";
+import type { TaskRepo } from "../tasks/tasks.js";
+import type { WebhookDeps } from "../integrations/code-hosts/webhook.js";
 
 export interface IntegrationRouteDeps {
   configRepo: ConfigRepo;

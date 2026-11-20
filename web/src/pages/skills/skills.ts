@@ -2,8 +2,8 @@
  * The Skills page's shapes, from the server's own types (type-only imports),
  * and the small helpers the page and the Team page's agent drawer share.
  */
-import type { SkillCandidate } from "../../../../src/skill-scout.js";
-import type { SKILL_LIMITS, SkillAssignment, SkillPreview, SkillSource, SkillView } from "../../../../src/skills.js";
+import type { SkillCandidate } from "../../../../src/skills/skill-scout.js";
+import type { SKILL_LIMITS, SkillAssignment, SkillPreview, SkillSource, SkillView } from "../../../../src/skills/skills.js";
 import type { AgentSpec } from "../../lib/types";
 
 export type { SkillAssignment, SkillCandidate, SkillPreview, SkillSource, SkillView };

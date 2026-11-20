@@ -5,9 +5,9 @@
  */
 import { Router } from "express";
 import { z } from "zod";
-import { MIRO_BOARD_ID_RE } from "../config.js";
-import { MiroClient, MiroError, checkMiro, parseBoardRef, type MiroBoardSummary } from "../miro.js";
-import { configSecrets, makeRedactor } from "../worker.js";
+import { MIRO_BOARD_ID_RE } from "../core/config.js";
+import { MiroClient, MiroError, checkMiro, parseBoardRef, type MiroBoardSummary } from "../integrations/miro/miro.js";
+import { configSecrets, makeRedactor } from "../tasks/worker.js";
 import type { IntegrationRouteDeps } from "./types.js";
 
 /** A board id or a board link, as typed on the admin page; stored as the id. "" stays "" where `empty` allows it. */

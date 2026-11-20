@@ -4,17 +4,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import type { Screenshot } from "../src/browser.js";
-import { type Config, ConfigRepo, ConfigSchema, resolveMasterKey } from "../src/config.js";
-import type { ConversationService } from "../src/conversations.js";
-import { deriveKey } from "../src/crypto.js";
-import { MemoryRepo } from "../src/memory.js";
-import { type QueryFn, createPointerBrain } from "../src/pointer.js";
-import type { PointerActivity, PointerBrain, PointerContext, PointerReply, PointerRequest } from "../src/pointer-types.js";
-import { ProgressTracker, type TrackerEvent, browserAction } from "../src/progress.js";
-import { ScreenshotRepo, screenshotName } from "../src/screenshots.js";
+import type { Screenshot } from "../src/tasks/browser.js";
+import { type Config, ConfigRepo, ConfigSchema, resolveMasterKey } from "../src/core/config.js";
+import type { ConversationService } from "../src/chat/conversations.js";
+import { deriveKey } from "../src/core/crypto.js";
+import { MemoryRepo } from "../src/chat/memory.js";
+import { type QueryFn, createPointerBrain } from "../src/chat/pointer.js";
+import type { PointerActivity, PointerBrain, PointerContext, PointerReply, PointerRequest } from "../src/chat/pointer-types.js";
+import { ProgressTracker, type TrackerEvent, browserAction } from "../src/tasks/progress.js";
+import { ScreenshotRepo, screenshotName } from "../src/tasks/screenshots.js";
 import { createApp } from "../src/server.js";
-import { FsStore, type Store } from "../src/store.js";
+import { FsStore, type Store } from "../src/core/store.js";
 import {
   TASK_EVENTS_MAX,
   TimelineRecorder,
@@ -27,9 +27,9 @@ import {
   plainLine,
   readTimeline,
   trackerToEvent,
-} from "../src/task-events.js";
-import { TaskRepo, isWebTask } from "../src/tasks.js";
-import { startThreadTask } from "../src/thread-task.js";
+} from "../src/tasks/task-events.js";
+import { TaskRepo, isWebTask } from "../src/tasks/tasks.js";
+import { startThreadTask } from "../src/tasks/thread-task.js";
 import {
   draftPrBody,
   newScreenshots,
@@ -39,7 +39,7 @@ import {
   stoppedComment,
   taskPrompt,
   taskReport,
-} from "../src/worker.js";
+} from "../src/tasks/worker.js";
 
 // A 1×1 PNG (signature + IHDR is enough for the type check).
 const PNG = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489", "hex");

@@ -4,20 +4,20 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { deriveKey } from "../src/crypto.js";
-import { MemoryRepo } from "../src/memory.js";
-import { MONDAY_API_URL } from "../src/monday.js";
-import { NOTES_MAX_CHARS } from "../src/notes.js";
-import type { SlackDeps, SlackMessageEvent } from "../src/pointer-types.js";
-import { REPO_FORMAT_HINT } from "../src/repo-id.js";
+import { deriveKey } from "../src/core/crypto.js";
+import { MemoryRepo } from "../src/chat/memory.js";
+import { MONDAY_API_URL } from "../src/integrations/monday/monday.js";
+import { NOTES_MAX_CHARS } from "../src/chat/notes.js";
+import type { SlackDeps, SlackMessageEvent } from "../src/chat/pointer-types.js";
+import { REPO_FORMAT_HINT } from "../src/integrations/code-hosts/repo-id.js";
 import { createApp } from "../src/server.js";
-import { FsStore } from "../src/store.js";
-import type { AgentSpec, Team } from "../src/team.js";
+import { FsStore } from "../src/core/store.js";
+import type { AgentSpec, Team } from "../src/team/team.js";
 
 // The real Slack layer would call Slack and Claude. Record what the server hands
 // it instead, and never settle, which proves /slack/events answers without waiting.
 const dispatched = vi.hoisted(() => [] as Array<{ event: SlackMessageEvent; deps: SlackDeps }>);
-vi.mock("../src/dispatch.js", () => ({
+vi.mock("../src/slack/dispatch.js", () => ({
   handleSlackEvent: (event: SlackMessageEvent, deps: SlackDeps) => {
     dispatched.push({ event, deps });
     return new Promise<void>(() => {});

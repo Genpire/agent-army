@@ -1,6 +1,6 @@
 /**
  * Who does an agent's repo-task work (AgentSpec.engine): Claude, or a coding
- * agent CLI it hands the work to (Codex, Gemini CLI; src/engines.ts). Names
+ * agent CLI it hands the work to (Codex, Gemini CLI; src/ai/engines.ts). Names
  * as the console shows them.
  */
 import type { AgentSpec, PublicConfig } from "./types";

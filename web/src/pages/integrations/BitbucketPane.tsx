@@ -27,7 +27,7 @@ interface ScopeRow extends Record<string, unknown> {
 
 /**
  * What the token needs. `permission` and `access` are the names on an access
- * token's form; `scopes` are an API token's. src/bitbucket.ts uses them.
+ * token's form; `scopes` are an API token's. src/integrations/bitbucket/bitbucket.ts uses them.
  */
 const SCOPES: ScopeRow[] = [
   {

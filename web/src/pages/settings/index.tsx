@@ -132,7 +132,7 @@ interface LimitField {
   isInteger?: boolean;
 }
 
-/** Mirrors the limits in ConfigSchema (src/config.ts); the server checks them again. */
+/** Mirrors the limits in ConfigSchema (src/core/config.ts); the server checks them again. */
 function limitFields(runner: string | undefined): LimitField[] {
   return [
     {
@@ -200,7 +200,7 @@ function limitError(f: LimitField, value: number): string | undefined {
 
 type PreviewCheck = Limits["previewCheck"];
 
-/** Mirrors limits.previewCheck in ConfigSchema (src/config.ts). */
+/** Mirrors limits.previewCheck in ConfigSchema (src/core/config.ts). */
 const PREVIEW_CHECK_OPTIONS: (SelectorOptionData & { value: PreviewCheck })[] = [
   { value: "off", label: "Off", description: "Never opens the preview" },
   { value: "visible", label: "When the change is visible", description: "Only for changes to what people see (recommended)" },

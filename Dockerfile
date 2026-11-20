@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && corepack enable \
     && mkdir -p /data && chown node:node /data
-# Coding agent CLIs the team can hand repo work to (src/engines.ts), pinned.
+# Coding agent CLIs the team can hand repo work to (src/ai/engines.ts), pinned.
 # ENGINES says which: "codex gemini" (the default), one of them, or "" for
 # neither (an engine whose CLI is missing is left out of tasks, with a note).
 # Codex adds about 420 MB (a native binary), Gemini CLI about 100 MB.

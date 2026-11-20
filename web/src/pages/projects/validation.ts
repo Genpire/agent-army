@@ -2,8 +2,8 @@ import type { PublicConfig } from "../../lib/types";
 
 /**
  * Client-side checks for the Projects page. They mirror REPO_RE and
- * REPO_FORMAT_HINT in src/repo-id.ts, and CHANNEL_RE, ENV_KEY_RE,
- * RESERVED_ENV_KEYS and the repo setup limits in src/config.ts and
+ * REPO_FORMAT_HINT in src/integrations/code-hosts/repo-id.ts, and CHANNEL_RE, ENV_KEY_RE,
+ * RESERVED_ENV_KEYS and the repo setup limits in src/core/config.ts and
  * src/server.ts (the browser bundle takes nothing from the server's modules).
  * The server validates everything again; these only give a faster, clearer error.
  */

@@ -3,11 +3,11 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { parseReport } from "../src/agents.js";
-import { ConfigRepo, ConfigSchema, publicView } from "../src/config.js";
-import { decrypt, deriveKey, encrypt, hashPassword, signSession, verifyPassword, verifySession } from "../src/crypto.js";
-import { checkBashCommand } from "../src/guard.js";
-import { ATTACHMENT_LIMITS } from "../src/attachments.js";
+import { parseReport } from "../src/team/agents.js";
+import { ConfigRepo, ConfigSchema, publicView } from "../src/core/config.js";
+import { decrypt, deriveKey, encrypt, hashPassword, signSession, verifyPassword, verifySession } from "../src/core/crypto.js";
+import { checkBashCommand } from "../src/tasks/guard.js";
+import { ATTACHMENT_LIMITS } from "../src/chat/attachments.js";
 import {
   buildManifest,
   downloadSlackFile,
@@ -17,13 +17,13 @@ import {
   toMrkdwn,
   unreact,
   verifySlackSignature,
-} from "../src/slack.js";
-import { FsStore } from "../src/store.js";
-import { type Conversation, pendingMilestones, taskResultMarkdown } from "../src/conversations.js";
-import { type Task, decodeTaskPayload, encodeTaskPayload, newTaskId } from "../src/tasks.js";
-import { GITHUB_REPO_RE, REPO_FORMAT_HINT, REPO_RE } from "../src/repo-id.js";
-import { helpText, isRepoAllowed, messageText, parseCommand, repoFromToken, resolveRepo } from "../src/targeting.js";
-import { branchName, makeRedactor } from "../src/worker.js";
+} from "../src/slack/slack.js";
+import { FsStore } from "../src/core/store.js";
+import { type Conversation, pendingMilestones, taskResultMarkdown } from "../src/chat/conversations.js";
+import { type Task, decodeTaskPayload, encodeTaskPayload, newTaskId } from "../src/tasks/tasks.js";
+import { GITHUB_REPO_RE, REPO_FORMAT_HINT, REPO_RE } from "../src/integrations/code-hosts/repo-id.js";
+import { helpText, isRepoAllowed, messageText, parseCommand, repoFromToken, resolveRepo } from "../src/slack/targeting.js";
+import { branchName, makeRedactor } from "../src/tasks/worker.js";
 import {
   GITHUB_REPO_RE as WEB_GITHUB_REPO_RE,
   REPO_ERROR,

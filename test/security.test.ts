@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { REPO_RE } from "../src/config.js";
-import { encodePath } from "../src/github.js";
-import { checkBashCommand } from "../src/guard.js";
-import { subagentReadOnlyGate } from "../src/pointer.js";
-import { RESERVED_AGENT_IDS } from "../src/team.js";
-import { mergeConcurrentNotes } from "../src/worker.js";
+import { REPO_RE } from "../src/core/config.js";
+import { encodePath } from "../src/integrations/github/github.js";
+import { checkBashCommand } from "../src/tasks/guard.js";
+import { subagentReadOnlyGate } from "../src/chat/pointer.js";
+import { RESERVED_AGENT_IDS } from "../src/team/team.js";
+import { mergeConcurrentNotes } from "../src/tasks/worker.js";
 
 describe("security fixes from review", () => {
   it("refuses path traversal in GitHub file paths and repo names", () => {
@@ -52,11 +52,11 @@ describe("security fixes from review", () => {
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ConfigRepo } from "../src/config.js";
-import { deriveKey } from "../src/crypto.js";
-import { MemoryRepo } from "../src/memory.js";
-import { createPointerBrain } from "../src/pointer.js";
-import { FsStore } from "../src/store.js";
+import { ConfigRepo } from "../src/core/config.js";
+import { deriveKey } from "../src/core/crypto.js";
+import { MemoryRepo } from "../src/chat/memory.js";
+import { createPointerBrain } from "../src/chat/pointer.js";
+import { FsStore } from "../src/core/store.js";
 
 describe("brain options", () => {
   it("never expands prompt syntax and gates subagents", async () => {

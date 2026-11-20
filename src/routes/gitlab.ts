@@ -6,13 +6,13 @@
  */
 import express, { type Request, type Response, Router } from "express";
 import { z } from "zod";
-import type { Config } from "../config.js";
-import { randomToken } from "../crypto.js";
-import { GITLAB_DEFAULT_URL, GitLab, gitlabStatus } from "../gitlab.js";
-import { GITLAB_EVENTS, handleGitlabDelivery, verifyGitlabToken } from "../gitlab-webhook.js";
-import { RecentSet } from "../listen.js";
-import { repoId } from "../repo-id.js";
-import { configSecrets, makeRedactor } from "../worker.js";
+import type { Config } from "../core/config.js";
+import { randomToken } from "../core/crypto.js";
+import { GITLAB_DEFAULT_URL, GitLab, gitlabStatus } from "../integrations/gitlab/gitlab.js";
+import { GITLAB_EVENTS, handleGitlabDelivery, verifyGitlabToken } from "../integrations/gitlab/gitlab-webhook.js";
+import { RecentSet } from "../slack/listen.js";
+import { repoId } from "../integrations/code-hosts/repo-id.js";
+import { configSecrets, makeRedactor } from "../tasks/worker.js";
 import type { IntegrationRouteDeps } from "./types.js";
 
 /** https:// and a host, optionally a port and a path (GitLab under a relative URL). No query, fragment or "=" (git reads the address as a config key). */

@@ -1,6 +1,6 @@
 /**
  * The Team page's vocabulary and rules: option lists, labels, the agent id
- * rule and the checks the page runs before saving. They mirror src/team.ts
+ * rule and the checks the page runs before saving. They mirror src/team/team.ts
  * (AgentSpecSchema, PointerSpecSchema, RESERVED_AGENT_IDS); the server
  * validates again and its message is shown when it disagrees.
  */
@@ -118,11 +118,11 @@ export const isEffort = (value: string): value is Effort => (EFFORT_OPTIONS as r
 
 // ---------- Routing by task size ----------
 
-/** The sizes Pointer estimates before a repo task (TASK_SIZES in src/team.ts). */
+/** The sizes Pointer estimates before a repo task (TASK_SIZES in src/team/team.ts). */
 export type TaskSize = keyof Omit<PointerSpec["routing"], "enabled">;
 export const TASK_SIZE_OPTIONS = ["small", "medium", "large"] as const satisfies readonly TaskSize[];
 
-/** What each size means, in the words the size estimate uses (src/sizing.ts). */
+/** What each size means, in the words the size estimate uses (src/tasks/sizing.ts). */
 export const SIZE_INFO: Record<TaskSize, { label: string; description: string }> = {
   small: { label: "Small", description: "A contained change with a clear location: a typo, copy, a config value, a small fix in one or two files." },
   medium: { label: "Medium", description: "A feature or fix in one area: several files, new tests, or some investigation first." },
@@ -160,7 +160,7 @@ export const isAccess = (value: string): value is Access => value in ACCESS_INFO
 
 // ---------- Agent ids and emoji ----------
 
-/** Mirrors RESERVED_AGENT_IDS in src/team.ts. */
+/** Mirrors RESERVED_AGENT_IDS in src/team/team.ts. */
 const RESERVED_AGENT_IDS = ["pointer", "general-purpose", "statusline-setup", "claude-code-guide", "explore", "plan", "output-style-setup", "fork", "claude"];
 
 /**

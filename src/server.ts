@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { AttachmentRepo } from "./attachments.js";
-import { Spending } from "./budget.js";
+import { AttachmentRepo } from "./chat/attachments.js";
+import { Spending } from "./spending/budget.js";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { z } from "zod";
 import {
@@ -17,16 +17,16 @@ import {
   isReady,
   publicView,
   resolveMasterKey,
-} from "./config.js";
-import { hashPassword, randomToken, safeEqual, sessionKey, signSession, verifyPassword, verifySession } from "./crypto.js";
-import { repoAccessError } from "./code-host-access.js";
-import { GITHUB_REPO_RE, REPO_FORMAT_HINT, REPO_ID_MAX, isRepoId } from "./repo-id.js";
-import { CONVERSATION_ID_RE, ConversationService, MESSAGE_MAX_CHARS, type WebThreads } from "./conversations.js";
-import { handleSlackEvent, withBrainSlot } from "./dispatch.js";
-import { HrService, PROPOSAL_ID_RE, REVIEW_ID_RE } from "./hr.js";
-import { RecentSet } from "./listen.js";
-import { MEMORY_MAX_FACTS, MemoryRepo } from "./memory.js";
-import { MondayClient, MondayError, checkMonday, statusColumns } from "./monday.js";
+} from "./core/config.js";
+import { hashPassword, randomToken, safeEqual, sessionKey, signSession, verifyPassword, verifySession } from "./core/crypto.js";
+import { repoAccessError } from "./integrations/code-hosts/code-host-access.js";
+import { GITHUB_REPO_RE, REPO_FORMAT_HINT, REPO_ID_MAX, isRepoId } from "./integrations/code-hosts/repo-id.js";
+import { CONVERSATION_ID_RE, ConversationService, MESSAGE_MAX_CHARS, type WebThreads } from "./chat/conversations.js";
+import { handleSlackEvent, withBrainSlot } from "./slack/dispatch.js";
+import { HrService, PROPOSAL_ID_RE, REVIEW_ID_RE } from "./team/hr.js";
+import { RecentSet } from "./slack/listen.js";
+import { MEMORY_MAX_FACTS, MemoryRepo } from "./chat/memory.js";
+import { MondayClient, MondayError, checkMonday, statusColumns } from "./integrations/monday/monday.js";
 import {
   TicketAutomation,
   checkBoardAutomation,
@@ -36,25 +36,25 @@ import {
   removeWebhook,
   webhookChallenge,
   webhookIds,
-} from "./monday-automation.js";
-import { NOTES_MAX_CHARS, NotesRepo } from "./notes.js";
-import { loadOffice } from "./office.js";
-import { type QueryFn, createPointerBrain } from "./pointer.js";
-import type { PointerBrain, SlackDeps, SlackMessageEvent } from "./pointer-types.js";
-import { type Runner, createRunner } from "./runner.js";
-import { SCREENSHOT_NAME_RE, ScreenshotRepo, TASK_ID_RE, screenshotType } from "./screenshots.js";
-import { SCOUT_NEED_MAX_CHARS, findSkills } from "./skill-scout.js";
-import { type FetchLike, SKILL_LIMITS, SkillLibrary, SkillsPluginCache, skillView } from "./skills.js";
-import { buildManifest, manifestCreateUrl, slackClient, verifySlackSignature } from "./slack.js";
-import { createStore } from "./store.js";
-import { readTimeline } from "./task-events.js";
-import { TaskRepo } from "./tasks.js";
-import { SKILL_NAME_RE, TeamSchema } from "./team.js";
-import { rememberConsoleUrl } from "./ticket-sync.js";
-import { checkAnthropic, checkGithub, checkSlack } from "./validate.js";
-import { UsageRepo } from "./usage.js";
-import { handleGithubWebhook, parseGithubPayload, verifyGithubSignature } from "./webhook.js";
-import { configSecrets, makeRedactor } from "./worker.js";
+} from "./integrations/monday/monday-automation.js";
+import { NOTES_MAX_CHARS, NotesRepo } from "./chat/notes.js";
+import { loadOffice } from "./team/office.js";
+import { type QueryFn, createPointerBrain } from "./chat/pointer.js";
+import type { PointerBrain, SlackDeps, SlackMessageEvent } from "./chat/pointer-types.js";
+import { type Runner, createRunner } from "./tasks/runner.js";
+import { SCREENSHOT_NAME_RE, ScreenshotRepo, TASK_ID_RE, screenshotType } from "./tasks/screenshots.js";
+import { SCOUT_NEED_MAX_CHARS, findSkills } from "./skills/skill-scout.js";
+import { type FetchLike, SKILL_LIMITS, SkillLibrary, SkillsPluginCache, skillView } from "./skills/skills.js";
+import { buildManifest, manifestCreateUrl, slackClient, verifySlackSignature } from "./slack/slack.js";
+import { createStore } from "./core/store.js";
+import { readTimeline } from "./tasks/task-events.js";
+import { TaskRepo } from "./tasks/tasks.js";
+import { SKILL_NAME_RE, TeamSchema } from "./team/team.js";
+import { rememberConsoleUrl } from "./integrations/tickets/ticket-sync.js";
+import { checkAnthropic, checkGithub, checkSlack } from "./core/validate.js";
+import { UsageRepo } from "./spending/usage.js";
+import { handleGithubWebhook, parseGithubPayload, verifyGithubSignature } from "./integrations/code-hosts/webhook.js";
+import { configSecrets, makeRedactor } from "./tasks/worker.js";
 import { aiRoutes } from "./routes/ai.js";
 import { appsRoutes } from "./routes/apps.js";
 import { bitbucketRoutes } from "./routes/bitbucket.js";

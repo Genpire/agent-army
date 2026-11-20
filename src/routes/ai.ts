@@ -7,7 +7,7 @@
  */
 import { Router } from "express";
 import { z } from "zod";
-import type { AiPreset, ModelPrice, PresetCapabilities, PresetField, PresetKind, PresetModel } from "../ai-presets.js";
+import type { AiPreset, ModelPrice, PresetCapabilities, PresetField, PresetKind, PresetModel } from "../ai/ai-presets.js";
 import {
   AI_PRESETS,
   type ConnectionTestDeps,
@@ -18,9 +18,9 @@ import {
   presetFor,
   providerProblem,
   testConnection,
-} from "../ai-providers.js";
-import { AI_PROVIDER_IDS, type AiProviderId, type Config, MODEL_TIERS, type ModelTier, mask } from "../config.js";
-import { configSecrets, makeRedactor } from "../worker.js";
+} from "../ai/ai-providers.js";
+import { AI_PROVIDER_IDS, type AiProviderId, type Config, MODEL_TIERS, type ModelTier, mask } from "../core/config.js";
+import { configSecrets, makeRedactor } from "../tasks/worker.js";
 import type { IntegrationRouteDeps } from "./types.js";
 
 /** One provider as the console sees it: the preset, and the saved connection without its secrets. */
