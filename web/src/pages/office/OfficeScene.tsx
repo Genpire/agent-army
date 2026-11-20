@@ -54,7 +54,8 @@ const styles = stylex.create({
     borderRadius: radiusVars["--radius-full"],
     boxShadow: shadowVars["--shadow-low"],
   },
-  frame: { overflow: "hidden" },
+  // Isolated: the scene's own z-indexes (up to the thousands) stay inside it, under the console's floating chat button.
+  frame: { overflow: "hidden", isolation: "isolate" },
   pinned: { position: "absolute", top: spacingVars["--spacing-4"], zIndex: 1500 },
   pinStart: { insetInlineStart: spacingVars["--spacing-4"] },
   pinEnd: { insetInlineEnd: spacingVars["--spacing-4"] },
