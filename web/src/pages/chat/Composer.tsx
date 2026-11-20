@@ -138,22 +138,28 @@ export function Composer({ value, onChange, onSend, files, options, isDragging, 
         isDisabled={isDisabled}
         onClick={() => pickFiles(addFiles)}
       />
-      <IconButton
-        label="Record a voice message"
-        tooltip={
-          recorder.unsupported ??
-          `Record a voice message (up to ${clockText(maxMs)}). ${options.transcription ? `${PROVIDER_NAME[options.transcription]} transcribes it into the message for you to check.` : "No transcription service is connected, so it is sent as audio only."}`
-        }
-        icon={<Icon icon={MicrophoneIcon} size="sm" />}
-        size="sm"
-        variant="ghost"
-        isLoading={recorder.status === "starting"}
-        isDisabled={isDisabled || Boolean(recorder.unsupported) || dictation.isListening}
-        onClick={() => {
-          setError(undefined);
-          void recorder.start();
-        }}
-      />
+      {/* One microphone: a recording when a service turns it into text, else the browser's dictation (next to Send). */}
+      {(options.transcription || !dictation.isSupported) && (
+        <IconButton
+          label="Record a voice message"
+          tooltip={
+            recorder.unsupported ??
+            (options.transcription
+              ? `Record a voice message (up to ${clockText(maxMs)}). ${PROVIDER_NAME[options.transcription]} turns it into text for you to check before sending.`
+              : "Voice messages need a transcription service: connect an OpenAI key (Codex) or a Gemini key under Integrations.")
+          }
+          icon={<Icon icon={MicrophoneIcon} size="sm" />}
+          size="sm"
+          variant="ghost"
+          isLoading={recorder.status === "starting"}
+          // Without a service Pointer could not understand the recording, so it is not offered.
+          isDisabled={isDisabled || Boolean(recorder.unsupported) || !options.transcription || dictation.isListening}
+          onClick={() => {
+            setError(undefined);
+            void recorder.start();
+          }}
+        />
+      )}
     </HStack>
   );
 
