@@ -67,7 +67,7 @@ export function useAppCatalog(): { data?: AppCatalogData; error?: string } {
   return state;
 }
 
-/** Mirrors REGISTRY_MIN_QUERY in src/apps-registry.ts. */
+/** Mirrors REGISTRY_MIN_QUERY in src/integrations/apps/apps-registry.ts. */
 export const REGISTRY_MIN_QUERY = 3;
 
 /** Servers in the MCP Registry matching `query`, searched shortly after typing stops. */
@@ -134,7 +134,7 @@ export const fillUrl = (template: string, values: Record<string, string>) =>
 /** A header's value from the key: the catalog's template ("Token token={key}") or the key itself. */
 export const headerValue = (template: string | undefined, key: string) => (template ?? "{key}").split("{key}").join(key);
 
-/** The tools a connected app may use. Mirrors allowedToolsOf in src/apps.ts. */
+/** The tools a connected app may use. Mirrors allowedToolsOf in src/integrations/apps/apps.ts. */
 export function allowedTools(app: Pick<AppView, "access" | "tools" | "disabledTools">) {
   const disabled = new Set(app.disabledTools);
   return app.tools.filter((t) => !disabled.has(t.name) && (app.access === "write" || t.readOnly));
@@ -187,5 +187,5 @@ export function urlError(url: string): string | undefined {
   return undefined;
 }
 
-/** Mirrors APP_HEADER_RE in src/config.ts. */
+/** Mirrors APP_HEADER_RE in src/core/config.ts. */
 export const HEADER_NAME_RE = /^[A-Za-z0-9-]{1,100}$/;

@@ -18,7 +18,7 @@ export interface SignInReturn {
   checkFailed: boolean;
 }
 
-/** Mirrors APP_ID_RE in src/config.ts. */
+/** Mirrors APP_ID_RE in src/core/config.ts. */
 const APP_ID_RE = /^app-[a-z0-9][a-z0-9-]{1,40}$/;
 
 export function parseHubRoute(rest: string[]): { target: HubTarget; signIn?: SignInReturn } {

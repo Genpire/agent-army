@@ -941,7 +941,7 @@ export type JiraTicketClient = Pick<JiraClient, "issueProject" | "addComment" | 
 /**
  * Proves the site address, email and token work before the admin page saves
  * them. Throws a user-readable Error; honours SKIP_VALIDATION=1 like
- * src/validate.ts.
+ * src/core/validate.ts.
  */
 export async function checkJira(creds: JiraCredentials, fetchFn?: typeof fetch): Promise<{ userName: string; accountId: string }> {
   if (process.env.SKIP_VALIDATION === "1") return { userName: "test", accountId: "test" };

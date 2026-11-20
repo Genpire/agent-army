@@ -840,35 +840,37 @@ npm run typecheck
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for trying Pointer locally with and without Slack, the checks CI runs, and the code guidelines.
 
-Layout:
+Layout: `src/` is grouped into modules, one folder per area, and `test/` mirrors it (`test/chat/pointer.test.ts` tests `src/chat/pointer.ts`; the end-to-end and cross-module tests sit at the top of `test/`).
 
-- `src/server.ts`: admin API and Slack events.
-- `src/listen.ts`: when Pointer answers, queues, dedupe.
-- `src/dispatch.ts`: Slack event → command or Pointer.
-- `src/targeting.ts`: commands and which project.
-- `src/pointer.ts` + `src/pointer-tools.ts`: Pointer's brain and its tools (GitHub read, memory, project notes, monday.com, repo tasks).
-- `src/team.ts`: team model, defaults and tool access.
-- `src/memory.ts`: encrypted memory.
-- `src/notes.ts`: encrypted project notes.
-- `src/attachments.ts`: encrypted per-thread files and how Pointer reads them; `src/slack.ts` downloads them from Slack.
-- `src/monday.ts`: monday.com client, token check and Pointer's monday.com tools.
-- `src/repo-id.ts`: repository ids across hosts; `src/code-host.ts`: what a code host does for a repo task; `src/code-host-factory.ts` + `src/code-host-access.ts`: which host and connection serve a repository, and whether it is allowed.
-- `src/gitlab.ts` + `src/gitlab-webhook.ts`, `src/bitbucket.ts` + `src/bitbucket-webhook.ts`: the GitLab and Bitbucket clients and webhooks; `src/code-host-tools.ts`: Pointer's `gitlab_*` and `bitbucket_*` tools.
-- `src/jira.ts` + `src/jira-automation.ts`: Jira and Confluence, and issues that start repo tasks; `src/ticket-sync.ts`: ticket updates as a task goes (monday.com and Jira).
-- `src/miro.ts`: Miro client and tools.
-- `src/apps.ts`, `src/apps-oauth.ts`, `src/apps-net.ts`, `src/apps-proxy.ts`, `src/apps-registry.ts`, `src/apps-catalog*.ts`: apps through remote MCP servers (sign-in, address guard, the loopback proxy Claude Code reaches them through, MCP Registry search, the catalog).
-- `src/chat-integrations.ts`: the integrations Pointer uses in chat beyond its own tools; `src/routes/`: each integration's admin routes and webhook.
-- `src/runner.ts`: local / Cloud Run.
-- `src/worker.ts`: clone → setup → team → PR → checks → report.
-- `src/repo-setup.ts`: a repo's setup command and variables; `src/ci.ts`: waiting for and fixing the pull request's checks; `src/pr-feedback.ts`: review feedback for the team.
-- `src/browser.ts` + `src/browser-mcp.ts`: the headless browser (Playwright MCP) and screenshots.
-- `src/webhook.ts` + `src/thread-task.ts`: the GitHub webhook and follow-up tasks in a thread.
-- `src/conversations.ts`: the admin console's chat (conversations, Pointer's answers and live activity, task milestones); `src/pointer-activity.ts`: Pointer's steps in words.
-- `src/task-events.ts`: a repo task's timeline (steps and events); `src/screenshots.ts`: encrypted screenshots from browser checks.
-- `src/agents.ts`: the repo-task prompt and report.
-- `src/guard.ts`: shell guard.
-- `src/config.ts` + `src/store.ts`: encrypted config, storage.
-- `src/smoke.ts`: smoke test.
+- Entry points, at the top of `src/` (built to `dist/server.js`, `dist/worker.js` and `dist/smoke.js`):
+  - `server.ts`: admin API and Slack events.
+  - `worker.ts`: the per-task worker's entry; the worker itself is `tasks/worker.ts`.
+  - `smoke.ts`: smoke test.
+- `src/core/`: `config.ts` + `store.ts`: encrypted config, storage; `crypto.ts`: keys, encryption, passwords and sessions; `validate.ts`: credential checks before the wizard saves them.
+- `src/chat/`: Pointer.
+  - `pointer.ts` + `pointer-tools.ts`: Pointer's brain and its tools (GitHub read, memory, project notes, monday.com, repo tasks); `pointer-types.ts`: the contracts between the Slack layer, the brain and the smoke test.
+  - `memory.ts`: encrypted memory; `notes.ts`: encrypted project notes.
+  - `attachments.ts`: encrypted per-thread files and how Pointer reads them.
+  - `conversations.ts`: the admin console's chat (conversations, Pointer's answers and live activity, task milestones); `pointer-activity.ts`: Pointer's steps in words.
+  - `chat-integrations.ts`: the integrations Pointer uses in chat beyond its own tools; `confirm-gate.ts`: the user's confirmation for lasting writes after Pointer has read outside content.
+- `src/slack/`: `listen.ts`: when Pointer answers, queues, dedupe; `dispatch.ts`: Slack event → command or Pointer; `targeting.ts`: commands and which project; `slack.ts`: the Slack client, which also downloads shared files.
+- `src/team/`: `team.ts`: team model, defaults and tool access; `agents.ts`: the repo-task prompt and report; `hr.ts`: HR's reviews of the team; `office.ts`: the virtual office.
+- `src/skills/`: `skills.ts`: the team's skills library; `skill-scout.ts`: the Skills Scout, which searches the web for skills.
+- `src/tasks/`: repo tasks.
+  - `worker.ts`: clone → setup → team → PR → checks → report; `runner.ts`: local / Cloud Run.
+  - `tasks.ts`: task records; `progress.ts`: live progress; `task-events.ts`: a repo task's timeline (steps and events); `thread-task.ts`: follow-up tasks in a thread; `sizing.ts`: model routing by task size.
+  - `repo-setup.ts`: a repo's setup command and variables; `ci.ts`: waiting for and fixing the pull request's checks; `pr-feedback.ts`: review feedback for the team; `preview.ts`: preview checks on the pull request's preview deployment.
+  - `browser.ts` + `browser-mcp.ts`: the headless browser (Playwright MCP) and screenshots; `screenshots.ts`: encrypted screenshots from browser checks.
+  - `guard.ts`: shell guard.
+- `src/spending/`: `budget.ts`: spending caps; `usage.ts`: what Claude has cost this month.
+- `src/ai/`: `ai-presets.ts` + `ai-providers.ts`: the AI providers Pointer and the team can run on, and what a query needs for each; `engines.ts`: the coding agent CLIs (Codex, Gemini CLI) the team can hand repo work to.
+- `src/integrations/`: one folder per service.
+  - `code-hosts/`: `repo-id.ts`: repository ids across hosts; `code-host.ts`: what a code host does for a repo task; `code-host-factory.ts` + `code-host-access.ts`: which host and connection serve a repository, and whether it is allowed; `code-host-tools.ts`: Pointer's `gitlab_*` and `bitbucket_*` tools; `webhook.ts`: the GitHub webhook and the review follow-up every host shares.
+  - `github/`: the GitHub client and the GitHub connections with their allow lists; `gitlab/`, `bitbucket/`: the GitLab and Bitbucket clients and webhooks.
+  - `jira/`: Jira and Confluence, and issues that start repo tasks; `monday/`: monday.com client, token check, Pointer's monday.com tools and tickets that start repo tasks; `tickets/`: ticket updates as a task goes (monday.com and Jira).
+  - `miro/`: Miro client and tools.
+  - `apps/`: apps through remote MCP servers (`apps.ts`; sign-in in `apps-oauth.ts`, the address guard in `apps-net.ts`, the loopback proxy Claude Code reaches them through in `apps-proxy.ts`, MCP Registry search in `apps-registry.ts`, the catalog in `apps-catalog*.ts`).
+- `src/routes/`: each integration's admin routes and webhook.
 - `web/`: the admin page, a React app on [Astryx](https://github.com/meta/astryx) (Meta's design system on StyleX), built into `public/` with `npm run build:web`. Pages in `web/src/pages/`, the API client and the server's types in `web/src/lib/`.
 
 ## Contributing

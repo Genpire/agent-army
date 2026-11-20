@@ -25,7 +25,7 @@ import { SaveRow, SettingsSection } from "./parts";
 
 type Budget = PublicConfig["budget"];
 
-/** Mirrors BudgetSchema (src/config.ts); the server checks again. */
+/** Mirrors BudgetSchema (src/core/config.ts); the server checks again. */
 const CAP_MAX = 100_000;
 const CAP_ERROR = `Use an amount from 0 (no cap) to ${CAP_MAX.toLocaleString()}.`;
 const capError = (n: number) => (!Number.isFinite(n) || n < 0 || n > CAP_MAX ? CAP_ERROR : undefined);

@@ -813,7 +813,7 @@ export class MondayClient {
 
 /**
  * Proves a monday.com token works before the admin page saves it.
- * Throws a user-readable Error; honours SKIP_VALIDATION=1 like src/validate.ts.
+ * Throws a user-readable Error; honours SKIP_VALIDATION=1 like src/core/validate.ts.
  */
 export async function checkMonday(
   token: string,

@@ -220,7 +220,7 @@ const routesOf = (routing: PointerSpec["routing"]): Routes => ({ small: routing.
 
 /**
  * Model routing: on/off saves at once; each size's model and effort are a
- * draft with Save. Mirrors team.pointer.routing (RoutingSchema in src/team.ts).
+ * draft with Save. Mirrors team.pointer.routing (RoutingSchema in src/team/team.ts).
  */
 function RoutingRow({ pointer, claudeModel, taskModels = CLAUDE_CHOICES, onSave }: PointerSettingsProps) {
   const saved = pointer.routing;

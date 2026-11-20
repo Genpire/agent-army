@@ -1025,7 +1025,7 @@ function withFrame(err: unknown, frame: WriteResult["frame"]): unknown {
 /**
  * Proves a Miro token works and has the scopes the tools need, before the
  * admin page saves it. Throws a user-readable Error; honours SKIP_VALIDATION=1
- * like src/validate.ts.
+ * like src/core/validate.ts.
  */
 export async function checkMiro(token: string, fetchFn?: typeof fetch): Promise<{ userName: string; teamName: string }> {
   if (process.env.SKIP_VALIDATION === "1") return { userName: "test", teamName: "test" };

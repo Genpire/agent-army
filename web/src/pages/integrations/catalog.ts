@@ -181,7 +181,7 @@ export const parseList = (s: string): string[] =>
     .map((x) => x.trim())
     .filter(Boolean);
 
-// Mirror ALLOW_LIST in src/server.ts and REPO_RE in src/config.ts.
+// Mirror ALLOW_LIST in src/server.ts and REPO_RE in src/core/config.ts.
 const OWNER_RE = /^[A-Za-z0-9-]+$/;
 const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 

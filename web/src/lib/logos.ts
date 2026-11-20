@@ -1,6 +1,6 @@
 /**
  * Brand logos from Simple Icons (CC0; the names and logos are trademarks of
- * their owners), by catalog id (src/apps-catalog.ts) or native integration
+ * their owners), by catalog id (src/integrations/apps/apps-catalog.ts) or native integration
  * id, plus hand-drawn marks for Slack and monday.com and OpenAI's mark (for
  * Codex), which Simple Icons does not carry. Only the icons named here are
  * bundled, in a chunk of their own that BrandLogo loads when a logo is first
@@ -244,7 +244,7 @@ export const LOGOS: Readonly<Record<string, BrandIcon>> = {
   "weights-and-biases": siWeightsandbiases,
   xero: siXero,
   gemini: siGooglegemini,
-  // AI providers (src/ai-presets.ts logo keys; Bedrock, Foundry, Z.ai and custom endpoints have no Simple Icons mark)
+  // AI providers (src/ai/ai-presets.ts logo keys; Bedrock, Foundry, Z.ai and custom endpoints have no Simple Icons mark)
   deepseek: siDeepseek,
   qwen: siQwen,
   kimi: siKimi,

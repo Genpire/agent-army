@@ -68,7 +68,7 @@ export function minutesText(min: number): string {
   return min < 60 ? `${min} min` : `${Math.floor(min / 60)} h${min % 60 ? ` ${min % 60} min` : ""}`;
 }
 
-/** The label an agent's work carries in task progress, without the emoji: "Sara (Coder)" (mirrors agentLabel in src/team.ts). */
+/** The label an agent's work carries in task progress, without the emoji: "Sara (Coder)" (mirrors agentLabel in src/team/team.ts). */
 export const progressName = (a: Pick<AgentSpec, "name" | "role">) => (a.name === a.role ? a.name : `${a.name} (${a.role})`);
 
 /** Tasks the person took part in, newest first: every task for Pointer, else those whose progress names the agent. */

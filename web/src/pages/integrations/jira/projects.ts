@@ -47,7 +47,7 @@ export async function fetchProjects(query: string): Promise<JiraProject[]> {
   return projects;
 }
 
-// Mirrors JIRA_KEY_RE in src/config.ts.
+// Mirrors JIRA_KEY_RE in src/core/config.ts.
 const PROJECT_KEY_RE = /^[A-Z][A-Z0-9_]{0,49}$/;
 
 /** The first problem with a list of project keys (already upper-cased). */
