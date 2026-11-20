@@ -43,6 +43,15 @@ export interface PresetField {
   default?: string;
   placeholder?: string;
   help: string;
+  /**
+   * Part of the address the secrets are sent to (a base URL, a resource, a
+   * region, a workspace). When it changes, the saved secrets are not reused:
+   * they must be pasted again with the change (routes/ai.ts), so a saved key
+   * never goes to a new host. Not Vertex's region or Google Cloud's location:
+   * a Google key is never sent; it signs token requests to the address in
+   * the key file itself.
+   */
+  address?: boolean;
 }
 
 /** A model to pick, with the tier it suits (a hint for the pickers). */
@@ -169,6 +178,7 @@ export const AI_PRESETS: readonly AiPreset[] = [
         key: "region",
         label: "AWS region",
         required: true,
+        address: true,
         default: "us-east-1",
         placeholder: "us-east-1",
         help: "The region the requests go to. Models in other regions need their inference profile's prefix (us., eu., global.).",
@@ -278,6 +288,7 @@ export const AI_PRESETS: readonly AiPreset[] = [
         key: "resource",
         label: "Resource name",
         required: true,
+        address: true,
         placeholder: "my-resource",
         help: "The Foundry resource's name only (from https://<name>.services.ai.azure.com), not its address.",
       },
@@ -340,6 +351,7 @@ export const AI_PRESETS: readonly AiPreset[] = [
         type: "select",
         required: true,
         default: "ap-southeast-1",
+        address: true,
         options: [
           { value: "ap-southeast-1", label: "Singapore (international)" },
           { value: "us-east-1", label: "US (Virginia)" },
@@ -354,6 +366,7 @@ export const AI_PRESETS: readonly AiPreset[] = [
         key: "workspaceId",
         label: "Workspace ID",
         placeholder: "ws-…",
+        address: true,
         help: "Your pay-as-you-go workspace's ID, from Model Studio. Needed in the US, Germany and Japan; elsewhere, empty uses the shared address.",
       },
       apiKeyField("API key", "sk-…", "A pay-as-you-go key (sk-…). Coding Plan keys (sk-sp-…) are not allowed for applications like this one."),
@@ -390,6 +403,7 @@ export const AI_PRESETS: readonly AiPreset[] = [
         type: "select",
         required: true,
         default: "international",
+        address: true,
         options: [
           { value: "international", label: "International (platform.kimi.ai)" },
           { value: "china", label: "China (platform.moonshot.cn)" },
@@ -429,6 +443,7 @@ export const AI_PRESETS: readonly AiPreset[] = [
         type: "select",
         required: true,
         default: "international",
+        address: true,
         options: [
           { value: "international", label: "International (z.ai)" },
           { value: "china", label: "China (bigmodel.cn)" },
@@ -475,6 +490,7 @@ export const AI_PRESETS: readonly AiPreset[] = [
         key: "baseUrl",
         label: "Base URL",
         required: true,
+        address: true,
         placeholder: "https://ai-gateway.vercel.sh/claude-code",
         help: "An Anthropic Messages API, without /v1: LiteLLM, Vercel AI Gateway, OpenRouter (Claude models), Cloudflare AI Gateway… https:// only.",
       },

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { presetFor } from "../ai/ai-presets.js";
-import { isProviderReady } from "../ai/ai-providers.js";
+import { connectionSecretParts, isProviderReady } from "../ai/ai-providers.js";
 import { decrypt, deriveKey, encrypt, randomToken } from "./crypto.js";
 import type { Store } from "./store.js";
 import { REPO_RE } from "../integrations/code-hosts/repo-id.js";
@@ -11,8 +11,8 @@ export { REPO_RE };
 export const CHANNEL_RE = /^[CGD][A-Z0-9]+$/;
 /** An environment variable name the agents' shell can receive. */
 export const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
-/** Names the platform sets or guards itself; a repo setup cannot override them. */
-export const RESERVED_ENV_KEYS = new Set([
+/** Names the platform sets itself (the agents' shell, the worker). */
+const PLATFORM_ENV_NAMES = new Set([
   "PATH",
   "HOME",
   "LANG",
@@ -24,15 +24,47 @@ export const RESERVED_ENV_KEYS = new Set([
   "CLAUDE_AGENT_SDK_CLIENT_APP",
   "PLAYWRIGHT_BROWSERS_PATH",
 ]);
+/**
+ * Names that decide where Claude Code sends its requests, with which
+ * credentials, or whom it trusts. The repo's variables share the environment
+ * with Claude Code itself (worker.ts), so one of these, pasted from the repo's
+ * own .env, would send the platform's key to another host. Prefixes and
+ * suffixes are matched in any case (curl and Node read http_proxy too).
+ */
+const CLIENT_ENV_NAMES = new Set([
+  "NODE_EXTRA_CA_CERTS",
+  "NODE_TLS_REJECT_UNAUTHORIZED",
+  "GOOGLE_APPLICATION_CREDENTIALS",
+  "CLOUD_ML_REGION",
+  "CLAUDE_CONFIG_DIR",
+]);
+const CLIENT_ENV_PREFIXES = ["ANTHROPIC_", "CLAUDE_CODE_", "AWS_", "VERTEX_REGION_"];
+const CLIENT_ENV_SUFFIXES = ["_PROXY"];
+
+/** Why a repo variable cannot have this name, or undefined when it can. */
+export function reservedEnvKeyProblem(name: string): string | undefined {
+  if (PLATFORM_ENV_NAMES.has(name)) return `${name} is reserved by the platform: it sets it itself.`;
+  const upper = name.toUpperCase();
+  if (CLIENT_ENV_NAMES.has(name) || CLIENT_ENV_PREFIXES.some((p) => upper.startsWith(p)) || CLIENT_ENV_SUFFIXES.some((s) => upper.endsWith(s))) {
+    return `${name} is reserved by the platform: names starting with ANTHROPIC_, CLAUDE_CODE_ or AWS_, proxy, TLS and Google credential settings decide where Claude Code sends its requests and key.`;
+  }
+  return undefined;
+}
+
+/**
+ * Names a repo setup cannot use: the platform's own (exact names) and the ones
+ * that redirect Claude Code (exact names, the ANTHROPIC_, CLAUDE_CODE_, AWS_
+ * and VERTEX_REGION_ prefixes, and *_PROXY). See reservedEnvKeyProblem.
+ */
+export const RESERVED_ENV_KEYS: Pick<ReadonlySet<string>, "has"> = { has: (name) => reservedEnvKeyProblem(name) !== undefined };
 export const REPO_SETUP_MAX_ENV = 100;
 
 /**
- * How the team prepares and runs one repository in repo tasks: a setup
- * command run once after the checkout, how to start the app (for browser
- * checks), and environment variables given to the agents' shell (stored
- * encrypted with the config; values are never sent to the browser).
+ * A repo setup as stored. Names reserved after a setup was saved still load
+ * (an older config must keep loading): setupEnv leaves them out at runtime,
+ * and the worker logs their names. What the owner saves is RepoSetupSchema.
  */
-export const RepoSetupSchema = z.object({
+export const StoredRepoSetupSchema = z.object({
   setupCommand: z.string().max(2000).default(""),
   startCommand: z.string().max(500).default(""),
   /** Where the started app answers, e.g. http://localhost:3000. Empty = unknown. */
@@ -47,8 +79,24 @@ export const RepoSetupSchema = z.object({
       z.string().max(10_000),
     )
     .refine((env) => Object.keys(env).length <= REPO_SETUP_MAX_ENV, `At most ${REPO_SETUP_MAX_ENV} variables per repository`)
-    .refine((env) => Object.keys(env).every((k) => !RESERVED_ENV_KEYS.has(k)), "That variable name is reserved by the platform")
     .default({}),
+});
+
+/**
+ * How the team prepares and runs one repository in repo tasks: a setup
+ * command run once after the checkout, how to start the app (for browser
+ * checks), and environment variables given to the agents' shell (stored
+ * encrypted with the config; values are never sent to the browser). Reserved
+ * names (RESERVED_ENV_KEYS) are refused, saying why.
+ */
+export const RepoSetupSchema = StoredRepoSetupSchema.superRefine((setup, ctx) => {
+  for (const name of Object.keys(setup.env)) {
+    const problem = reservedEnvKeyProblem(name);
+    if (problem) {
+      ctx.addIssue({ code: "custom", path: ["env", name], message: `${problem} Remove it from this repository's variables.` });
+      return;
+    }
+  }
 });
 export type RepoSetup = z.infer<typeof RepoSetupSchema>;
 
@@ -420,7 +468,7 @@ export const ConfigSchema = z.object({
     .default({ maxTurns: 200, maxBudgetUsd: 15, maxParallel: 3, progressEveryMin: 5, ciWaitMin: 15, ciFixRounds: 2, previewCheck: "visible" }),
   budget: BudgetSchema.default({ monthlyUsd: 0, perRepoUsd: {}, alertPercent: 80, alertChannel: "" }),
   /** "owner/repo" -> how repo tasks set up and run that repository. */
-  repoSetup: z.record(z.string().regex(REPO_RE), RepoSetupSchema).default({}),
+  repoSetup: z.record(z.string().regex(REPO_RE), StoredRepoSetupSchema).default({}),
   /** Pointer and the agents it orchestrates (seeded with defaults on first load). */
   team: TeamSchema.default(defaultTeam),
 });
@@ -681,7 +729,8 @@ export function integrationSecrets(c: Config): string[] {
     ...basic(c.jira.email, c.jira.token),
     c.miro.token,
     ...appSecrets,
-    ...Object.values(c.ai.providers).flatMap((p) => Object.values(p.secrets)),
+    // With their parts: a Google key file's private key and its lines, each extra header's value.
+    ...Object.values(c.ai.providers).flatMap((p) => connectionSecretParts(p.secrets)),
     ...ENGINE_IDS.map((id) => c.engines[id].apiKey),
   ].filter((x): x is string => typeof x === "string" && x.length > 0);
 }

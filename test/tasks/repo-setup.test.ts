@@ -2,7 +2,7 @@ import { mkdtemp, readFile, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { ConfigSchema, type RepoSetup } from "../../src/core/config.js";
+import { ConfigSchema, RESERVED_ENV_KEYS, type RepoSetup, RepoSetupSchema } from "../../src/core/config.js";
 import {
   cleanOutput,
   findRepoSetup,
@@ -12,6 +12,7 @@ import {
   setupEnv,
 } from "../../src/tasks/repo-setup.js";
 import { makeRedactor } from "../../src/tasks/worker.js";
+import { parseEnvLines } from "../../web/src/pages/projects/validation.js";
 
 const setupOf = (over: Partial<RepoSetup> = {}): RepoSetup => ({ setupCommand: "", startCommand: "", appUrl: "", env: {}, ...over });
 
@@ -58,6 +59,86 @@ describe("setupEnv", () => {
     const setup = setupOf({ env: { DATABASE_URL: "postgres://x", PATH: "/evil", ANTHROPIC_API_KEY: "k", MASTER_KEY: "m", FOO: "1" } });
     expect(setupEnv(setup)).toEqual({ DATABASE_URL: "postgres://x", FOO: "1" });
     expect(setupEnv(undefined)).toEqual({});
+  });
+
+  it("leaves out names that would redirect Claude Code and the platform's key", () => {
+    const setup = setupOf({
+      env: {
+        ANTHROPIC_BASE_URL: "https://collector.example",
+        ANTHROPIC_CUSTOM_HEADERS: "x: y",
+        CLAUDE_CODE_USE_BEDROCK: "1",
+        AWS_REGION: "us-east-1",
+        HTTPS_PROXY: "http://proxy.example:8080",
+        https_proxy: "http://proxy.example:8080",
+        NODE_EXTRA_CA_CERTS: "/repo/ca.pem",
+        NODE_TLS_REJECT_UNAUTHORIZED: "0",
+        DATABASE_URL: "postgres://x",
+      },
+    });
+    expect(setupEnv(setup)).toEqual({ DATABASE_URL: "postgres://x" });
+  });
+});
+
+describe("reserved variable names", () => {
+  it("reserve the platform's names, and every name that decides where Claude Code sends its requests and key", () => {
+    for (const name of [
+      "PATH",
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_BASE_URL",
+      "anthropic_base_url",
+      "ANTHROPIC_CUSTOM_HEADERS",
+      "ANTHROPIC_BEDROCK_BASE_URL",
+      "CLAUDE_CODE_USE_BEDROCK",
+      "CLAUDE_CODE_USE_VERTEX",
+      "CLAUDE_CONFIG_DIR",
+      "AWS_ACCESS_KEY_ID",
+      "AWS_SECRET_ACCESS_KEY",
+      "AWS_SESSION_TOKEN",
+      "AWS_PROFILE",
+      "HTTP_PROXY",
+      "HTTPS_PROXY",
+      "https_proxy",
+      "ALL_PROXY",
+      "NO_PROXY",
+      "NODE_EXTRA_CA_CERTS",
+      "NODE_TLS_REJECT_UNAUTHORIZED",
+      "GOOGLE_APPLICATION_CREDENTIALS",
+      "CLOUD_ML_REGION",
+      "VERTEX_REGION_CLAUDE_5_5_OPUS",
+    ]) {
+      expect(RESERVED_ENV_KEYS.has(name), name).toBe(true);
+    }
+    for (const name of ["DATABASE_URL", "NODE_ENV", "NODE_OPTIONS", "OPENAI_API_KEY", "MY_AWS_BUCKET", "PROXY_URL", "STRIPE_KEY", "Path"]) {
+      expect(RESERVED_ENV_KEYS.has(name), name).toBe(false);
+    }
+  });
+
+  it("are refused when the owner saves a setup, saying why", () => {
+    const refused = RepoSetupSchema.safeParse({ env: { DATABASE_URL: "postgres://x", ANTHROPIC_BASE_URL: "https://collector.example" } });
+    expect(refused.success).toBe(false);
+    expect(refused.error?.issues[0]?.message).toBe(
+      "ANTHROPIC_BASE_URL is reserved by the platform: names starting with ANTHROPIC_, CLAUDE_CODE_ or AWS_, proxy, TLS and Google credential settings decide where Claude Code sends its requests and key. Remove it from this repository's variables.",
+    );
+    expect(RepoSetupSchema.safeParse({ env: { PATH: "/x" } }).error?.issues[0]?.message).toBe(
+      "PATH is reserved by the platform: it sets it itself. Remove it from this repository's variables.",
+    );
+    expect(RepoSetupSchema.safeParse({ env: { DATABASE_URL: "postgres://x" } }).success).toBe(true);
+  });
+
+  it("are refused by the console's own check the same way", () => {
+    const names = ["ANTHROPIC_BASE_URL", "claude_code_use_vertex", "AWS_PROFILE", "HTTPS_PROXY", "NODE_EXTRA_CA_CERTS", "PATH", "DATABASE_URL", "NODE_OPTIONS", "MY_AWS_BUCKET"];
+    const parsed = parseEnvLines(names.map((n) => `${n}=value-1`).join("\n"));
+    expect(Object.keys(parsed.env)).toEqual(names.filter((n) => !RESERVED_ENV_KEYS.has(n)));
+    expect(parsed.errors[0]).toBe(
+      "Line 1: ANTHROPIC_BASE_URL is reserved: ANTHROPIC_…, CLAUDE_CODE_…, AWS_…, proxy, TLS and Google credential settings would redirect Claude Code and its key.",
+    );
+  });
+
+  it("still load from a config saved before they were reserved, and never reach the shell", () => {
+    const config = ConfigSchema.parse({ repoSetup: { "acme/web": { env: { HTTPS_PROXY: "http://proxy.example:8080", AWS_PROFILE: "dev", FOO: "1" } } } });
+    expect(Object.keys(config.repoSetup["acme/web"]!.env)).toEqual(["HTTPS_PROXY", "AWS_PROFILE", "FOO"]);
+    expect(setupEnv(findRepoSetup(config, "acme/web"))).toEqual({ FOO: "1" });
+    expect(repoSetupContext(findRepoSetup(config, "acme/web")!).envKeys).toEqual(["FOO"]);
   });
 });
 

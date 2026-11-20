@@ -28,6 +28,18 @@ export const RESERVED_ENV_KEYS: ReadonlySet<string> = new Set([
   "CLAUDE_AGENT_SDK_CLIENT_APP",
   "PLAYWRIGHT_BROWSERS_PATH",
 ]);
+/** Names that would redirect Claude Code and the platform's key (reservedEnvKeyProblem in src/core/config.ts). */
+const CLIENT_ENV_NAMES: ReadonlySet<string> = new Set([
+  "NODE_EXTRA_CA_CERTS",
+  "NODE_TLS_REJECT_UNAUTHORIZED",
+  "GOOGLE_APPLICATION_CREDENTIALS",
+  "CLOUD_ML_REGION",
+  "CLAUDE_CONFIG_DIR",
+]);
+const redirectsClaudeCode = (name: string): boolean => {
+  const upper = name.toUpperCase();
+  return CLIENT_ENV_NAMES.has(name) || ["ANTHROPIC_", "CLAUDE_CODE_", "AWS_", "VERTEX_REGION_"].some((p) => upper.startsWith(p)) || upper.endsWith("_PROXY");
+};
 export const REPO_SETUP_MAX_ENV = 100;
 export const ENV_VALUE_MAX = 10_000;
 export const SETUP_COMMAND_MAX = 2000;
@@ -110,6 +122,10 @@ export function parseEnvLines(text: string): ParsedEnv {
     }
     if (RESERVED_ENV_KEYS.has(name)) {
       errors.push(`${at}: ${name} is set by the platform and cannot be changed here.`);
+      return;
+    }
+    if (redirectsClaudeCode(name)) {
+      errors.push(`${at}: ${name} is reserved: ANTHROPIC_…, CLAUDE_CODE_…, AWS_…, proxy, TLS and Google credential settings would redirect Claude Code and its key.`);
       return;
     }
     if (name in env) {

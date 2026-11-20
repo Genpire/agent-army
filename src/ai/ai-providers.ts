@@ -16,7 +16,7 @@
  * provider's credentials reach the agents' shell, as Anthropic's key always
  * has (guard.ts only stops the obvious ways of printing them).
  */
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Options, type Settings, query } from "@anthropic-ai/claude-agent-sdk";
@@ -67,6 +67,12 @@ export interface ProviderRuntime {
    * the system temp folder (0700, the file 0600), outside any checkout, with
    * its variable (GOOGLE_APPLICATION_CREDENTIALS) pointing at it. Call
    * dispose() after the query. For a provider without files, `env` as is.
+   *
+   * Private means other OS users cannot read the file. Every process of the
+   * service's own user can: Claude Code, and in repo tasks the agents' shell
+   * and the repository's code it runs (as the key in `env` always could).
+   * Folders left by a process that died before dispose() are removed at the
+   * next start (removeStaleCredentialFolders).
    */
   session(): Promise<ProviderSession>;
   /** The model a configured model runs on, for people: "Sonnet 5.5", "Kimi K3". */
@@ -457,7 +463,9 @@ export function buildRuntime(id: AiProviderId, conn: ConnectionValues): Provider
     session: async () => {
       if (!Object.keys(files).length) return { env: { ...env }, dispose: async () => undefined };
       // A private folder of its own in the system temp folder: never inside a checkout or the data folder.
-      const dir = await mkdtemp(join(tmpdir(), "ai-credentials-"));
+      // Private against other OS users only (see ProviderRuntime.session). Named after this process, so a
+      // later start knows whether its owner is still running (removeStaleCredentialFolders).
+      const dir = await mkdtemp(join(tmpdir(), `${CREDENTIALS_DIR_PREFIX}${process.pid}-`));
       const written: Record<string, string> = {};
       try {
         for (const [name, content] of Object.entries(files)) {
@@ -477,6 +485,67 @@ export function buildRuntime(id: AiProviderId, conn: ConnectionValues): Provider
       return runs ? labelOf(runs) : "the default model";
     },
   };
+}
+
+// ---------- Credential files left behind ----------
+
+/** session() folders: "ai-credentials-<pid>-XXXXXX" (before the pid was added: "ai-credentials-XXXXXX"). */
+const CREDENTIALS_DIR_PREFIX = "ai-credentials-";
+const CREDENTIALS_DIR_RE = /^ai-credentials-(?:(\d{1,10})-)?[A-Za-z0-9]{6}$/;
+/** Younger folders are always kept: a query may have just written its file. */
+export const STALE_CREDENTIALS_MS = 5 * 60_000;
+
+/** The process exists (EPERM: it does, as another user). */
+function processRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/**
+ * Removes the session() folders a process left when it died before
+ * dispose() (a worker stopped at its job's limit, a crash), so a Google key
+ * does not stay on disk. Called once at the web service's and the worker's
+ * start. Only this user's folders older than a few minutes whose process is
+ * gone: the web service and the local runner's workers share the temp folder,
+ * and a repo task keeps its folder for its whole run. A folder named after
+ * this process but older than it was left by an earlier process with the same
+ * pid (a restarted container). Returns how many it removed; never throws.
+ */
+export async function removeStaleCredentialFolders(opts: { dir?: string; now?: number; minAgeMs?: number } = {}): Promise<number> {
+  const dir = opts.dir ?? tmpdir();
+  const now = opts.now ?? Date.now();
+  const minAgeMs = opts.minAgeMs ?? STALE_CREDENTIALS_MS;
+  const startedAt = Date.now() - process.uptime() * 1000;
+  const uid = process.getuid?.();
+  let removed = 0;
+  try {
+    for (const name of await readdir(dir)) {
+      const match = name.match(CREDENTIALS_DIR_RE);
+      if (!match) continue;
+      const path = join(dir, name);
+      try {
+        // lstat: a symlink with this name is not a folder of ours.
+        const info = await lstat(path);
+        if (!info.isDirectory() || (uid !== undefined && info.uid !== uid)) continue;
+        if (now - info.mtimeMs < minAgeMs) continue;
+        const pid = match[1] ? Number(match[1]) : undefined;
+        const ownerRunning = pid === undefined ? false : pid === process.pid ? info.mtimeMs >= startedAt : processRunning(pid);
+        if (ownerRunning) continue;
+        await rm(path, { recursive: true, force: true });
+        removed++;
+      } catch {
+        // Gone already, or not ours to remove.
+      }
+    }
+  } catch {
+    return removed;
+  }
+  if (removed) console.log(`[ai] removed ${removed} credential folder${removed === 1 ? "" : "s"} left by stopped processes`);
+  return removed;
 }
 
 /**
@@ -500,6 +569,81 @@ export function fitContentBlocks<T extends { type: string }>(
 
 const isPdf = (block: { type: string }) => (block as { source?: { media_type?: string } }).source?.media_type === "application/pdf";
 
+// ---------- Secrets, for redaction ----------
+
+/** Fields of a JSON credentials file that are secret: Google's service account and user keys, nested ones included. */
+const SECRET_JSON_FIELDS = new Set(["private_key", "private_key_id", "client_secret", "refresh_token"]);
+/** A header value that is plainly not secret (a word, a number): redacting it would garble every text that has it. */
+const PLAIN_RE = /^(?:[A-Za-z]+|\d+)$/;
+/** "Name: Value", as extra headers are written. */
+const HEADER_LINE_RE = /^[A-Za-z0-9-]{1,100}\s*:\s*(\S.*)$/;
+/** A line of a PEM key's base64 body. */
+const BASE64_LINE_RE = /^[A-Za-z0-9+/=]{12,}$/;
+/** The secret field holding a custom endpoint's extra headers, as "Name: Value" lines. */
+const HEADERS_FIELD = "headers";
+
+/** Lines split on real line breaks and on JSON's literal "\n", never leaving its "n" on the next line. */
+const linesOf = (text: string): string[] => text.split(/\r?\n|(?:\\r)?\\n/).map((l) => l.trim());
+
+/** The secret fields' string values anywhere in a parsed JSON value. */
+function secretJsonValues(value: unknown, depth = 0): string[] {
+  if (depth > 5 || typeof value !== "object" || value === null) return [];
+  return Object.entries(value).flatMap(([key, v]) =>
+    typeof v === "string" ? (SECRET_JSON_FIELDS.has(key) && v ? [v] : []) : secretJsonValues(v, depth + 1),
+  );
+}
+
+/**
+ * A secret and the parts of it that can be printed on their own, for
+ * redaction: exact matching only finds a value printed as it was saved.
+ *
+ * - The whole value.
+ * - A JSON credentials file (a Google service account key): its
+ *   private_key and private_key_id (and a user key's client_secret and
+ *   refresh_token), as they are (`jq -r .private_key`) and JSON-escaped
+ *   (`jq .`, `python -m json.tool`, which lay the file out anew).
+ *   client_email and client_id stay readable: they name the account, are not
+ *   secret on their own, and are what an owner needs to fix its permissions.
+ * - A PEM key's base64 lines, 12 characters or more, so the key is hidden in
+ *   any layout (lines joined, cut short, re-indented).
+ * - With `headers` ("Name: Value" lines, a custom endpoint's extra headers):
+ *   each value, and each long token in it ("Bearer <token>"), as headers are
+ *   sent and printed in other layouts than the saved one
+ *   (ANTHROPIC_CUSTOM_HEADERS). Plain words and numbers are left out.
+ */
+export function secretParts(value: string, opts: { headers?: boolean } = {}): string[] {
+  const parts = [value];
+  let json: unknown;
+  try {
+    json = /^\s*\{/.test(value) ? JSON.parse(value) : undefined;
+  } catch {
+    json = undefined;
+  }
+  const fields = secretJsonValues(json);
+  for (const field of fields) parts.push(field, JSON.stringify(field).slice(1, -1));
+  for (const text of [value, ...fields]) {
+    if (text.includes("-----BEGIN")) parts.push(...linesOf(text).filter((l) => BASE64_LINE_RE.test(l)));
+  }
+  if (opts.headers) {
+    for (const line of linesOf(value)) {
+      const headerValue = line.match(HEADER_LINE_RE)?.[1]?.trim();
+      if (!headerValue) continue;
+      const tokens = [headerValue, ...headerValue.split(/[\s=,]+/).filter((p) => p.length >= 12)];
+      parts.push(...tokens.filter((p) => !PLAIN_RE.test(p)));
+    }
+  }
+  return [...new Set(parts.filter((p, i) => i === 0 || p.length >= 6))];
+}
+
+/** Every secret of a provider connection, with its parts (secretParts): what redaction must hide. */
+export const connectionSecretParts = (secrets: Partial<Record<string, string>>): string[] =>
+  Object.entries(nonEmpty(secrets)).flatMap(([key, value]) => secretParts(value, { headers: key === HEADERS_FIELD }));
+
+export function redactConnection(conn: ConnectionValues): (text: string) => string {
+  const needles = [...new Set(connectionSecretParts(conn.secrets))].filter((s) => s.length >= 6).sort((a, b) => b.length - a.length);
+  return (text) => needles.reduce((acc, s) => acc.split(s).join("[redacted]"), text);
+}
+
 // ---------- The connection test ----------
 
 export interface ConnectionTestDeps {
@@ -517,15 +661,6 @@ const TEST_TIMEOUT_MS = 30_000;
 const SDK_TEST_TIMEOUT_MS = 90_000;
 /** One short answer (Claude Code's own prompt included); far more than that stops here. */
 const SDK_TEST_BUDGET_USD = 0.25;
-
-/** Every secret value and the long parts of each (a JSON key's private key, a header's token), for redaction. */
-const secretNeedles = (conn: ConnectionValues): string[] =>
-  Object.values(nonEmpty(conn.secrets)).flatMap((v) => [v, ...v.split(/[\s:"',{}\\]+/).filter((p) => p.length >= 12)]);
-
-export function redactConnection(conn: ConnectionValues): (text: string) => string {
-  const needles = [...new Set(secretNeedles(conn))].filter((s) => s.length >= 6).sort((a, b) => b.length - a.length);
-  return (text) => needles.reduce((acc, s) => acc.split(s).join("[redacted]"), text);
-}
 
 /**
  * Proves a connection works before it is saved: for an Anthropic-compatible
@@ -632,12 +767,15 @@ async function sdkProbe(id: AiProviderId, conn: ConnectionValues, deps: Connecti
   const runtime = buildRuntime(id, conn);
   const preset = presetFor(id);
   const queryFn: QueryFn = deps.queryFn ?? query;
-  const session = await runtime.session();
-  const tmp = await mkdtemp(join(tmpdir(), "ai-test-"));
+  // Both inside the try: whatever fails after the key file is written, finally removes it.
+  let session: ProviderSession | undefined;
+  let tmp: string | undefined;
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), deps.timeoutMs ?? SDK_TEST_TIMEOUT_MS);
   let failure = "no answer";
   try {
+    session = await runtime.session();
+    tmp = await mkdtemp(join(tmpdir(), "ai-test-"));
     // No model: the main tier answers, the model chat and tasks start on.
     const options: Options = {
       tools: [],
@@ -663,8 +801,8 @@ async function sdkProbe(id: AiProviderId, conn: ConnectionValues, deps: Connecti
     failure = errorText(err);
   } finally {
     clearTimeout(timer);
-    await session.dispose();
-    await rm(tmp, { recursive: true, force: true }).catch(() => undefined);
+    await session?.dispose();
+    if (tmp) await rm(tmp, { recursive: true, force: true }).catch(() => undefined);
   }
   if (abort.signal.aborted) failure = "it did not answer in time";
   return { ok: false, error: `${preset.name} check failed: ${failure.replace(/\s+/g, " ").slice(0, 300)}` };

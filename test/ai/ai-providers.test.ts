@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { mkdtemp, readFile, stat } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -14,6 +15,8 @@ import {
   nearestEffort,
   parseHeaderLines,
   providerRuntime,
+  redactConnection,
+  secretParts,
   testConnection,
 } from "../../src/ai/ai-providers.js";
 import { AI_PROVIDER_IDS, type AiProviderId, type Config, ConfigSchema, isChatReady, isReady, publicView } from "../../src/core/config.js";
@@ -21,7 +24,8 @@ import type { QueryFn } from "../../src/chat/pointer.js";
 import { createApp } from "../../src/server.js";
 import { estimateTaskSize } from "../../src/tasks/sizing.js";
 import { buildRepoAgents } from "../../src/team/team.js";
-import { configSecrets, onboardingError, teamQueryOptions } from "../../src/tasks/worker.js";
+import { applyChanges } from "../../src/routes/ai.js";
+import { configSecrets, makeRedactor, onboardingError, teamQueryOptions } from "../../src/tasks/worker.js";
 
 // ---------- Fixtures: one complete connection per provider, each with its own secrets ----------
 
@@ -360,6 +364,132 @@ describe("connection validation", () => {
   });
 });
 
+// ---------- Redacting secrets made of parts ----------
+
+describe("secrets made of parts", () => {
+  // A fake key: random bytes laid out as a PEM, no real key material.
+  const PEM_LINES = randomBytes(700).toString("base64").match(/.{1,64}/g)!;
+  const PEM = `-----BEGIN PRIVATE KEY-----\n${PEM_LINES.join("\n")}\n-----END PRIVATE KEY-----\n`;
+  const KEY = {
+    type: "service_account",
+    project_id: "acme-ai",
+    private_key_id: "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c",
+    private_key: PEM,
+    client_email: "pointer@acme-ai.iam.gserviceaccount.com",
+    client_id: "102030405060708090100",
+    token_uri: "https://oauth2.googleapis.com/token",
+  };
+  // As Google's download lays it out.
+  const KEY_FILE = JSON.stringify(KEY, null, 2);
+  const config = () => {
+    const c = fullConfig();
+    c.ai.providers.vertex = { ...CONNECTIONS.vertex, secrets: { credentialsJson: KEY_FILE } };
+    return c;
+  };
+
+  /** What an agent's shell could print of the key file, laid out anew by the tool. */
+  const printed: Record<string, string> = {
+    "jq --tab .": JSON.stringify(KEY, null, 2).replace(/^ {2}/gm, "\t"),
+    "python -m json.tool": JSON.stringify(KEY, null, 4),
+    "jq -c .": JSON.stringify(KEY),
+    "jq '{private_key}'": JSON.stringify({ private_key: PEM }, null, 2),
+    "jq -r .private_key": PEM,
+    "jq -r .private_key | head -5": PEM.split("\n").slice(0, 5).join("\n"),
+    "jq -r .private_key | tr -d '\\n'": PEM.replace(/\n/g, ""),
+    "jq -r .private_key | sed 's/^/    /'": PEM.replace(/^/gm, "    "),
+    "jq -r .private_key_id": KEY.private_key_id,
+    "cat": KEY_FILE,
+  };
+
+  const leaks = (text: string) => [...PEM_LINES.filter((l) => l.length >= 12), KEY.private_key_id].filter((s) => text.includes(s));
+
+  it("hides a Google key's private key however a tool prints it, in everything the platform posts and logs", () => {
+    const redact = makeRedactor(configSecrets(config()));
+    for (const [command, output] of Object.entries(printed)) expect(leaks(redact(output)), command).toEqual([]);
+    // The account's name is not secret on its own, and says whose permissions to fix.
+    expect(redact(printed["jq --tab ."]!)).toContain(KEY.client_email);
+  });
+
+  it("hides it the same way in a connection test's errors", () => {
+    const redact = redactConnection({ secrets: { credentialsJson: KEY_FILE }, settings: {}, models: {} });
+    for (const [command, output] of Object.entries(printed)) expect(leaks(redact(`check failed: ${output}`)), command).toEqual([]);
+  });
+
+  it("splits a PEM on real and literal \\n alike, without leaving the n on a line", () => {
+    const escaped = PEM.replace(/\n/g, "\\n");
+    for (const value of [KEY_FILE, JSON.stringify(KEY), escaped]) {
+      const parts = secretParts(value);
+      for (const line of PEM_LINES.filter((l) => l.length >= 12)) {
+        expect(parts).toContain(line);
+        expect(parts).not.toContain(`n${line}`);
+      }
+    }
+    // Plain secrets are only themselves.
+    expect(secretParts("sk-ant-anthropic-secret-0001")).toEqual(["sk-ant-anthropic-secret-0001"]);
+    expect(secretParts("http://localhost:3000")).toEqual(["http://localhost:3000"]);
+  });
+
+  it("hides each extra header's value, as the headers are sent and printed in other layouts", () => {
+    const c = fullConfig();
+    c.ai.providers.custom = {
+      ...CONNECTIONS.custom,
+      secrets: { authToken: "gateway-token-secret-0010", headers: "cf-aig-authorization: Bearer cf-header-secret-0011\nX-Team:team-secret-value-42\nX-Debug: enabled" },
+    };
+    const redact = makeRedactor(configSecrets(c));
+    expect(redact("ANTHROPIC_CUSTOM_HEADERS=cf-aig-authorization:Bearer cf-header-secret-0011")).toBe("ANTHROPIC_CUSTOM_HEADERS=cf-aig-authorization:[redacted]");
+    expect(redact("token cf-header-secret-0011")).toBe("token [redacted]");
+    expect(redact("X-Team: team-secret-value-42")).toBe("X-Team: [redacted]");
+    // A plain word is not a secret: hiding it would garble every message that has it.
+    expect(redact("the cache is enabled")).toBe("the cache is enabled");
+  });
+});
+
+// ---------- A saved key never goes to a new address ----------
+
+describe("changing where the secrets go", () => {
+  const presetOf = (id: AiProviderId) => AI_PRESETS.find((p) => p.id === id)!;
+  const change = (id: AiProviderId, saved: ConnectionValues, changes: Parameters<typeof applyChanges>[2]) => applyChanges(presetOf(id), saved, changes);
+
+  it("needs the secrets pasted again when the address they are sent to changes", () => {
+    const custom = CONNECTIONS.custom;
+    expect(change("custom", custom, { settings: { baseUrl: "https://collector.example" } })).toEqual({
+      error: "Paste the token and extra headers again for the new address.",
+    });
+    expect(change("custom", custom, { secrets: { authToken: "new-token-12345678" }, settings: { baseUrl: "https://collector.example" } })).toEqual({
+      error: "Paste the extra headers again for the new address.",
+    });
+    // Pasted again (or removed with null): only the new values go to the new address.
+    const moved = change("custom", custom, { secrets: { authToken: "new-token-12345678", headers: null }, settings: { baseUrl: "https://collector.example" } });
+    expect(moved).toMatchObject({ conn: { secrets: { authToken: "new-token-12345678" }, settings: { baseUrl: "https://collector.example" } } });
+
+    expect(change("foundry", CONNECTIONS.foundry, { settings: { resource: "other-resource" } })).toEqual({ error: "Paste the API key again for the new address." });
+    expect(change("qwen", CONNECTIONS.qwen, { settings: { workspaceId: "ws-other" } })).toEqual({ error: "Paste the API key again for the new address." });
+    expect(change("qwen", CONNECTIONS.qwen, { settings: { region: "us-east-1" } })).toEqual({ error: "Paste the API key again for the new address." });
+    expect(change("kimi", CONNECTIONS.kimi, { settings: { region: "china" } })).toEqual({ error: "Paste the API key again for the new address." });
+    expect(change("zai", CONNECTIONS.zai, { settings: { region: "international" } })).toEqual({ error: "Paste the API key again for the new address." });
+    expect(change("bedrock", CONNECTIONS.bedrock, { settings: { region: "us-west-2" } })).toEqual({ error: "Paste the Bedrock API key again for the new address." });
+    const accessKeys = { secrets: { accessKeyId: "AKIAEXAMPLEKEY000001", secretAccessKey: "aws-secret-access-key-0001" }, settings: { region: "eu-west-1" }, models: {} };
+    expect(change("bedrock", accessKeys, { settings: { region: "us-west-2" } })).toEqual({ error: "Paste the access key ID and secret access key again for the new address." });
+    expect(change("kimi", CONNECTIONS.kimi, { secrets: { apiKey: "sk-kimi-new-key-0001" }, settings: { region: "china" } })).toMatchObject({
+      conn: { secrets: { apiKey: "sk-kimi-new-key-0001" } },
+    });
+  });
+
+  it("keeps the saved secrets when the address stays the same", () => {
+    // Other settings, models, and the default typed out.
+    expect(change("custom", CONNECTIONS.custom, { settings: { baseUrl: "https://gateway.example.com/anthropic", compat: "on" }, models: { main: "x" } })).toMatchObject({
+      conn: { secrets: CONNECTIONS.custom.secrets },
+    });
+    expect(change("kimi", CONNECTIONS.kimi, { settings: { region: "international" } })).toMatchObject({ conn: { secrets: CONNECTIONS.kimi.secrets } });
+    // A Google key is never sent: it signs token requests to the address in the key file itself.
+    expect(change("vertex", CONNECTIONS.vertex, { settings: { region: "us-east5" } })).toMatchObject({ conn: { secrets: CONNECTIONS.vertex.secrets } });
+    // Nothing saved yet: nothing to carry over.
+    expect(change("custom", undefined as never, { secrets: { authToken: "token-12345678" }, settings: { baseUrl: "https://collector.example" } })).toMatchObject({
+      conn: { secrets: { authToken: "token-12345678" } },
+    });
+  });
+});
+
 describe("the team on another provider", () => {
   it("maps each agent's model and effort through the task provider", () => {
     const c = fullConfig("anthropic", "deepseek");
@@ -584,5 +714,40 @@ describe("AI provider admin API", () => {
     expect((await post("/api/ai/active", { taskProvider: "anthropic" })).status).toBe(200);
     expect(await (await post("/api/ai/providers/kimi/delete")).json()).toEqual({ ok: true });
     expect((await providers()).providers.find((p) => p.id === "kimi")!.saved).toBeNull();
+  });
+
+  it("never sends a saved token to a new address: a test or a save needs it pasted again", async () => {
+    process.env.SKIP_VALIDATION = "1";
+    const TOKEN = "gateway-route-token-0001";
+    const saved = await post("/api/ai/providers/custom", {
+      secrets: { authToken: TOKEN, headers: "X-Team: header-route-secret-0002" },
+      settings: { baseUrl: "https://gateway.example.com/anthropic" },
+    });
+    expect(saved.status).toBe(200);
+    delete process.env.SKIP_VALIDATION;
+    // The example hosts have no DNS: let the guarded fetch reach the stub without a lookup.
+    process.env.ALLOW_PRIVATE_APP_URLS = "1";
+    const calls = stubProviders(() => new Response("{}", { status: 200 }));
+    try {
+      const away = { settings: { baseUrl: "https://collector.example" } };
+      for (const path of ["/api/ai/providers/custom/test", "/api/ai/providers/custom"]) {
+        expect(await error(await post(path, away))).toEqual({ status: 400, error: "Paste the token and extra headers again for the new address." });
+      }
+      expect(calls).toEqual([]);
+
+      // Pasted again (the headers removed): only the new token goes to the new address.
+      expect((await post("/api/ai/providers/custom/test", { secrets: { authToken: "collector-token-0003", headers: null }, ...away })).status).toBe(200);
+      expect(calls.map((c) => c.url.host)).toEqual(["collector.example"]);
+      const sent = new Headers(calls[0]!.init?.headers);
+      expect(sent.get("authorization")).toBe("Bearer collector-token-0003");
+      expect(sent.get("x-team")).toBeNull();
+
+      // A test saves nothing: the saved connection still goes to its own address, with its own token.
+      expect((await post("/api/ai/providers/custom/test")).status).toBe(200);
+      expect(calls[1]!.url.host).toBe("gateway.example.com");
+      expect(new Headers(calls[1]!.init?.headers).get("authorization")).toBe(`Bearer ${TOKEN}`);
+    } finally {
+      delete process.env.ALLOW_PRIVATE_APP_URLS;
+    }
   });
 });
