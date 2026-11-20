@@ -18,6 +18,7 @@ import { Token } from "@astryxdesign/core/Token";
 import { VStack } from "@astryxdesign/core/VStack";
 import { ArrowPathIcon, ChatBubbleLeftRightIcon, PencilSquareIcon } from "@heroicons/react/24/outline";
 import { type ReactNode, useState } from "react";
+import { ENGINE_NAME, engineReady } from "../../lib/engines";
 import { headline } from "../../lib/format";
 import { href } from "../../lib/router";
 import { useConfig } from "../../lib/state";
@@ -161,6 +162,14 @@ function DrawerBody({ person, onClose, onChanged }: { person: OfficePerson; onCl
                 <MetadataListItem label="Access">
                   <Text>
                     {ACCESS_INFO[agent.access].label}: {ACCESS_INFO[agent.access].summary}
+                  </Text>
+                </MetadataListItem>
+              )}
+              {agent && agent.engine !== "claude" && (
+                <MetadataListItem label="Engine">
+                  <Text>
+                    Works through {ENGINE_NAME[agent.engine]}
+                    {engineReady(config, agent.engine) ? "" : " (not connected: works as Claude)"}
                   </Text>
                 </MetadataListItem>
               )}

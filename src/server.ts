@@ -57,6 +57,7 @@ import { handleGithubWebhook, parseGithubPayload, verifyGithubSignature } from "
 import { configSecrets, makeRedactor } from "./worker.js";
 import { appsRoutes } from "./routes/apps.js";
 import { bitbucketRoutes } from "./routes/bitbucket.js";
+import { enginesRoutes } from "./routes/engines.js";
 import { gitlabRoutes } from "./routes/gitlab.js";
 import { jiraRoutes } from "./routes/jira.js";
 import { miroRoutes } from "./routes/miro.js";
@@ -1275,6 +1276,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
   app.use(jiraRoutes(routeDeps));
   app.use(miroRoutes(routeDeps));
   app.use(appsRoutes(routeDeps));
+  app.use(enginesRoutes(routeDeps));
 
   app.use(express.static(fileURLToPath(new URL("../public", import.meta.url)), { index: "index.html" }));
 
