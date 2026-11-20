@@ -1,13 +1,16 @@
 /**
  * The Codex and Gemini CLI panes: connect the engine's API key and pick its
- * model, add a ready-made team member that works through it, and what it
- * costs and may do. One pane, filled in from each engine's ENGINE_INFO.
+ * model, add a ready-made team member that works through it, whether it may
+ * run without a sandbox, and what it costs and may do. One pane, filled in
+ * from each engine's ENGINE_INFO.
  */
+import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
 import { FormLayout } from "@astryxdesign/core/FormLayout";
 import { Link } from "@astryxdesign/core/Link";
 import { List, ListItem } from "@astryxdesign/core/List";
 import { MetadataList, MetadataListItem } from "@astryxdesign/core/MetadataList";
+import { Switch } from "@astryxdesign/core/Switch";
 import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { Timestamp } from "@astryxdesign/core/Timestamp";
@@ -38,7 +41,10 @@ interface EngineInfo {
   modelDescription: string;
   /** The team member POST /api/engines/:id/agent adds. */
   memberName: string;
+  /** Where its commands run, and when it needs "Run without a sandbox". */
   sandbox: string;
+  /** What the switch being off means for it. */
+  offMeans: string;
 }
 
 const ENGINE_INFO: Record<EngineId, EngineInfo> = {
@@ -64,7 +70,8 @@ const ENGINE_INFO: Record<EngineId, EngineInfo> = {
     modelDescription: "An OpenAI model Codex supports. Leave it empty for Codex's default.",
     memberName: "Codex",
     sandbox:
-      "Codex runs commands in its own sandbox when the task container allows it; where it cannot, the task container is the boundary. The platform, not Codex, commits and publishes.",
+      "Codex runs its commands in its own sandbox when the task container allows it (each task checks). Where its sandbox does not work, it runs only if you allow it below.",
+    offMeans: "Off: where its sandbox does not work, agents set to Codex work as Claude in that task.",
   },
   gemini: {
     id: "gemini",
@@ -87,7 +94,8 @@ const ENGINE_INFO: Record<EngineId, EngineInfo> = {
     ],
     modelDescription: "A Gemini model id. Leave it empty for the CLI's default, which picks a model for each request.",
     memberName: "Gemini",
-    sandbox: "Gemini CLI has no sandbox here: the task container is the boundary.",
+    sandbox: "Gemini CLI has no sandbox here, so it runs only if you allow it below.",
+    offMeans: "Off: Gemini CLI never runs, and agents set to it work as Claude.",
   },
 };
 
@@ -124,6 +132,9 @@ function EnginePane({ info, summary, onBack }: Props & { info: EngineInfo }) {
           <MetadataListItem label="Agents">
             <Text>{agents.length ? agents.map((a) => a.name).join(", ") : "No agent yet"}</Text>
           </MetadataListItem>
+          <MetadataListItem label="Without a sandbox">
+            <Text>{engine.allowUnsandboxed ? "Allowed" : "Not allowed"}</Text>
+          </MetadataListItem>
         </MetadataList>
       )}
 
@@ -137,21 +148,68 @@ function EnginePane({ info, summary, onBack }: Props & { info: EngineInfo }) {
         </List>
       </PaneSection>
 
-      <PaneSection title="Sandbox and safety">
-        <List listStyle="disc" density="compact">
-          <ListItem label={<Text>{info.sandbox}</Text>} />
-          <ListItem
-            label={
-              <Text>
-                It runs commands outside {config.team.pointer.name}'s shell guard, with its own key in its environment and none of the platform's other secrets.
-              </Text>
-            }
-          />
-          <ListItem label={<Text>An agent with “Looks only” access runs it read-only.</Text>} />
-          <ListItem label={<Text>The worker's git safeguards still apply when it publishes the branch.</Text>} />
-        </List>
-      </PaneSection>
+      <EngineSandbox info={info} />
     </VStack>
+  );
+}
+
+/** Whether the CLI may run without a sandbox (off by default), what that gives up, and the rest of what keeps it in bounds. */
+function EngineSandbox({ info }: { info: EngineInfo }) {
+  const { config } = useConfig();
+  const engine = config.engines[info.id];
+  const name = ENGINE_NAME[info.id];
+  const pointer = config.team.pointer.name;
+  const { save, pending, error } = useSave();
+
+  const set = async (on: boolean) => {
+    await save(() => api.post(`/api/engines/${info.id}`, { allowUnsandboxed: on }), {
+      success: on ? `${name} may run without a sandbox.` : `${name} no longer runs without a sandbox.`,
+    });
+  };
+
+  return (
+    <PaneSection title="Sandbox and safety" description={info.sandbox}>
+      <Switch
+        label="Run without a sandbox (the task container is the only boundary: it can read the worker's environment, including platform secrets)"
+        description={info.offMeans}
+        value={engine.allowUnsandboxed}
+        isLoading={pending}
+        isDisabled={!engine.connected}
+        disabledMessage={`Connect ${name} first.`}
+        changeAction={set}
+      />
+      <FormError message={error} />
+      {info.id === "gemini" && engine.connected && !engine.allowUnsandboxed && (
+        <Banner
+          status="warning"
+          title="Gemini CLI does not run yet"
+          description="It has no sandbox here, so agents set to it work as Claude until you allow it to run without one."
+          collapsible={false}
+        />
+      )}
+      <Text>
+        Without a sandbox, {name}'s commands run as the task worker's own user, outside {pointer}'s shell guard. A repository, or anything it reads, could steer them into
+        reading and sending out:
+      </Text>
+      <List listStyle="disc" density="compact">
+        <ListItem
+          label={
+            <Text>
+              the environment of the worker and of the Claude agents: the master key when it is set as a variable, the AI provider key the team runs on, and the
+              repository's setup variables;
+            </Text>
+          }
+        />
+        <ListItem label={<Text>the AI provider's credential files for the task;</Text>} />
+        <ListItem label={<Text>the cloud metadata server, and with it the worker's service account.</Text>} />
+      </List>
+      <Text color="secondary">Allow it only for repositories and keys you trust, and give this deployment its own cloud project.</Text>
+      <List listStyle="disc" density="compact">
+        <ListItem label={<Text>{name}'s own environment holds only its key; the platform never passes it other secrets.</Text>} />
+        <ListItem label={<Text>An agent with “Looks only” access runs it read-only.</Text>} />
+        <ListItem label={<Text>The platform, not {name}, commits and publishes, and the worker's git safeguards still apply.</Text>} />
+      </List>
+    </PaneSection>
   );
 }
 
