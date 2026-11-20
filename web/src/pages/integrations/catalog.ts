@@ -94,7 +94,13 @@ export function summarize(config: PublicConfig): IntegrationSummary[] {
       enables: "Google's coding agent as a team member: agents set to Gemini hand their repo work to it.",
       required: false,
       connected: config.engines.gemini.connected,
-      status: optional(config.engines.gemini.connected, `Connected${config.engines.gemini.model ? ` · ${config.engines.gemini.model}` : ""}`),
+      // Gemini CLI has no sandbox in the task container: it runs only once the owner allows that.
+      status: optional(
+        config.engines.gemini.connected,
+        config.engines.gemini.allowUnsandboxed
+          ? `Connected${config.engines.gemini.model ? ` · ${config.engines.gemini.model}` : ""}`
+          : "Connected · not allowed to run yet",
+      ),
     },
     {
       id: "slack",
