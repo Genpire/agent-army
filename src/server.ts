@@ -55,6 +55,7 @@ import { checkAnthropic, checkGithub, checkSlack } from "./validate.js";
 import { UsageRepo } from "./usage.js";
 import { handleGithubWebhook, parseGithubPayload, verifyGithubSignature } from "./webhook.js";
 import { configSecrets, makeRedactor } from "./worker.js";
+import { aiRoutes } from "./routes/ai.js";
 import { appsRoutes } from "./routes/apps.js";
 import { bitbucketRoutes } from "./routes/bitbucket.js";
 import { enginesRoutes } from "./routes/engines.js";
@@ -1277,6 +1278,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
   app.use(miroRoutes(routeDeps));
   app.use(appsRoutes(routeDeps));
   app.use(enginesRoutes(routeDeps));
+  app.use(aiRoutes(routeDeps));
 
   app.use(express.static(fileURLToPath(new URL("../public", import.meta.url)), { index: "index.html" }));
 

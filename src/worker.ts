@@ -18,6 +18,7 @@ import { AttachmentRepo, type ThreadRef, classify, expandZip } from "./attachmen
 import { Spending } from "./budget.js";
 import { type Screenshot, browserAvailable, browserServer, collectScreenshots } from "./browser.js";
 import { type CiOutcome, type WaitOptions, ciFailureDetails, ciFixPrompt, ciSummary, ciSummaryLine, storedCiSummary, waitForChecks } from "./ci.js";
+import { type ProviderSession, providerProblem, providerRuntime } from "./ai-providers.js";
 import { repoTaskApps } from "./apps.js";
 import { repoTaskEngines } from "./engines.js";
 import type { CodeHost } from "./code-host.js";
@@ -62,7 +63,7 @@ export function teamQueryOptions(
   context: OrchestratorContext = {},
   attachmentsDir?: string,
   opts: RepoAgentOptions = {},
-): Required<Pick<Options, "systemPrompt" | "agents" | "allowedTools" | "effort">> & Pick<Options, "additionalDirectories" | "plugins" | "skills" | "mcpServers"> {
+): Required<Pick<Options, "systemPrompt" | "agents" | "allowedTools">> & Pick<Options, "effort" | "additionalDirectories" | "plugins" | "skills" | "mcpServers"> {
   const skills = skillQueryOptions(opts.skills);
   // All sit next to the checkout, not in it, so nothing in them is ever committed.
   const directories = [
@@ -78,8 +79,8 @@ export function teamQueryOptions(
       // Which agent may use which app (apps.ts), and which work through a coding agent CLI (engines.ts).
       append: [orchestratorPrompt(config, context), opts.apps?.promptRule, opts.engines?.promptRule].filter(Boolean).join("\n"),
     },
-    // Each agent carries its own effort (its setting, or this one).
-    effort: config.team.pointer.taskEffort,
+    // Each agent carries its own effort (its setting, or this one); the task provider maps it, or leaves it out.
+    ...effortOption(opts.provider ? opts.provider.effort(config.team.pointer.taskEffort) : config.team.pointer.taskEffort),
     agents: buildRepoAgents(config.team, opts),
     // Under "dontAsk" anything not listed is denied, so this covers every
     // enabled agent's tools (e.g. WebSearch for agents that only look).
@@ -89,6 +90,8 @@ export function teamQueryOptions(
     ...(opts.engines && Object.keys(opts.engines.servers).length ? { mcpServers: opts.engines.servers } : {}),
   };
 }
+
+const effortOption = (effort: Options["effort"] | undefined): Pick<Options, "effort"> => (effort ? { effort } : {});
 
 /** Characters that are unsafe in a file name on common filesystems, or that would break a Markdown code span. */
 const UNSAFE_NAME_CHARS = /[\x00-\x1f\x7f<>:"|?*`]/g;
@@ -413,12 +416,14 @@ export function stoppedComment(reason: string, plan: PlanItem[], where: TaskSurf
 }
 
 /**
- * Why the worker cannot run this task, or undefined when it can: Claude is
- * always needed; Slack only for tasks that report in a Slack thread (console
- * tasks keep everything on the task record).
+ * Why the worker cannot run this task, or undefined when it can: the task
+ * provider (Claude by default) is always needed; Slack only for tasks that
+ * report in a Slack thread (console tasks keep everything on the task record).
  */
-export function onboardingError(task: Pick<Task, "channel">, config: Pick<Config, "anthropic" | "slack">): string | undefined {
-  if (!config.anthropic.apiKey) return isWebTask(task) ? "Onboarding is incomplete (Claude missing)." : "Onboarding is incomplete (Claude or Slack missing).";
+export function onboardingError(task: Pick<Task, "channel">, config: Config): string | undefined {
+  const providerMissing = providerProblem(config, config.ai.taskProvider);
+  if (providerMissing && config.ai.taskProvider !== "anthropic") return `Onboarding is incomplete: ${providerMissing}`;
+  if (providerMissing) return isWebTask(task) ? "Onboarding is incomplete (Claude missing)." : "Onboarding is incomplete (Claude or Slack missing).";
   if (!isWebTask(task) && !config.slack.botToken) return "Onboarding is incomplete (Claude or Slack missing).";
   return undefined;
 }
@@ -1012,7 +1017,14 @@ async function main(): Promise<void> {
 
   const notReady = onboardingError(task, config);
   if (notReady) throw new Error(notReady);
-  const apiKey = config.anthropic.apiKey!;
+  // The task provider (Anthropic, Claude on a cloud, or another provider): credentials, model mapping, what it cannot do.
+  const provider = providerRuntime(config, "task");
+  if (!provider.ok) throw new Error(provider.error);
+  const runtime = provider.runtime;
+  // The Claude card's model is Anthropic's; another provider runs its main tier unless routing picks a size's model.
+  const taskConfig: Config = runtime.provider === "anthropic" ? config : { ...config, anthropic: { ...config.anthropic, model: "" } };
+  // Its environment with any credential file written (outside the checkout); removed when the task ends.
+  let providerSession: ProviderSession | undefined;
   // Console tasks run without Slack: everything the Slack messages would say is kept on the task record.
   const web = isWebTask(task);
   const where: TaskSurface = web ? "web" : "slack";
@@ -1151,13 +1163,16 @@ async function main(): Promise<void> {
     // Replaces the environment: the agents' shell sees none of the platform's own
     // secrets (master key, Slack and GitHub tokens), only the owner's variables for
     // this repository, which cannot override the platform's own names.
+    providerSession = await runtime.session();
+    const providerEnv = providerSession.env;
     const agentEnv: Record<string, string> = {
       ...setupEnv(setup),
       PATH: process.env.PATH ?? "",
       HOME: process.env.HOME ?? "/tmp",
       LANG: process.env.LANG ?? "C.UTF-8",
       CI: "1",
-      ANTHROPIC_API_KEY: apiKey,
+      // The task provider's credentials: also the agents' shell environment, as Anthropic's key always was.
+      ...providerEnv,
       CLAUDE_AGENT_SDK_CLIENT_APP: "agent-army/0.1.0",
     };
     let setupResult: SetupResult | undefined;
@@ -1266,18 +1281,18 @@ async function main(): Promise<void> {
     if (allowance.note) timeline.add({ kind: "note", text: allowance.note });
     const routed = config.team.pointer.routing.enabled
       ? await routeRepoTask({
-          config,
+          config: taskConfig,
           task,
           followUp: resumed,
           attachments: attachments.length,
           history: () => tasks.recent(HISTORY_SCAN),
           budgetUsd: taskBudgetUsd,
-          apiKey,
+          provider: runtime,
           redact,
         })
       : undefined;
     // The team runs with the routed model and effort (agents with their own keep them).
-    const runConfig = routed?.config ?? config;
+    const runConfig = routed?.config ?? taskConfig;
     if (routed) {
       task.size = routed.size;
       task.estimateUsd = routed.estimateUsd;
@@ -1386,7 +1401,7 @@ async function main(): Promise<void> {
           options: {
             cwd: repoDir,
             abortController: opts.abort,
-            ...teamQueryOptions(runConfig, opts.context, attachmentsDir, { browser, skills, apps, engines }),
+            ...teamQueryOptions(runConfig, opts.context, attachmentsDir, { browser, skills, apps, engines, provider: runtime }),
             // Headless: nothing can prompt, so anything not in allowedTools is denied.
             permissionMode: "dontAsk",
             settingSources: ["project"], // loads the project's own CLAUDE.md
@@ -1394,7 +1409,9 @@ async function main(): Promise<void> {
             outputFormat: { type: "json_schema", schema: REPORT_SCHEMA },
             maxTurns: config.limits.maxTurns,
             maxBudgetUsd: opts.budgetUsd,
-            ...(runConfig.anthropic.model ? { model: runConfig.anthropic.model } : {}),
+            ...(runtime.model(runConfig.anthropic.model) ? { model: runtime.model(runConfig.anthropic.model) } : {}),
+            ...(runtime.disallowedTools.length ? { disallowedTools: runtime.disallowedTools } : {}),
+            ...(runtime.managedSettings ? { managedSettings: runtime.managedSettings } : {}),
             env: agentEnv,
           },
         })) {
@@ -1786,6 +1803,7 @@ async function main(): Promise<void> {
     clearTimeout(timer);
     await rm(workRoot, { recursive: true, force: true }).catch(() => {});
     await rm(gitPrivate, { recursive: true, force: true }).catch(() => {});
+    await providerSession?.dispose();
     // The task's cost is known now: a cap it took past its alert level or 100% tells the alert channel. Never throws.
     await spending.notify();
   }

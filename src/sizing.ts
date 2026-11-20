@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Options, query } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
+import { type ProviderRuntime, anthropicRuntime } from "./ai-providers.js";
 import type { Config } from "./config.js";
 import type { QueryFn } from "./pointer.js";
 import type { Task } from "./tasks.js";
@@ -16,7 +17,7 @@ import { type Effort, type Route, type Routing, TASK_SIZES, type TaskSize } from
  * estimate falls back to medium: routing never stops a task.
  */
 
-/** The cheapest model: the estimate is one short structured answer. */
+/** The cheapest model: the estimate is one short structured answer. Another provider runs its haiku tier instead (ai-providers.ts). */
 export const SIZING_MODEL = "claude-haiku-5-5";
 /** Far more than one short answer from the cheapest model costs; a runaway call stops here. */
 export const SIZING_BUDGET_USD = 0.05;
@@ -110,26 +111,33 @@ export const FALLBACK_REASON = "The size could not be estimated, so medium was a
 /**
  * One call through the Agent SDK with the cheapest model: no tools, one turn,
  * a JSON-schema answer, a tiny budget, an isolated cwd and environment. Never
- * throws: any problem gives medium.
+ * throws: any problem gives medium. Runs on `provider` (the task provider), or
+ * on Anthropic's API with `apiKey`.
  */
 export async function estimateTaskSize(
   input: SizingInput,
-  opts: { apiKey: string; queryFn?: QueryFn; timeoutMs?: number; redact?: (text: string) => string },
+  opts: { provider?: ProviderRuntime; apiKey?: string; queryFn?: QueryFn; timeoutMs?: number; redact?: (text: string) => string },
 ): Promise<SizeEstimate> {
   const queryFn: QueryFn = opts.queryFn ?? query;
+  const runtime = opts.provider ?? anthropicRuntime(opts.apiKey ?? "");
+  const model = runtime.model(SIZING_MODEL);
+  const effort = runtime.effort("low");
   const redact = opts.redact ?? ((text: string) => text);
   let costUsd = 0;
   let answer: { size: TaskSize; reason: string } | undefined;
   let problem = "no answer";
   let tmp: string | undefined;
+  let session: Awaited<ReturnType<ProviderRuntime["session"]>> | undefined;
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), opts.timeoutMs ?? SIZING_TIMEOUT_MS);
   try {
     tmp = await mkdtemp(join(tmpdir(), "sizing-"));
+    session = await runtime.session();
     const options: Options = {
-      model: SIZING_MODEL,
+      ...(model ? { model } : {}),
       systemPrompt: SIZING_SYSTEM_PROMPT,
-      effort: "low",
+      ...(effort ? { effort } : {}),
+      ...(runtime.managedSettings ? { managedSettings: runtime.managedSettings } : {}),
       tools: [],
       allowedTools: [],
       permissionMode: "dontAsk",
@@ -147,7 +155,7 @@ export async function estimateTaskSize(
         PATH: process.env.PATH ?? "",
         HOME: tmp,
         LANG: "C.UTF-8",
-        ANTHROPIC_API_KEY: opts.apiKey,
+        ...session.env,
         CLAUDE_AGENT_SDK_CLIENT_APP: "agent-army-sizing/0.1.0",
       },
     };
@@ -165,6 +173,7 @@ export async function estimateTaskSize(
     problem = err instanceof Error ? err.message : String(err);
   } finally {
     clearTimeout(timer);
+    await session?.dispose();
     if (tmp) await rm(tmp, { recursive: true, force: true }).catch(() => undefined);
   }
   if (abort.signal.aborted && !answer) problem = "timed out";
@@ -293,11 +302,13 @@ export function routePlan(o: {
   history: Pick<Task, "repo" | "status" | "costUsd" | "size">[];
   /** The task's own budget. */
   budgetUsd: number;
+  /** How the model reads on another provider ("Kimi K3"); default: Claude's names. */
+  modelText?: (model: string) => string;
 }): RoutedTask {
   const { config, sized } = o;
   const route = routeFor(config.team.pointer.routing, sized.size);
   const model = route.model || config.anthropic.model;
-  const modelText = model ? modelName(model) : "the default model";
+  const modelText = o.modelText ? o.modelText(model) : model ? modelName(model) : "the default model";
   const estimate = estimateCost(o.history, sized.size, o.repo);
   const high = Math.min(estimate.high, o.budgetUsd);
   const low = Math.min(estimate.low, high);
@@ -327,18 +338,28 @@ export async function routeRepoTask(o: {
   /** Recent tasks (see HISTORY_SCAN); a failed read means no history. */
   history: () => Promise<Pick<Task, "repo" | "status" | "costUsd" | "size">[]>;
   budgetUsd: number;
-  apiKey: string;
+  /** The task provider the estimate runs on; or Anthropic's API with `apiKey`. */
+  provider?: ProviderRuntime;
+  apiKey?: string;
   redact?: (text: string) => string;
   queryFn?: QueryFn;
 }): Promise<RoutedTask> {
   const [sized, history] = await Promise.all([
     estimateTaskSize(
       { instruction: o.task.instruction, repo: o.task.repo, trigger: o.task.trigger, followUp: o.followUp, attachments: o.attachments },
-      { apiKey: o.apiKey, queryFn: o.queryFn, redact: o.redact },
+      { ...(o.provider ? { provider: o.provider } : { apiKey: o.apiKey ?? "" }), queryFn: o.queryFn, redact: o.redact },
     ),
     o.history().catch(() => []),
   ]);
   // The reason is the model's words about the request: kept on the task record and the timeline, so redacted.
   const redact = o.redact ?? ((text: string) => text);
-  return routePlan({ config: o.config, repo: o.task.repo, sized: { ...sized, reason: redact(sized.reason) }, history, budgetUsd: o.budgetUsd });
+  const provider = o.provider;
+  return routePlan({
+    config: o.config,
+    repo: o.task.repo,
+    sized: { ...sized, reason: redact(sized.reason) },
+    history,
+    budgetUsd: o.budgetUsd,
+    ...(provider && provider.provider !== "anthropic" ? { modelText: (model: string) => provider.displayModel(model) } : {}),
+  });
 }

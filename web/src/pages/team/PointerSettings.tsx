@@ -13,7 +13,19 @@ import { VStack } from "@astryxdesign/core/VStack";
 import { type ReactNode, useState } from "react";
 import type { PointerSpec } from "../../lib/types";
 import { useAction } from "../../lib/useAction";
-import { EFFORT_SELECT_OPTIONS, SIZE_INFO, TASK_SIZE_OPTIONS, type TaskSize, chatModelOptions, fieldStatus, hasErrors, isEffort, pointerErrors } from "./team";
+import {
+  CLAUDE_CHOICES,
+  EFFORT_SELECT_OPTIONS,
+  type ModelChoices,
+  SIZE_INFO,
+  TASK_SIZE_OPTIONS,
+  type TaskSize,
+  chatModelOptions,
+  fieldStatus,
+  hasErrors,
+  isEffort,
+  pointerErrors,
+} from "./team";
 
 type PointerPatch = Partial<PointerSpec>;
 
@@ -22,6 +34,10 @@ export interface PointerSettingsProps {
   pointer: PointerSpec;
   /** The model on the Claude connection, which an empty chat model falls back to. */
   claudeModel: string;
+  /** The chat provider's models, for the chat model; Claude's when absent. */
+  chatModels?: ModelChoices;
+  /** The repo task provider's models, for the routing's sizes; Claude's when absent. */
+  taskModels?: ModelChoices;
   /** Saves these of Pointer's settings over the saved ones; throws the server's error. */
   onSave: (patch: PointerPatch) => Promise<void>;
 }
@@ -139,7 +155,7 @@ function IdentityRow({ pointer, onSave }: PointerSettingsProps) {
   );
 }
 
-function RuntimeRow({ pointer, claudeModel, onSave }: PointerSettingsProps) {
+function RuntimeRow({ pointer, claudeModel, chatModels = CLAUDE_CHOICES, onSave }: PointerSettingsProps) {
   const row = usePointerRow(pointer, RUNTIME_KEYS, onSave);
   return (
     <SettingsRow
@@ -147,10 +163,14 @@ function RuntimeRow({ pointer, claudeModel, onSave }: PointerSettingsProps) {
       description="Higher effort thinks longer: better on hard work, slower, and more credit. The limits cap one reply in Slack; repo tasks use the limits under Projects.">
       <Selector
         label="Chat model"
-        options={chatModelOptions(row.draft.model, claudeModel)}
+        options={chatModelOptions(row.draft.model, claudeModel, chatModels)}
         value={row.draft.model}
         onChange={row.set("model")}
-        description="For replies in Slack. Sonnet 5.5 costs half as much as Opus 5.5 and is plenty for most chat."
+        description={
+          chatModels.isClaude
+            ? "For replies in Slack. Sonnet 5.5 costs half as much as Opus 5.5 and is plenty for most chat."
+            : `For replies in Slack, on ${chatModels.name}: the chat provider under Integrations, AI model.`
+        }
       />
       <Grid columns={{ minWidth: 200, max: 2 }} gap={4} align="end">
         <Selector
@@ -202,7 +222,7 @@ const routesOf = (routing: PointerSpec["routing"]): Routes => ({ small: routing.
  * Model routing: on/off saves at once; each size's model and effort are a
  * draft with Save. Mirrors team.pointer.routing (RoutingSchema in src/team.ts).
  */
-function RoutingRow({ pointer, claudeModel, onSave }: PointerSettingsProps) {
+function RoutingRow({ pointer, claudeModel, taskModels = CLAUDE_CHOICES, onSave }: PointerSettingsProps) {
   const saved = pointer.routing;
   const [draft, setDraft] = useState<Routes>(() => routesOf(saved));
   const routes = useAction();
@@ -222,7 +242,7 @@ function RoutingRow({ pointer, claudeModel, onSave }: PointerSettingsProps) {
       description={`Most requests are small and do not need the strongest model. With routing on, each repo task starts with a quick size estimate and runs with that size's model and effort. Agents with their own model or effort keep it. Task cards show the size and a cost range from earlier tasks of the same size.`}>
       <Switch
         label="Route repo tasks by size"
-        description={`Before each repo task, Haiku 5.5 reads the request and calls it small, medium or large (a fraction of a cent). Off: every task runs on the configured models with the repo task effort above.`}
+        description={`Before each repo task, ${taskModels.isClaude ? "Haiku 5.5" : `${taskModels.name}'s small model`} reads the request and calls it small, medium or large (a fraction of a cent). Off: every task runs on the configured models with the repo task effort above.`}
         value={saved.enabled}
         isLoading={toggle.pending}
         changeAction={async (on) => {
@@ -242,7 +262,7 @@ function RoutingRow({ pointer, claudeModel, onSave }: PointerSettingsProps) {
           <Grid columns={{ minWidth: 200, max: 2 }} gap={4}>
             <Selector
               label={`${SIZE_INFO[size].label} task model`}
-              options={chatModelOptions(draft[size].model, claudeModel)}
+              options={chatModelOptions(draft[size].model, claudeModel, taskModels)}
               value={draft[size].model}
               onChange={(v) => setRoute(size, { model: v })}
             />

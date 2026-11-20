@@ -187,7 +187,7 @@ async function askPointer(
 ): Promise<{ text: string; isError: boolean }> {
   const { e, config, deps, slack } = ctx;
   if (!isChatReady(config)) {
-    return { text: "I'm not fully set up yet. Finish onboarding on the admin page (Claude and Slack).", isError: true };
+    return { text: "I'm not fully set up yet. Finish onboarding on the admin page (the AI model and Slack).", isError: true };
   }
   // The monthly cap: checked before any model call.
   const allowed = (await deps.spending?.checkChat()) ?? { ok: true };

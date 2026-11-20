@@ -5,7 +5,8 @@
  * validates again and its message is shown when it disagrees.
  */
 import type { SelectorOptionData } from "@astryxdesign/core/Selector";
-import { type Access, type AgentSpec, type Effort, EFFORT_OPTIONS, type PointerSpec } from "../../lib/types";
+import { presetModelLabel, tierModels } from "../../lib/aiProviders";
+import { type Access, type AgentSpec, type AiProviderView, type Effort, EFFORT_OPTIONS, type PointerSpec, type PresetModel } from "../../lib/types";
 
 export const MAX_AGENTS = 30;
 
@@ -20,28 +21,77 @@ const MODELS = [
 /** "claude-sonnet-5-5" → "Sonnet 5.5"; other ids as they are. */
 export const modelLabel = (id: string): string => MODELS.find((m) => m.value === id)?.label ?? id;
 
-/** The list, plus the saved value when it is a model the list does not name (set through the API). */
-function withCurrent(options: SelectorOptionData[], current: string): SelectorOptionData[] {
+/**
+ * The models a picker offers: Claude's (Anthropic, as always), or those of
+ * the provider chat or repo tasks run on (GET /api/ai/providers).
+ */
+export interface ModelChoices {
+  /** Anthropic: the Claude list and wording, exactly as before providers existed. */
+  isClaude: boolean;
+  /** "Kimi" */
+  name: string;
+  options: SelectorOptionData[];
+  /** What an empty model runs on: the provider's main model, e.g. "Kimi K3". */
+  defaultLabel: string;
+  /** How a saved model the list does not name runs. */
+  describe: (id: string) => string;
+}
+
+export const CLAUDE_CHOICES: ModelChoices = { isClaude: true, name: "Claude", options: MODELS, defaultLabel: "", describe: () => "Set outside this page" };
+
+const CLAUDE_ID_RE = /^(?:claude-)?(opus|sonnet|haiku|fable)(?:$|-|\[)/;
+const TIER_HINT: Record<PresetModel["tier"], string> = { opus: "the largest", sonnet: "balanced", haiku: "fast and cheap" };
+
+/** The provider's models for the pickers; Claude's when it is Anthropic (or not loaded yet). */
+export function providerChoices(p: AiProviderView | undefined): ModelChoices {
+  if (!p || p.kind === "anthropic") return CLAUDE_CHOICES;
+  const tiers = tierModels(p);
+  const listed = p.models.map((m) => ({ value: m.id, label: m.label, description: `${m.id} · ${TIER_HINT[m.tier]}` }));
+  const typed = [...new Set(Object.values(tiers).filter((id) => id && !p.models.some((m) => m.id === id)))].map((id) => ({
+    value: id,
+    label: id,
+    description: "Set under Integrations, AI model",
+  }));
+  return {
+    isClaude: false,
+    name: p.short,
+    options: [...listed, ...typed],
+    defaultLabel: tiers.main ? presetModelLabel(p, tiers.main) : "the endpoint's default",
+    describe: (id) => {
+      const alias = id.toLowerCase().match(CLAUDE_ID_RE)?.[1];
+      const tier = alias === "fable" ? "opus" : alias;
+      if (!tier) return "Set outside this page";
+      const runs = tiers[tier as keyof typeof tiers];
+      return runs ? `A Claude model: runs on ${p.short}'s ${presetModelLabel(p, runs)}` : `A Claude model, sent to ${p.short} as it is`;
+    },
+  };
+}
+
+/** The list, plus the saved value when it is a model the list does not name (set through the API, or on another provider). */
+function withCurrent(options: SelectorOptionData[], current: string, choices: ModelChoices): SelectorOptionData[] {
   const known = options.some((o) => o.value === current);
-  return known || !current ? options : [...options, { value: current, label: current, description: "Set outside this page" }];
+  return known || !current ? options : [...options, { value: current, label: modelLabel(current), description: choices.describe(current) }];
 }
 
 /** An agent's model: empty runs it on Pointer's model. */
-export const agentModelOptions = (current: string, lead: string): SelectorOptionData[] =>
-  withCurrent([{ value: "", label: `Same as ${lead}`, description: `The model ${lead} runs on` }, ...MODELS], current);
+export const agentModelOptions = (current: string, lead: string, choices: ModelChoices = CLAUDE_CHOICES): SelectorOptionData[] =>
+  withCurrent([{ value: "", label: `Same as ${lead}`, description: `The model ${lead} runs on` }, ...choices.options], current, choices);
 
-/** Pointer's chat model: empty falls back to the model on the Claude connection, not to Pointer. */
-export const chatModelOptions = (current: string, claudeDefault: string): SelectorOptionData[] =>
+/** Pointer's chat model (and a routed size's): empty falls back to the model under Integrations, not to Pointer. */
+export const chatModelOptions = (current: string, claudeDefault: string, choices: ModelChoices = CLAUDE_CHOICES): SelectorOptionData[] =>
   withCurrent(
     [
-      {
-        value: "",
-        label: "Claude default",
-        description: claudeDefault ? `${modelLabel(claudeDefault)}, set under Integrations` : "The model set under Integrations, else the SDK default",
-      },
-      ...MODELS,
+      choices.isClaude
+        ? {
+            value: "",
+            label: "Claude default",
+            description: claudeDefault ? `${modelLabel(claudeDefault)}, set under Integrations` : "The model set under Integrations, else the SDK default",
+          }
+        : { value: "", label: `${choices.name} default`, description: `${choices.defaultLabel}, the main model set under Integrations` },
+      ...choices.options,
     ],
     current,
+    choices,
   );
 
 // ---------- Effort ----------

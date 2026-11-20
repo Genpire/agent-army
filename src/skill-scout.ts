@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Options, query } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
+import { defaultModel, providerRuntime } from "./ai-providers.js";
 import type { Spending } from "./budget.js";
 import type { Config } from "./config.js";
 import type { QueryFn } from "./pointer.js";
@@ -162,28 +163,38 @@ export async function findSkills(need: string, deps: ScoutDeps): Promise<ScoutRe
   const text = need.trim().slice(0, SCOUT_NEED_MAX_CHARS);
   if (!text) return { ok: false, status: 400, error: "Describe what the team needs a skill for." };
   const { config } = deps;
-  const apiKey = config.anthropic.apiKey;
-  if (!apiKey) return { ok: false, status: 400, error: "Claude is not connected. Add the Anthropic API key under Integrations first." };
+  // The chat provider: the Scout is one of the console's own calls.
+  const provider = providerRuntime(config, "chat");
+  if (!provider.ok) {
+    const error = config.ai.chatProvider === "anthropic" ? "Claude is not connected. Add the Anthropic API key under Integrations first." : provider.error;
+    return { ok: false, status: 400, error };
+  }
+  const { runtime } = provider;
   const allowed = (await deps.spending?.checkChat()) ?? { ok: true };
   if (!allowed.ok) return { ok: false, status: 409, error: allowed.error };
 
   const redact = makeRedactor(configSecrets(config));
   const scout = config.team.agents.find((a) => a.id === "scout");
-  const model = scout?.model || config.team.pointer.model || config.anthropic.model;
+  const model = runtime.model(scout?.model || config.team.pointer.model || defaultModel(config, runtime));
+  const effort = runtime.effort(scout?.effort || config.team.pointer.effort);
   const tmp = await mkdtemp(join(tmpdir(), "scout-"));
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), deps.timeoutMs ?? SCOUT_TIMEOUT_MS);
   let costUsd: number | undefined;
   let output: unknown;
   let failure: string | undefined;
+  let session: Awaited<ReturnType<typeof runtime.session>> | undefined;
   try {
+    session = await runtime.session();
     const options: Options = {
       systemPrompt: scoutSystemPrompt(config.team, deps.installed),
       ...(model ? { model } : {}),
-      effort: scout?.effort || config.team.pointer.effort,
+      ...(effort ? { effort } : {}),
+      ...(runtime.managedSettings ? { managedSettings: runtime.managedSettings } : {}),
       tools: [...SCOUT_TOOLS],
       allowedTools: [...SCOUT_TOOLS],
-      disallowedTools: [...SCOUT_BLOCKED_TOOLS],
+      // WebSearch too where the provider has no search: the Scout then reads the pages it knows with WebFetch.
+      disallowedTools: [...SCOUT_BLOCKED_TOOLS, ...runtime.disallowedTools],
       permissionMode: "dontAsk",
       settingSources: [],
       strictMcpConfig: true,
@@ -195,7 +206,7 @@ export async function findSkills(need: string, deps: ScoutDeps): Promise<ScoutRe
       cwd: tmp,
       abortController: abort,
       // Replaces the environment: the CLI sees none of the service's own secrets.
-      env: { PATH: process.env.PATH ?? "", HOME: tmp, LANG: "C.UTF-8", ANTHROPIC_API_KEY: apiKey, CLAUDE_AGENT_SDK_CLIENT_APP: "agent-army-scout/0.1.0" },
+      env: { PATH: process.env.PATH ?? "", HOME: tmp, LANG: "C.UTF-8", ...session.env, CLAUDE_AGENT_SDK_CLIENT_APP: "agent-army-scout/0.1.0" },
     };
     const run = deps.queryFn ?? query;
     for await (const message of run({ prompt: `Find Claude skills for this need:\n${text}`, options })) {
@@ -211,6 +222,7 @@ export async function findSkills(need: string, deps: ScoutDeps): Promise<ScoutRe
     failure ??= `The Scout could not search: ${err instanceof Error ? err.message : String(err)}`;
   } finally {
     clearTimeout(timer);
+    await session?.dispose();
     await rm(tmp, { recursive: true, force: true }).catch(() => undefined);
   }
   // What it cost counts with chat, against the monthly cap, whether or not it found anything.

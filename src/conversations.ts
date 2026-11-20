@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { providerProblem } from "./ai-providers.js";
 import type { Spending } from "./budget.js";
 import type { Config, ConfigRepo } from "./config.js";
 import { KeyedQueue } from "./listen.js";
@@ -690,7 +691,9 @@ export class ConversationService implements WebThreads {
     reply: LiveReply,
     redact: (text: string) => string,
   ): Promise<{ text: string; costUsd?: number; isError: boolean }> {
-    if (!config.anthropic.apiKey) return { text: NOT_CONNECTED, isError: true };
+    // The chat provider (Claude by default) must be connected before any model call.
+    const missing = providerProblem(config, config.ai.chatProvider);
+    if (missing) return { text: config.ai.chatProvider === "anthropic" ? NOT_CONNECTED : missing, isError: true };
     // The monthly cap: checked before any model call.
     const allowed = (await this.deps.spending?.checkChat()) ?? { ok: true };
     if (!allowed.ok) return { text: allowed.error, isError: true };

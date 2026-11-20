@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { presetFor } from "./ai-presets.js";
+import { isProviderReady } from "./ai-providers.js";
 import { decrypt, deriveKey, encrypt, randomToken } from "./crypto.js";
 import type { Store } from "./store.js";
 import { REPO_RE } from "./repo-id.js";
@@ -387,7 +389,8 @@ export const ConfigSchema = z.object({
       taskProvider: z.enum(AI_PROVIDER_IDS).default("anthropic"),
       providers: z.partialRecord(z.enum(AI_PROVIDER_IDS), AiProviderConnectionSchema).default({}),
     })
-    .default({ chatProvider: "anthropic", taskProvider: "anthropic", providers: {} }),
+    // A new object each time: zod copies a default only one level deep, and `providers` is written to.
+    .default(() => ({ chatProvider: "anthropic" as const, taskProvider: "anthropic" as const, providers: {} })),
   /** Coding agent CLIs the team can hand work to in repo tasks. */
   engines: z
     .object({ codex: EngineConnectionSchema.default({ model: "" }), gemini: EngineConnectionSchema.default({ model: "" }) })
@@ -482,7 +485,8 @@ export class ConfigRepo {
   }
 }
 
-function mask(secret: string | undefined): string | null {
+/** A secret as the browser may see it: whether it is set, and its last four characters when it is long. */
+export function mask(secret: string | undefined): string | null {
   if (!secret) return null;
   return secret.length <= 8 ? "••••" : `••••${secret.slice(-4)}`;
 }
@@ -594,6 +598,9 @@ export function publicView(c: Config) {
     ai: {
       chatProvider: c.ai.chatProvider,
       taskProvider: c.ai.taskProvider,
+      /** What chat and repo tasks run on, by name, and whether that provider is connected and complete. */
+      chat: { provider: c.ai.chatProvider, name: presetFor(c.ai.chatProvider).short, ready: isProviderReady(c, "chat") },
+      task: { provider: c.ai.taskProvider, name: presetFor(c.ai.taskProvider).short, ready: isProviderReady(c, "task") },
       providers: Object.fromEntries(
         Object.entries(c.ai.providers).map(([id, p]) => [
           id,
@@ -621,9 +628,13 @@ export function hasCodeHost(c: Config): boolean {
   return Boolean(c.github.token || c.github.extra.length > 0 || c.gitlab.token || c.bitbucket.token);
 }
 
-/** Everything connected: Claude, Slack and a code host. Drives the admin page badge and repo tasks. */
+/**
+ * Everything connected: the AI providers chat and repo tasks run on (Claude
+ * by default, see ai-providers.ts), Slack and a code host. Drives the admin
+ * page badge and repo tasks.
+ */
 export function isReady(c: Config): boolean {
-  return Boolean(c.anthropic.apiKey && c.slack.botToken && c.slack.signingSecret && hasCodeHost(c));
+  return Boolean(isProviderReady(c, "chat") && isProviderReady(c, "task") && c.slack.botToken && c.slack.signingSecret && hasCodeHost(c));
 }
 
 /**
@@ -669,7 +680,7 @@ export function integrationSecrets(c: Config): string[] {
   ].filter((x): x is string => typeof x === "string" && x.length > 0);
 }
 
-/** Enough for Pointer to chat: Claude and Slack. GitHub tools and repo tasks report when GitHub is missing. */
+/** Enough for Pointer to chat: the chat provider (Claude by default) and Slack. GitHub tools and repo tasks report when GitHub is missing. */
 export function isChatReady(c: Config): boolean {
-  return Boolean(c.anthropic.apiKey && c.slack.botToken && c.slack.signingSecret);
+  return Boolean(isProviderReady(c, "chat") && c.slack.botToken && c.slack.signingSecret);
 }

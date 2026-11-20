@@ -28,6 +28,8 @@ import { AgentEmoji } from "./AgentEmoji";
 import {
   ACCESS_INFO,
   AGENT_EFFORT_SELECT_OPTIONS,
+  CLAUDE_CHOICES,
+  type ModelChoices,
   accessDescription,
   type AgentDraft,
   NEW_AGENT,
@@ -52,6 +54,8 @@ export interface AgentDrawerProps {
   takenIds: ReadonlySet<string>;
   /** Pointer's name, as the owner set it. */
   lead: string;
+  /** The repo task provider's models for the model picker; Claude's when absent. */
+  models?: ModelChoices;
   onClose: () => void;
   /** Saves the agent (added or replaced by id); throws the server's error. */
   onSave: (spec: AgentSpec, isNew: boolean) => Promise<void>;
@@ -59,7 +63,7 @@ export interface AgentDrawerProps {
 }
 
 /** The agent editor: DrawerForm (header, scrolling fields, pinned Cancel and Save). */
-export function AgentDrawer({ isOpen, target, takenIds, lead, onClose, onSave, onDelete }: AgentDrawerProps) {
+export function AgentDrawer({ isOpen, target, takenIds, lead, models, onClose, onSave, onDelete }: AgentDrawerProps) {
   const title = target?.kind === "edit" ? `Edit ${target.agent.name}` : "New agent";
   return (
     <Drawer
@@ -76,6 +80,7 @@ export function AgentDrawer({ isOpen, target, takenIds, lead, onClose, onSave, o
           target={target}
           takenIds={takenIds}
           lead={lead}
+          models={models}
           onClose={onClose}
           onSave={onSave}
           onDelete={onDelete}
@@ -213,7 +218,7 @@ function AppsField({ value, onChange, lead }: { value: string[]; onChange: (apps
   );
 }
 
-function AgentForm({ target, takenIds, lead, onClose, onSave, onDelete }: Omit<AgentDrawerProps, "isOpen" | "target"> & { target: AgentTarget }) {
+function AgentForm({ target, takenIds, lead, models = CLAUDE_CHOICES, onClose, onSave, onDelete }: Omit<AgentDrawerProps, "isOpen" | "target"> & { target: AgentTarget }) {
   const existing = target.kind === "edit" ? target.agent : undefined;
   const [draft, setDraft] = useState<AgentDraft>(() => (existing ? { ...existing } : { ...NEW_AGENT }));
   const [triedSave, setTriedSave] = useState(false);
@@ -335,10 +340,14 @@ function AgentForm({ target, takenIds, lead, onClose, onSave, onDelete }: Omit<A
               <Grid columns={{ minWidth: 200, max: 2 }} gap={4} align="end">
                 <Selector
                   label="Model"
-                  options={agentModelOptions(draft.model, lead)}
+                  options={agentModelOptions(draft.model, lead, models)}
                   value={draft.model}
                   onChange={set("model")}
-                  description="Sonnet 5.5 costs half as much as Opus 5.5; Haiku 5.5 is far cheaper for simple lookups."
+                  description={
+                    models.isClaude
+                      ? "Sonnet 5.5 costs half as much as Opus 5.5; Haiku 5.5 is far cheaper for simple lookups."
+                      : `Repo tasks run on ${models.name}; a Claude model runs on ${models.name}'s model of the same size.`
+                  }
                 />
                 <Selector
                   label="Effort"
