@@ -160,6 +160,7 @@ export const NEW_AGENT: AgentDraft = {
   enabled: true,
   skills: [],
   avatar: "",
+  apps: [],
 };
 
 /** The checks AgentSpecSchema runs, with the page's wording. Empty when the draft can be saved. */
@@ -195,6 +196,7 @@ export const toSpec = (id: string, d: AgentDraft): AgentSpec => ({
   enabled: d.enabled,
   skills: d.skills,
   avatar: d.avatar.trim(),
+  apps: d.apps,
 });
 
 export type PointerErrors = Partial<Record<keyof PointerSpec, string>>;

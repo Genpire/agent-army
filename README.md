@@ -25,14 +25,15 @@ Pointer, a self-hosted assistant for Slack and the web, leads a team of Claude a
 - **HR and a skills library.** HR reviews how the team works and recommends hires, changes and skills; the Skills Scout finds Claude skills, you install them in the team's library and assign them to agents.
 - **Watch it work.** Every repo task shows its step (clone, setup, plan, build, verify, publish, checks), the plan as a checklist, what each agent did and for how long, the files and commands, and the result.
 - **It checks its own work.** Agents start your app and click through UI changes in a headless browser with screenshots, wait for CI and fix failing checks, open the pull request's real preview deployment (Vercel, Netlify…), and pick up review comments on the pull request.
-- **Works from your tickets.** Move a monday.com ticket to "Ready for dev" and the team starts on it; the ticket follows along: Working on it, In review with the pull request, Done when it is merged.
+- **Works with your stack.** GitHub, GitLab or Bitbucket for code; Jira, Confluence and monday.com for tickets; Miro for boards; and about 140 more apps through their MCP servers (Linear, Notion, Sentry, Stripe, Vercel, Figma, Zapier…), most with a one-click sign-in.
+- **Works from your tickets.** Move a Jira issue or a monday.com ticket to "Ready for dev" and the team starts on it; the ticket follows along: In progress, In review with the pull request, Done when it is merged.
 - **Spending under control.** A monthly cap and caps per repository, alerts in Slack before you hit them, and model routing that sends small tasks to a cheaper model.
 - **Humans stay in charge.** Agents only ever open pull requests; they never push to your branches or merge.
 - **Yours.** MIT licensed and self-hosted: your code, conversations and keys stay in your deployment. You pay only for the Claude API you use, with per-task budgets.
 
 ## Run it in 5 minutes
 
-You need Docker and an [Anthropic API key](https://console.anthropic.com). Slack, GitHub and monday.com are optional: connect them later from the console.
+You need Docker and an [Anthropic API key](https://console.anthropic.com). Slack, GitHub (or GitLab, Bitbucket) and the other integrations are optional: connect them later from the console.
 
 ```bash
 docker run -d --name agent-army -p 8080:8080 -v agent-army-data:/data \
@@ -43,7 +44,7 @@ docker logs agent-army 2>&1 | grep setup     # prints the one-time setup token
 1. Open http://localhost:8080, paste the setup token and choose an admin password.
 2. On **Integrations → Claude**, paste your API key.
 3. Open **Chat** and ask Pointer anything.
-4. To have the team change code, connect **GitHub** on the same page and ask for a change, for example "in owner/repo: add a dark mode toggle". It comes back as a pull request.
+4. To have the team change code, connect **GitHub**, **GitLab** or **Bitbucket** on the same page and ask for a change, for example "in owner/repo: add a dark mode toggle". It comes back as a pull request (a merge request on GitLab).
 
 The `MASTER_KEY` encrypts everything the deployment stores; the container keeps it across restarts, so recreate the container with the same key. To use Slack, the deployment must be reachable over public HTTPS: [deploy to Cloud Run](#google-cloud-run), or put a tunnel or TLS proxy in front (see [Anywhere else](#anywhere-else-vm-laptop-kubernetes)).
 
@@ -146,9 +147,11 @@ Workers run as child processes of the server (`RUNNER=local`). Slack needs to re
 2. **Claude** (Integrations): an Anthropic API key. Use a dedicated key with a spend limit.
 3. **Slack** (Integrations, optional if you only use the console): click *Create Slack app* (the manifest is pre-filled with this deployment's URL and Pointer's name), install it to your workspace, paste the Bot User OAuth Token and Signing Secret. Invite Pointer to the channels where you want it.
 4. **GitHub** (Integrations): a fine-grained personal access token, ideally on a dedicated bot account, limited to the repos the agents may touch, with *Contents: read/write*, *Pull requests: read/write*, *Metadata: read*, and for the [CI checks](#ci-checks) loop *Checks: read*, *Commit statuses: read* and *Actions: read*, and for [preview checks](#preview-checks) *Deployments: read*. Optionally restrict it to owners or exact repos. For repos outside your organisation, add more tokens under *Other GitHub connections* (see [GitHub connections](#github-connections)). Without GitHub, Pointer still chats; GitHub questions and repo tasks say GitHub is not connected. Optionally add the webhook for [pull request reviews](#pull-request-reviews) on the same pane.
-5. **monday.com** (Integrations, optional): an API token so Pointer can open and update tickets, a default board and the boards it may use. See [monday.com](#mondaycom).
-6. **Projects** and **Settings** (optional): channel → default repo and Pointer channels (Projects), who may talk to Pointer, budget and turn limits per task, how long to wait for CI checks and how many fix rounds to run (Settings). Per repo, **Projects → Repo setup** holds a setup command, how to start the app and environment variables (see [Repo setup](#repo-setup)).
-7. **Team** (optional): rename Pointer, give it extra instructions, edit or add agents.
+5. **GitLab** or **Bitbucket** (Integrations, optional, instead of or next to GitHub): see [GitLab and Bitbucket](#gitlab-and-bitbucket).
+6. **monday.com**, **Jira & Confluence**, **Miro** (Integrations, optional): so Pointer can open and update tickets and read and draw on boards. See [monday.com](#mondaycom), [Jira and Confluence](#jira-and-confluence) and [Miro](#miro).
+7. **Apps** (Integrations, optional): connect Linear, Notion, Sentry, Stripe, Vercel, Figma, Zapier and about 130 more through their MCP servers. See [Apps](#apps).
+8. **Projects** and **Settings** (optional): channel → default repo and Pointer channels (Projects), who may talk to Pointer, budget and turn limits per task, how long to wait for CI checks and how many fix rounds to run (Settings). Per repo, **Projects → Repo setup** holds a setup command, how to start the app and environment variables (see [Repo setup](#repo-setup)).
+9. **Team** (optional): rename Pointer, give it extra instructions, edit or add agents.
 
 Every credential is verified before it is saved, stored encrypted (AES-256-GCM with `MASTER_KEY`), and never sent back to the browser.
 
@@ -199,6 +202,10 @@ Pointer reacts with :eyes: while it works, then :white_check_mark: or :x:. Messa
 | `open a ticket for the login bug on the Bugs board` | Creates a monday.com item with the details from the conversation (monday.com connected) |
 | `move ticket 1234567890 to Done and note the fix is in PR #42` | Updates the item's columns and adds a comment |
 | share `Chat Section.html`, `Mobile-html.zip` and a screenshot: `what's off in the mobile layout?` | Reads the files and answers (see [Files you share](#files-you-share)) |
+| `what's open on gitlab:acme/web?` | Lists merge requests and issues on GitLab (likewise `bitbucket:…`) |
+| `which Jira bugs in WEB are still open for the release?` | Searches Jira with JQL and reads the issues |
+| `draw our deploy pipeline on the Architecture board` | Draws a diagram on Miro |
+| `which Sentry errors spiked since yesterday?` | Uses a connected app (here Sentry) through its MCP server |
 | `who's on the team?` | Describes the agents |
 | `fix the flaky checkout test` | Starts a repo task on this channel's default project |
 | `in owner/repo: add rate limiting to /api/login` | Starts a repo task on that project |
@@ -559,6 +566,50 @@ Anyone who can change the status on an automated board can start a task on its r
 
 Turning the automation off stops new tasks and makes the webhook address answer `404`; tasks already running keep updating their tickets.
 
+## GitLab and Bitbucket
+
+Repo tasks, reviews and Pointer's code questions work on GitLab (gitlab.com or a self-managed instance) and Bitbucket Cloud the same way as on GitHub. Connect any of the three; at least one is needed for repo tasks.
+
+**Repository names.** GitHub repositories are `owner/repo`, as before. GitLab ones are `gitlab:group/project` (nested groups too: `gitlab:group/sub/project`), Bitbucket ones `bitbucket:workspace/repo`. Links work everywhere a repository is asked for: `bind https://gitlab.com/acme/web` in Slack, "in https://bitbucket.org/acme/api: …" in a request.
+
+| | GitHub | GitLab | Bitbucket |
+| --- | --- | --- | --- |
+| The team opens | a pull request | a merge request (`Draft:` while unfinished) | a pull request (draft while unfinished) |
+| CI the team waits for and fixes | check runs (Actions…) and commit statuses | pipeline jobs and commit statuses | Pipelines steps and commit statuses |
+| Job logs in fix rounds | GitHub Actions | GitLab CI | Bitbucket Pipelines |
+| Review feedback that starts a follow-up | reviews and comments from people with write access | comments and reviews from Developers and above | comments and change requests from people with write access |
+| Preview checks | deployments, Vercel/Netlify comments, statuses | statuses and Vercel/Netlify comments | statuses and Vercel/Netlify comments |
+| Pointer's read tools | `github_*` | `gitlab_*` | `bitbucket_*` |
+
+**GitLab** (**Integrations → GitLab**): an access token (personal, group or project) with the `api` scope, ideally of a dedicated bot user with the Developer role on the projects the team may change. For a self-managed instance, enter its address. The allow list takes groups (`acme`, `acme/platform`) or exact projects (`acme/web`); empty means anything the token can reach. For review follow-ups, create the webhook secret on the same pane and either let the pane add the hook to the allowed projects (it needs the Maintainer role) or add it by hand under **Settings → Webhooks**: URL `https://<your deployment>/gitlab/webhook`, the secret token, and the **Comments** and **Merge request events** triggers.
+
+**Bitbucket** (**Integrations → Bitbucket**): either an Atlassian API token with Bitbucket scopes (repositories and pull requests read and write, pipelines read, account read) together with your Atlassian account email, or a workspace or repository access token (no email). The allow list takes workspaces or exact repositories. For review follow-ups, create the webhook secret on the pane and let it add the webhook to the allowed repositories, or add it by hand under **Repository settings → Webhooks**: URL `https://<your deployment>/bitbucket/webhook`, the secret, and the pull request **Comment created**, **Changes request created**, **Merged** and **Declined** triggers. Bitbucket retired its issue tracker, so Pointer cannot list Bitbucket issues.
+
+## Jira and Confluence
+
+Optional. With Jira connected, Pointer can search issues with JQL, read an issue with its comments and files, open issues, comment and move them through the workflow, and read Confluence pages on the same site. It never deletes anything. When a request names no project, Pointer uses the default project.
+
+**Connect it** on **Integrations → Jira & Confluence**: your site's address (`https://your-site.atlassian.net`), the account's email, and a classic API token from [id.atlassian.com](https://id.atlassian.com/manage-profile/security/api-tokens) (tokens with scopes are not supported; Atlassian tokens expire after at most a year). Use a dedicated Atlassian user that can see only the projects Pointer should work on, and optionally list the projects it may use.
+
+**Issues that start repo tasks** work like [monday.com's](#tickets-that-start-repo-tasks): per project, choose the repository and the status that starts a task (for example **Ready for dev**), and the statuses the team sets (**In Progress**, **In Review**, **Done**; empty leaves the status alone). Statuses are checked against the project's workflows. **Connect webhook** registers a Jira webhook for issue updates in those projects (it needs a Jira admin; otherwise the pane shows how to add it under **System → WebHooks**). Deliveries go to `https://<your deployment>/jira/webhook/<secret>`, are refused with `404` for a wrong secret, and are checked against `X-Hub-Signature` when Jira signs them. Pointer reads the issue again before starting a task, and starts one only when the issue is in the start status now and no task is already working on it.
+
+## Miro
+
+Optional. With Miro connected, Pointer can list and read boards (an outline by frame, with stickies, cards, text, shapes and arrows), add sticky notes and cards, and draw diagrams: boxes and arrows laid out left to right, top to bottom or as a grid, in a new frame. It never deletes, moves or edits what is on a board. Ask, for example, "summarise the retro board" or "draw our deploy pipeline on the Architecture board".
+
+**Connect it** on **Integrations → Miro**: in Miro's developer settings, create an app with the `boards:read` and `boards:write` scopes, install it to your team, and paste its access token. Pick a default board and, optionally, the boards Pointer may use (ids or board links).
+
+## Apps
+
+Connect apps through their own MCP servers: issue trackers, docs, monitoring, payments, deploys, design, data and more. **Integrations** lists about 140 apps whose servers were checked against the vendors' documentation (Linear, Notion, Sentry, Stripe, Vercel, Figma, Zapier, Datadog, PagerDuty, Airtable, ClickUp, Google Drive, Dropbox, PostHog…), searches the [MCP Registry](https://registry.modelcontextprotocol.io) for anything else, and takes any MCP server by its address as a custom app.
+
+- **Sign in.** Most apps sign in with one click (OAuth in your browser; the deployment registers itself with the app). Others take an API key; a few need an OAuth client you create in the vendor's console first (the drawer shows the redirect address to register), or your account's own address (for example your Glean or Freshdesk subdomain).
+- **What it may do.** Each app is **read only** (only the tools the server marks read-only) or **can change things**, and any tool can be turned off. The app's tools are listed when you connect it and when you check it again.
+- **Who uses it.** Pointer uses every app that is on. Agents use the apps you give them (on the app, or in the agent's **Apps** field on the Team page): in chat they get only read-only tools; in repo tasks an agent that runs commands can use the app's other tools too.
+- **Safety.** App addresses must be public `https` (private, loopback and cloud metadata addresses are refused, redirects included). Keys and OAuth tokens are stored encrypted, refreshed before use, never sent to the browser and redacted from what Pointer and the team write. What an app returns is data, never instructions. An app whose sign-in expired or whose server is down is left out with a warning; it never breaks chat or a task.
+
+Brand logos come from [Simple Icons](https://simpleicons.org) (CC0); the names and logos are trademarks of their owners.
+
 ## Updating an existing Slack app
 
 Apps created before Pointer only receive @mentions, apps created before file support cannot download shared files, and apps created before browser checks cannot post screenshots. To let Pointer receive DMs and channel messages, add reactions, read files and post screenshots, update the app once:
@@ -576,6 +627,7 @@ Until you do, @mentions still work, but DMs, Pointer channels and unmentioned th
 - **Pull requests only:** the platform, not the agents, pushes the branch and opens the PR (a draft for unfinished work). Enable branch protection on your default branch so merging requires a human review.
 - **Least privilege:** each GitHub token should cover only the repos you want worked on. Tokens are used only by the service-side tools and the worker. The GitHub allow lists (owners or exact repos, per connection) apply to GitHub reads and repo tasks, and the Slack user allowlist is checked before any model call.
 - **GitHub webhook:** `POST /github/webhook` refuses any delivery whose HMAC-SHA256 signature does not match the shared secret, and starts work only for feedback from people with write access to the repository (`OWNER`, `MEMBER`, `COLLABORATOR`) on pull requests the team opened. Bots and the platform's own comments are ignored. The follow-up runs on the same repo, so it is bound by the same allow lists and limits as any task.
+- **More integrations:** GitLab deliveries are checked with the secret token (`X-Gitlab-Token`), Bitbucket and signed Jira deliveries with HMAC-SHA256 (`X-Hub-Signature`), Jira and monday.com deliveries also by the secret in their address; all in constant time. Follow-ups start only for people with write access, and the platform's own comments are ignored. Jira, Miro and app tools respect their allow lists (projects, boards, read-only or not). App MCP and OAuth addresses must be public `https`, checked again after DNS and on redirects.
 - **Secrets:** in repo tasks the agents' shell gets a minimal environment (no master key, Slack or GitHub tokens) plus the variables the owner set for that repo under [Repo setup](#repo-setup), git credentials are passed per command and never written to `.git/config`, and a shell guard blocks pushing, credential changes and reading platform secrets. The repo's variables, memory, project notes, shared files, the webhook secret and the monday.com token are stored encrypted with the master key; variable values are never sent to the browser or the team's prompt and are redacted from what the worker posts and logs. Message text and file contents are never logged. The Slack token is sent only to `https://files.slack.com` when downloading a file.
 - **Browser:** the browser tools run Chromium in its own process, outside the shell guard, with an environment that holds no secrets. The tool that runs arbitrary code in that process (`browser_run_code_unsafe`) is not offered. Screenshots are written outside the checkout and posted only in the task's own thread.
 - **Limits:** per-message budget and turns for conversations (**Team**), per-task budget, turn limit and timeout for repo tasks (**Settings**), plus the CI wait and fix rounds, which run within the same budget and the worker's deadline. At most six answers are worked on at once; the rest wait their turn.
@@ -620,7 +672,7 @@ Besides the admin API, the service takes `POST /slack/events` from Slack and `PO
 
 | Route | Body / query | Result |
 | --- | --- | --- |
-| `GET /api/state` | | Setup and sign-in state; when signed in, readiness, `eventsUrl`, `githubWebhookUrl` (the payload URL for GitHub) and the config without secrets (`config.github.extra` lists the other GitHub connections as `{ id, login, allowed, key }` with a masked key; `config.github.webhook.configured` says whether a webhook secret is saved; `config.repoSetup` maps `owner/repo` to `{ setupCommand, startCommand, appUrl, envKeys }`, variable names only; `config.monday` shows `connected`, `userName`, `accountName`, `defaultBoardId`, `allowedBoardIds`; `config.limits` includes `ciWaitMin` and `ciFixRounds`). |
+| `GET /api/state` | | Setup and sign-in state; when signed in, readiness, `eventsUrl`, `githubWebhookUrl` (the payload URL for GitHub) and the config without secrets (`config.github.extra` lists the other GitHub connections as `{ id, login, allowed, key }` with a masked key; `config.github.webhook.configured` says whether a webhook secret is saved; `config.repoSetup` maps `owner/repo` to `{ setupCommand, startCommand, appUrl, envKeys }`, variable names only; `config.monday` shows `connected`, `userName`, `accountName`, `defaultBoardId`, `allowedBoardIds`; `config.limits` includes `ciWaitMin` and `ciFixRounds`; `config.gitlab`, `config.bitbucket`, `config.jira`, `config.miro` and `config.apps` show who each is connected as, allow lists and webhook state, with masked keys and header names only). |
 | `POST /api/setup` | `{ setupToken, password }` | Creates the admin account and signs in. |
 | `POST /api/login` / `POST /api/logout` | `{ password }` / none | Session cookie. |
 | `POST /api/reset-password` | `{ setupToken, password }` | Sets a new admin password with the setup token and signs in; every other session is signed out. `403` for a wrong token, `409` before setup. No session needed; limited to 10 attempts per address per 10 minutes, like sign-in. |
@@ -639,14 +691,14 @@ Besides the admin API, the service takes `POST /slack/events` from Slack and `PO
 | `POST /api/settings` | `{ orgName?, allowedUserIds?, allowedOwners?, bindings?, pointerChannels?, limits? }` | Partial update; `limits` (`maxTurns`, `maxBudgetUsd`, `maxParallel`, `progressEveryMin` 0-60, `ciWaitMin` 0-60, `ciFixRounds` 0-5, `previewCheck` `off` \| `visible` \| `always`) merges field by field. `allowedOwners` is the primary GitHub token's allow list (owners or exact repos). |
 | `POST /api/repo-setup` | `{ repo, setupCommand?, startCommand?, appUrl?, env? }` | Creates or updates a repo's setup; omitted fields are kept. `setupCommand` up to 2 000 characters, `startCommand` up to 500, `appUrl` empty or `http(s)://…`. `env` is `{ NAME: "value" \| null }`: a value sets the variable, `null` deletes it, names left out are kept (at most 100; reserved names are refused). Returns `{ ok, repoSetup }`: that repo's setup with variable names only. |
 | `POST /api/repo-setup/delete` | `{ repo }` | Removes a repo's setup and its variables (`404` if unknown). |
-| `POST /api/team` | `{ pointer, agents }` | Replaces the team. `pointer`: `{ name, instructions, budgetUsd, maxTurns, model?, effort?, taskEffort?, routing? }`; `routing`: `{ enabled, small, medium, large }`, each size `{ model, effort }` (`model: ""` = the configured model). Each agent: `{ id, name, role, emoji, description, instructions, access, model?, effort?, enabled }`. Effort is `low`, `medium`, `high`, `xhigh` or `max` (an agent's `""` follows the chat or task). |
+| `POST /api/team` | `{ pointer, agents }` | Replaces the team. `pointer`: `{ name, instructions, budgetUsd, maxTurns, model?, effort?, taskEffort?, routing? }`; `routing`: `{ enabled, small, medium, large }`, each size `{ model, effort }` (`model: ""` = the configured model). Each agent: `{ id, name, role, emoji, description, instructions, access, model?, effort?, enabled, skills?, avatar?, apps? }` (`apps`: ids of connected apps the agent may use). Effort is `low`, `medium`, `high`, `xhigh` or `max` (an agent's `""` follows the chat or task). |
 | `GET /api/memory` | | `{ facts, max }` |
 | `POST /api/memory/delete` | `{ id }` | Deletes one fact (`404` if unknown). |
 | `GET /api/notes` | | `{ notes: [{ repo, updatedAt, chars }], max }`, newest first; `max` is 8 000. |
 | `GET /api/notes/:owner/:repo` | | `{ repo, text, updatedAt }`, or `404` when the repo has no notes. |
 | `POST /api/notes` | `{ repo, text }` | Replaces the repo's notes; empty text deletes them. `400` for a bad repo name or text over the limit. |
 | `GET /api/tasks` | | `{ tasks }`: the 30 most recent repo tasks; a running task carries `progress` (`now`, `plan`, `agents`, `recent`, `files`, `filesCount`, `startedAt`, `updatedAt`) and `stage` (`{ phase, text, at }`: cloning, setup, publishing, waiting for checks). A task may also have `channel` `web` (started from the console; `threadTs` is its conversation), `trigger` (`slack`, `web` or `review`), `report` (`{ title, summary, verification, risks }`), `notes` (other result lines), `ci` (`{ state, fixRounds, names, total }`, state `passed`, `failed`, `pending` or `none`), `fixRound` (`{ round, rounds, failing, at }`), `prDraft` and `screenshots` (how many were kept). |
-| `POST /api/tasks` | `{ repo, instruction }` | Starts a repo task directly (no Pointer reply) in a new conversation whose first message is the instruction (up to 8 000 characters). Same checks as Slack (GitHub connected, allow lists: `400`). `409` when a spending cap is used up (no conversation is created). `202` with `{ conversationId, taskId }`; `502` with `{ error, conversationId }` when the worker could not start. |
+| `POST /api/tasks` | `{ repo, instruction }` | Starts a repo task directly (no Pointer reply) in a new conversation whose first message is the instruction (up to 8 000 characters). Same checks as Slack (the repository's host connected, allow lists: `400`). `409` when a spending cap is used up (no conversation is created). `202` with `{ conversationId, taskId }`; `502` with `{ error, conversationId }` when the worker could not start. |
 | `GET /api/tasks/:id/events` | | `{ timeline }`: the task's steps (`phases`: `clone`, `setup`, `plan`, `build`, `verify`, `publish`, `checks`, each `pending`, `active`, `done`, `skipped` or `failed`, with times), its last 300 events (`{ at, phase, kind, text, agent?, ms?, ok?, url? }`; kinds such as `phase`, `setup`, `agent-start`, `agent-done`, `edit`, `command`, `browser`, `screenshot`, `push`, `pr`, `checks`, `fix-round`, `end`), `dropped` (older events left out) and `checks` (`[{ name, state, url? }]`). `null` for tasks without one. Slack and console tasks alike. |
 | `GET /api/tasks/:id/screenshots` | | `{ screenshots: [{ name, size }] }`: the screenshots from the task's browser checks. |
 | `GET /api/tasks/:id/screenshots/:name` | | The image (`image/png`, `image/jpeg` or `image/webp`, `Cache-Control: private`). Names are checked (`400`); `404` when unknown. |
@@ -674,6 +726,31 @@ Besides the admin API, the service takes `POST /slack/events` from Slack and `PO
 | `POST /api/skills/:name/delete` | | Removes the skill from the library and from every agent's `skills`; its stored files are blanked. `404` when not installed. |
 | `POST /api/skills/find` | `{ need }` | The Skills Scout: one Claude query (web search and fetch only, at most $0.50) for a need of 3 to 1 000 characters. Returns `{ candidates: [{ name, description, url, license?, runsScripts?, why, forAgents? }], costUsd? }`, at most five, each `url` a GitHub folder, `forAgents` existing agent ids. `400` when Claude is not connected, `409` when the monthly spending cap is used up (nothing runs), `502` when the search fails. The cost counts with chat. |
 | `GET /api/office` | `?tz=` (the browser's `Date#getTimezoneOffset()`, minutes; "today" starts at that midnight) | `{ people, meetings, updatedAt }`. `people`: Pointer (`kind: "lead"`, id `pointer`) then every enabled agent, each `{ id, name, role, emoji, avatar, kind, state, doing?, task?, conversation?, since?, today: { tasks, minutes } }`; `state` is `free`, `working`, `thinking` or `meeting`; `task` is `{ id, repo, title, channel, conversationId? }`; `conversation` (`{ id, title }`) is the console conversation Pointer is answering. `meetings`: `[{ taskId, title, repo, channel, conversationId?, step, plan: { done, total }, people, since }]`, one per running task with two or more agents (`people`: Pointer first). Read from the 30 most recent tasks, the active tasks' timelines and the conversation index; a task not saved for 3 hours and an answer pending for 15 minutes are left out. |
+| `GET /api/notes/repo` | `?repo=<id>` | The notes of any repository id (`gitlab:…`, `bitbucket:…` too): `{ repo, text, updatedAt }`, `404` without notes, `400` for a bad id. |
+| `POST /api/gitlab` | `{ token?, baseUrl?, allowed? }` | With `token`: checked with `GET /user` (it needs the `api` scope) and saved with its user. `baseUrl` is `https://gitlab.com` or a self-managed address (changing it needs the token again). `allowed`: groups or exact projects, each checked with the token. Without a token, only the allow list changes. Returns `{ ok, username, baseUrl, allowed }`. |
+| `POST /api/gitlab/disconnect` | | Forgets the token, its user and the webhook secret; keeps the address and allow list. |
+| `GET /api/gitlab/webhook` / `POST /api/gitlab/webhook` | none / `{ installHooks? }` or `{ remove: true }` | `{ url, configured }`. POST makes a new secret and returns `{ ok, url, secret, hooks? }` once (`no-store`); `installHooks` adds or updates the hook on each allowed project and reports per project. |
+| `POST /gitlab/webhook` | GitLab's delivery | Not an admin route. `404` until GitLab and the secret are set, `401` for a wrong `X-Gitlab-Token`; duplicates (`webhook-id`/`Idempotency-Key`) and other events get `200`. Comments addressed to Pointer and reviews start follow-ups; merged or closed merge requests update their tickets. |
+| `POST /api/bitbucket` | `{ token?, email?, allowed? }` | An API token with `email`, or an access token without. Checked with Bitbucket unless `SKIP_VALIDATION=1`. Returns `{ ok, username, tokenKind: "api-token" \| "access-token" }`. |
+| `POST /api/bitbucket/disconnect` | | Forgets the token and webhook secret; keeps the allow list. |
+| `POST /api/bitbucket/webhook` | `{ createHooks? }` or `{ remove: true }` | A new secret, returned once: `{ ok, url, secret, hooks? }`; `createHooks` adds the webhook to up to 20 exact allowed repositories. |
+| `POST /bitbucket/webhook` | Bitbucket's delivery | Not an admin route. `404` without a secret, `401` for a bad `X-Hub-Signature`; duplicates by `X-Request-UUID`. Comments and change requests start follow-ups; merged and declined pull requests update their tickets. |
+| `POST /api/jira` | `{ siteUrl?, email?, token?, defaultProjectKey?, allowedProjectKeys?, confluence? }` | Checked with `/myself` unless `SKIP_VALIDATION=1`; `defaultProjectKey: ""` clears it. Returns `{ ok, userName? }`. |
+| `POST /api/jira/disconnect` | | Forgets the token; keeps the site, email and project settings. |
+| `GET /api/jira/projects` / `GET /api/jira/statuses` | `?search=` / `?projectKey=` | `{ projects: [{ id, key, name, type? }] }` / `{ project, statuses: [{ name, category? }] }`, for the pickers. |
+| `POST /api/jira/automation` | `{ enabled?, projects?: { "<KEY>": { repo, startStatus, workingStatus?, reviewStatus?, doneStatus?, stuckStatus? } \| null } }` | Issues that start repo tasks: the repository must be allowed, every status must exist in the project, and the start status must differ from the others. Returns `{ ok, automation }`. |
+| `POST /api/jira/automation/webhook` | `{ rotate? }` | Registers the issue-updated webhook for the automated projects: `{ ok, url, secret, jql, registered }`, or `manualSteps` when the account cannot. |
+| `POST /jira/webhook/:secret` | Jira's delivery | Not an admin route. `404` for a wrong secret or with the automation off, `401` for a bad `X-Hub-Signature`, duplicates by `X-Atlassian-Webhook-Identifier`. Reads the issue again and starts a task (trigger `jira`) when it qualifies. |
+| `POST /api/miro` | `{ token?, defaultBoardId?, allowedBoardIds? }` | Board ids or links; `""` clears the default. A new token is checked for `boards:read` and `boards:write`. Returns `{ ok, userName?, teamName? }`. |
+| `POST /api/miro/disconnect` | | Forgets the token; keeps the board settings. |
+| `GET /api/miro/boards` | `?query=` | `{ boards: [{ id, name, description?, viewLink?, team?, owner?, modifiedAt? }] }`; a pasted board link is looked up directly. |
+| `GET /api/apps/catalog` | | `{ apps, categories, redirectUrl }`: the app catalog and the OAuth redirect address to register where an app needs a hand-made client. |
+| `GET /api/apps/registry` | `?search=` | `{ apps }`: remote servers from the MCP Registry matching the search (at least 3 characters), shaped like catalog entries, cached for an hour; `502` when the registry fails. |
+| `POST /api/apps` | `{ presetId?, name, url, transport?, auth, access?, agentIds? }` | Adds an app. `auth`: `{ type: "none" }`, `{ type: "bearer", token }`, `{ type: "headers", headers }` or `{ type: "oauth", clientId?, clientSecret? }`. Key apps are checked by listing their tools; OAuth apps return `signInUrl`. Returns `{ ok, app, signInUrl? }`, never a secret. |
+| `POST /api/apps/:id` | `{ name?, access?, disabledTools?, agentIds?, enabled?, auth? }` | Changes an app; an empty key or header value keeps the saved one. Returns `{ ok, app }`. |
+| `POST /api/apps/:id/check` / `POST /api/apps/:id/oauth/start` / `POST /api/apps/:id/delete` | | Lists the app's tools again (`{ ok, app }`) / starts the sign-in (`{ url }`) / removes the app and takes it off every agent (`{ ok }`). |
+| `GET /api/apps/oauth/callback` | `?state&code` (or `&error`) | Not an admin route: the vendor sends the browser here after sign-in. The single-use state (10 minutes) is checked; redirects to `/#/integrations/apps/<id>?signin=ok` or `?signin=error&reason=…`. |
+| `GET /api/apps/oauth/client-metadata.json` | | The OAuth client metadata document vendors read when the deployment signs in without registration. |
 
 ## Development
 
@@ -702,6 +779,12 @@ Layout:
 - `src/notes.ts`: encrypted project notes.
 - `src/attachments.ts`: encrypted per-thread files and how Pointer reads them; `src/slack.ts` downloads them from Slack.
 - `src/monday.ts`: monday.com client, token check and Pointer's monday.com tools.
+- `src/repo-id.ts`: repository ids across hosts; `src/code-host.ts`: what a code host does for a repo task; `src/code-host-factory.ts` + `src/code-host-access.ts`: which host and connection serve a repository, and whether it is allowed.
+- `src/gitlab.ts` + `src/gitlab-webhook.ts`, `src/bitbucket.ts` + `src/bitbucket-webhook.ts`: the GitLab and Bitbucket clients and webhooks; `src/code-host-tools.ts`: Pointer's `gitlab_*` and `bitbucket_*` tools.
+- `src/jira.ts` + `src/jira-automation.ts`: Jira and Confluence, and issues that start repo tasks; `src/ticket-sync.ts`: ticket updates as a task goes (monday.com and Jira).
+- `src/miro.ts`: Miro client and tools.
+- `src/apps.ts`, `src/apps-oauth.ts`, `src/apps-net.ts`, `src/apps-registry.ts`, `src/apps-catalog*.ts`: apps through remote MCP servers (sign-in, address guard, MCP Registry search, the catalog).
+- `src/chat-integrations.ts`: the integrations Pointer uses in chat beyond its own tools; `src/routes/`: each integration's admin routes and webhook.
 - `src/runner.ts`: local / Cloud Run.
 - `src/worker.ts`: clone → setup → team → PR → checks → report.
 - `src/repo-setup.ts`: a repo's setup command and variables; `src/ci.ts`: waiting for and fixing the pull request's checks; `src/pr-feedback.ts`: review feedback for the team.

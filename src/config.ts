@@ -1,10 +1,11 @@
 import { z } from "zod";
 import { decrypt, deriveKey, encrypt, randomToken } from "./crypto.js";
 import type { Store } from "./store.js";
+import { REPO_RE } from "./repo-id.js";
 import { TeamSchema, defaultTeam } from "./team.js";
 
-/** owner/repo; "." and ".." are rejected as either part so a repo can never traverse API paths. */
-export const REPO_RE = /^(?!\.{1,2}\/)[A-Za-z0-9_.-]+\/(?!\.{1,2}$)[A-Za-z0-9_.-]+$/;
+/** Any repository id (GitHub owner/repo, gitlab:group/project, bitbucket:workspace/repo); see repo-id.ts. */
+export { REPO_RE };
 export const CHANNEL_RE = /^[CGD][A-Z0-9]+$/;
 /** An environment variable name the agents' shell can receive. */
 export const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
@@ -83,6 +84,194 @@ export const BudgetSchema = z.object({
 });
 export type Budget = z.infer<typeof BudgetSchema>;
 
+
+// ---------- More code hosts, trackers and apps ----------
+
+/** Allow-list entries: a group or workspace ("acme", "acme/platform") or an exact repository path ("acme/web"), without the host prefix. */
+const ALLOWED_PATHS = z.array(z.string().trim().min(1).max(300)).max(200).default([]);
+
+/** GitLab (gitlab.com or a self-managed instance), so the team can work on gitlab:group/project repositories. */
+export const GitLabConfigSchema = z
+  .object({
+    /** A personal, group or project access token with the api scope (and write_repository). */
+    token: z.string().optional(),
+    /** https://gitlab.com, or the self-managed instance's address. */
+    baseUrl: z
+      .string()
+      .max(300)
+      .refine((u) => /^https:\/\/[^\s/?#]+(?::\d+)?(?:\/[^\s?#]*)?$/.test(u), "The GitLab address must start with https://")
+      .default("https://gitlab.com"),
+    /** Who the token belongs to, from the verification call. */
+    username: z.string().optional(),
+    userId: z.number().int().optional(),
+    allowed: ALLOWED_PATHS,
+    /** The secret token GitLab sends in X-Gitlab-Token with merge request events (POST /gitlab/webhook). */
+    webhookSecret: z.string().min(20).max(200).optional(),
+  })
+  .default({ baseUrl: "https://gitlab.com", allowed: [] });
+
+/** Bitbucket Cloud, so the team can work on bitbucket:workspace/repo repositories. */
+export const BitbucketConfigSchema = z
+  .object({
+    /**
+     * An Atlassian API token with Bitbucket scopes (used with `email`), or a
+     * workspace / repository access token (no email: sent as a Bearer token).
+     */
+    token: z.string().optional(),
+    /** The Atlassian account email an API token belongs to; empty for access tokens. */
+    email: z.string().max(200).optional(),
+    /** Who the token belongs to, from the verification call. */
+    username: z.string().optional(),
+    accountId: z.string().optional(),
+    allowed: ALLOWED_PATHS,
+    /** The secret Bitbucket signs webhook deliveries with (X-Hub-Signature, POST /bitbucket/webhook). */
+    webhookSecret: z.string().min(20).max(200).optional(),
+  })
+  .default({ allowed: [] });
+
+/** Jira project keys: an uppercase letter, then uppercase letters, digits or "_". */
+export const JIRA_KEY_RE = /^[A-Z][A-Z0-9_]{0,49}$/;
+
+/**
+ * A Jira project whose issues start repo tasks (see jira-automation.ts): an
+ * issue moved to `startStatus` is worked on in `repo`, and the team moves it
+ * through the workflow as the work goes (an empty status leaves it alone).
+ */
+export const JiraProjectAutomationSchema = z.object({
+  repo: z.string().regex(REPO_RE, "Repositories look like owner/repo, gitlab:group/project or bitbucket:workspace/repo"),
+  /** The status that starts a task, e.g. "Ready for dev". */
+  startStatus: z.string().trim().min(1).max(100),
+  workingStatus: z.string().trim().max(100).default("In Progress"),
+  reviewStatus: z.string().trim().max(100).default("In Review"),
+  doneStatus: z.string().trim().max(100).default("Done"),
+  stuckStatus: z.string().trim().max(100).default(""),
+});
+export type JiraProjectAutomation = z.infer<typeof JiraProjectAutomationSchema>;
+
+/** Jira Cloud (and Confluence on the same site), so Pointer can find, open and update issues and read pages. */
+export const JiraConfigSchema = z
+  .object({
+    /** https://your-site.atlassian.net */
+    siteUrl: z
+      .string()
+      .max(300)
+      .refine((u) => /^https:\/\/[^\s/?#]+$/.test(u), "The site address looks like https://your-site.atlassian.net")
+      .optional(),
+    /** The Atlassian account email the API token belongs to. */
+    email: z.string().max(200).optional(),
+    token: z.string().optional(),
+    /** Who the token belongs to, from the verification call. */
+    userName: z.string().optional(),
+    accountId: z.string().optional(),
+    /** Project new issues go to when the request does not name one. */
+    defaultProjectKey: z.string().regex(JIRA_KEY_RE).optional(),
+    /** Projects Pointer may read and write. Empty = every project the token can reach. */
+    allowedProjectKeys: z.array(z.string().regex(JIRA_KEY_RE)).max(200).default([]),
+    /** Confluence pages on the same site are readable too. */
+    confluence: z.boolean().default(true),
+    /** Issues that start repo tasks: the projects watched, and the secret in the webhook's URL. */
+    automation: z
+      .object({
+        enabled: z.boolean().default(false),
+        /** Part of the webhook URL (/jira/webhook/<secret>), and the secret Jira signs deliveries with when set there. */
+        webhookSecret: z.string().min(20).max(200).optional(),
+        /** The webhook in Jira has the secret, so every delivery must be signed with it (X-Hub-Signature). Absent = not known to. */
+        signed: z.boolean().optional(),
+        projects: z.record(z.string().regex(JIRA_KEY_RE), JiraProjectAutomationSchema).default({}),
+      })
+      .default({ enabled: false, projects: {} }),
+  })
+  .default({ allowedProjectKeys: [], confluence: true, automation: { enabled: false, projects: {} } });
+
+/** Miro boards ids look like "uXjVOabc123=". */
+export const MIRO_BOARD_ID_RE = /^[A-Za-z0-9_=-]{4,64}$/;
+
+/** Miro, so Pointer can read boards and add stickies, cards and diagrams. */
+export const MiroConfigSchema = z
+  .object({
+    /** An access token from a Miro app installed in the team (boards:read, boards:write). */
+    token: z.string().optional(),
+    userName: z.string().optional(),
+    teamName: z.string().optional(),
+    /** Board new content goes to when the request does not name one. */
+    defaultBoardId: z.string().regex(MIRO_BOARD_ID_RE).optional(),
+    /** Boards Pointer may read and write. Empty = every board the token can reach. */
+    allowedBoardIds: z.array(z.string().regex(MIRO_BOARD_ID_RE)).max(200).default([]),
+  })
+  .default({ allowedBoardIds: [] });
+
+/** App connection ids: "app-" and a slug. */
+export const APP_ID_RE = /^app-[a-z0-9][a-z0-9-]{1,40}$/;
+export const MAX_APPS = 40;
+/** HTTP header names an app connection may set. */
+export const APP_HEADER_RE = /^[A-Za-z0-9-]{1,100}$/;
+
+/** A tool an app's MCP server offers, as listed when the connection was last checked. */
+export const AppToolSchema = z.object({
+  name: z.string().min(1).max(128),
+  description: z.string().max(2000).default(""),
+  /** The server marks it read-only (MCP readOnlyHint). */
+  readOnly: z.boolean().default(false),
+});
+export type AppTool = z.infer<typeof AppToolSchema>;
+
+/** OAuth state for an app whose MCP server signs in with OAuth (MCP authorization spec). */
+export const AppOAuthSchema = z.object({
+  /** Client registration (dynamic registration, or entered by hand), as the MCP SDK returns it. */
+  clientInformation: z.record(z.string(), z.unknown()).optional(),
+  /** Tokens as the MCP SDK returns them, with when the access token expires (ms since epoch). */
+  tokens: z.record(z.string(), z.unknown()).optional(),
+  expiresAt: z.number().optional(),
+  /** Between starting the sign-in and the callback. */
+  codeVerifier: z.string().max(200).optional(),
+  state: z.string().max(200).optional(),
+  /** The authorization server metadata discovered for this app, cached. */
+  serverMetadata: z.record(z.string(), z.unknown()).optional(),
+});
+
+export const AppAuthSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("none") }),
+  /** Sent as "Authorization: Bearer <token>". */
+  z.object({ type: z.literal("bearer"), token: z.string().min(1).max(10_000) }),
+  /** Custom headers (e.g. "X-API-Key"); values are secrets. */
+  z.object({
+    type: z.literal("headers"),
+    headers: z
+      .record(z.string().regex(APP_HEADER_RE), z.string().max(10_000))
+      .refine((h) => Object.keys(h).length <= 10, "At most 10 headers"),
+  }),
+  z.object({ type: z.literal("oauth"), oauth: AppOAuthSchema.default({}) }),
+]);
+export type AppAuth = z.infer<typeof AppAuthSchema>;
+
+/**
+ * An app connected through its remote MCP server (see apps.ts): Linear,
+ * Notion, Sentry, Stripe, Zapier… Pointer uses it in chat; the agents listed
+ * in `agentIds` use it in repo tasks too.
+ */
+export const AppConnectionSchema = z.object({
+  id: z.string().regex(APP_ID_RE),
+  name: z.string().trim().min(1).max(60),
+  /** The catalog entry it was added from (apps-catalog.ts); absent for a custom app. */
+  presetId: z.string().max(60).optional(),
+  url: z
+    .string()
+    .max(500)
+    .refine((u) => /^https:\/\/[^\s]+$/.test(u), "The MCP server address must start with https://"),
+  transport: z.enum(["http", "sse"]).default("http"),
+  auth: AppAuthSchema.default({ type: "none" }),
+  /** read: only the tools the server marks read-only; write: every tool. disabledTools are never offered. */
+  access: z.enum(["read", "write"]).default("read"),
+  disabledTools: z.array(z.string().max(128)).max(500).default([]),
+  /** The server's tools when the connection was last checked. */
+  tools: z.array(AppToolSchema).max(500).default([]),
+  checkedAt: z.string().optional(),
+  /** Team agents that may use it (chat and repo tasks); Pointer always may while it is enabled. */
+  agentIds: z.array(z.string().max(31)).max(30).default([]),
+  enabled: z.boolean().default(true),
+});
+export type AppConnection = z.infer<typeof AppConnectionSchema>;
+
 export const ConfigSchema = z.object({
   orgName: z.string().default(""),
   adminPasswordHash: z.string().optional(),
@@ -148,6 +337,12 @@ export const ConfigSchema = z.object({
         .default({ enabled: false, boards: {} }),
     })
     .default({ allowedBoardIds: [], automation: { enabled: false, boards: {} } }),
+  gitlab: GitLabConfigSchema,
+  bitbucket: BitbucketConfigSchema,
+  jira: JiraConfigSchema,
+  miro: MiroConfigSchema,
+  /** Apps connected through their MCP servers. */
+  apps: z.array(AppConnectionSchema).max(MAX_APPS).default([]),
   /** Slack channel ID -> "owner/repo" default project for that channel. */
   bindings: z.record(z.string(), z.string().regex(REPO_RE)).default({}),
   limits: z
@@ -281,6 +476,69 @@ export function publicView(c: Config) {
         boards: c.monday.automation.boards,
       },
     },
+    gitlab: {
+      connected: Boolean(c.gitlab.token),
+      baseUrl: c.gitlab.baseUrl,
+      username: c.gitlab.username ?? null,
+      key: mask(c.gitlab.token),
+      allowed: c.gitlab.allowed,
+      webhook: { configured: Boolean(c.gitlab.webhookSecret) },
+    },
+    bitbucket: {
+      connected: Boolean(c.bitbucket.token),
+      username: c.bitbucket.username ?? null,
+      /** "api-token" (with an Atlassian account email) or "access-token" (a workspace or repository token). */
+      tokenKind: c.bitbucket.email ? ("api-token" as const) : ("access-token" as const),
+      key: mask(c.bitbucket.token),
+      allowed: c.bitbucket.allowed,
+      webhook: { configured: Boolean(c.bitbucket.webhookSecret) },
+    },
+    jira: {
+      connected: Boolean(c.jira.token && c.jira.siteUrl && c.jira.email),
+      siteUrl: c.jira.siteUrl ?? null,
+      email: c.jira.email ?? null,
+      userName: c.jira.userName ?? null,
+      key: mask(c.jira.token),
+      defaultProjectKey: c.jira.defaultProjectKey ?? null,
+      allowedProjectKeys: c.jira.allowedProjectKeys,
+      confluence: c.jira.confluence,
+      automation: {
+        enabled: c.jira.automation.enabled,
+        webhookConfigured: Boolean(c.jira.automation.webhookSecret),
+        signed: c.jira.automation.signed === true,
+        projects: c.jira.automation.projects,
+      },
+    },
+    miro: {
+      connected: Boolean(c.miro.token),
+      userName: c.miro.userName ?? null,
+      teamName: c.miro.teamName ?? null,
+      key: mask(c.miro.token),
+      defaultBoardId: c.miro.defaultBoardId ?? null,
+      allowedBoardIds: c.miro.allowedBoardIds,
+    },
+    /** Without credentials: the kind of sign-in, whether it is signed in, and header names only. */
+    apps: c.apps.map((a) => ({
+      id: a.id,
+      name: a.name,
+      presetId: a.presetId ?? null,
+      url: a.url,
+      transport: a.transport,
+      auth:
+        a.auth.type === "oauth"
+          ? { type: "oauth" as const, signedIn: Boolean(a.auth.oauth.tokens) }
+          : a.auth.type === "headers"
+            ? { type: "headers" as const, headerNames: Object.keys(a.auth.headers).sort() }
+            : a.auth.type === "bearer"
+              ? { type: "bearer" as const, key: mask(a.auth.token) }
+              : { type: "none" as const },
+      access: a.access,
+      disabledTools: a.disabledTools,
+      tools: a.tools,
+      checkedAt: a.checkedAt ?? null,
+      agentIds: a.agentIds,
+      enabled: a.enabled,
+    })),
     budget: c.budget,
     bindings: c.bindings,
     limits: c.limits,
@@ -288,9 +546,55 @@ export function publicView(c: Config) {
   };
 }
 
-/** Everything connected: Claude, Slack and GitHub. Drives the admin page badge and repo tasks. */
+/** At least one code host (GitHub, GitLab or Bitbucket) is connected, so repo tasks can run. */
+export function hasCodeHost(c: Config): boolean {
+  return Boolean(c.github.token || c.github.extra.length > 0 || c.gitlab.token || c.bitbucket.token);
+}
+
+/** Everything connected: Claude, Slack and a code host. Drives the admin page badge and repo tasks. */
 export function isReady(c: Config): boolean {
-  return Boolean(c.anthropic.apiKey && c.slack.botToken && c.slack.signingSecret && (c.github.token || c.github.extra.length > 0));
+  return Boolean(c.anthropic.apiKey && c.slack.botToken && c.slack.signingSecret && hasCodeHost(c));
+}
+
+/**
+ * The credentials of the integrations beyond Claude, Slack, GitHub and
+ * monday.com (GitLab, Bitbucket, Jira, Miro, apps), for redaction. Includes
+ * the forms they are sent in (Basic auth values) where those differ.
+ */
+export function integrationSecrets(c: Config): string[] {
+  const basic = (user: string | undefined, token: string | undefined) =>
+    user && token ? [Buffer.from(`${user}:${token}`).toString("base64")] : [];
+  const appSecrets = c.apps.flatMap((a): unknown[] => {
+    switch (a.auth.type) {
+      case "bearer":
+        return [a.auth.token];
+      case "headers":
+        // The whole value, and the key inside a templated one ("Token token=<key>", "ApiKey <key>").
+        return Object.values(a.auth.headers).flatMap((v) => [v, ...v.split(/[\s=]+/).filter((part) => part.length >= 12)]);
+      case "oauth": {
+        const t = a.auth.oauth.tokens ?? {};
+        const client = a.auth.oauth.clientInformation ?? {};
+        return [t.access_token, t.refresh_token, t.id_token, client.client_secret];
+      }
+      default:
+        return [];
+    }
+  });
+  return [
+    c.gitlab.token,
+    c.gitlab.webhookSecret,
+    c.bitbucket.token,
+    c.bitbucket.webhookSecret,
+    ...basic(c.bitbucket.email, c.bitbucket.token),
+    ...basic("x-bitbucket-api-token-auth", c.bitbucket.token),
+    ...basic("x-token-auth", c.bitbucket.token),
+    ...basic("oauth2", c.gitlab.token),
+    c.jira.token,
+    c.jira.automation.webhookSecret,
+    ...basic(c.jira.email, c.jira.token),
+    c.miro.token,
+    ...appSecrets,
+  ].filter((x): x is string => typeof x === "string" && x.length > 0);
 }
 
 /** Enough for Pointer to chat: Claude and Slack. GitHub tools and repo tasks report when GitHub is missing. */

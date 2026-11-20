@@ -24,6 +24,7 @@ import {
 } from "@heroicons/react/24/outline";
 import type { ComponentType } from "react";
 import { api } from "./lib/api";
+import { hasCodeHost } from "./pages/integrations/catalog";
 import { type Page, href, useRoute } from "./lib/router";
 import { useAppState } from "./lib/state";
 import type { PublicConfig } from "./lib/types";
@@ -64,9 +65,9 @@ const NAV: { page: Page; label: string; icon: typeof Squares2X2Icon }[] = [
   { page: "memory", label: "Memory", icon: LightBulbIcon },
 ];
 
-/** How many of the core integrations (Claude, Slack, GitHub) still need connecting. */
+/** How many of the core integrations (Claude, Slack, a code host) still need connecting. */
 function missingIntegrations(config: PublicConfig): number {
-  return [config.anthropic.connected, config.slack.connected, config.github.connected || config.github.extra.length > 0].filter((c) => !c).length;
+  return [config.anthropic.connected, config.slack.connected, hasCodeHost(config)].filter((c) => !c).length;
 }
 
 export function App() {
@@ -126,7 +127,7 @@ function Console({ config }: { config: PublicConfig }) {
                 isSelected={route.page === item.page}
                 endContent={
                   item.page === "integrations" && missing > 0 ? (
-                    <StatusDot variant="warning" label={`${missing} to connect`} tooltip={`${missing} of Claude, Slack and GitHub still to connect`} />
+                    <StatusDot variant="warning" label={`${missing} to connect`} tooltip={`${missing} of Claude, Slack and a code host still to connect`} />
                   ) : undefined
                 }
               />

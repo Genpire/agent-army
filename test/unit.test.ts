@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parseReport } from "../src/agents.js";
-import { ConfigRepo, publicView } from "../src/config.js";
+import { ConfigRepo, ConfigSchema, publicView } from "../src/config.js";
 import { decrypt, deriveKey, encrypt, hashPassword, signSession, verifyPassword, verifySession } from "../src/crypto.js";
 import { checkBashCommand } from "../src/guard.js";
 import { ATTACHMENT_LIMITS } from "../src/attachments.js";
@@ -19,9 +19,17 @@ import {
   verifySlackSignature,
 } from "../src/slack.js";
 import { FsStore } from "../src/store.js";
-import { decodeTaskPayload, encodeTaskPayload, newTaskId } from "../src/tasks.js";
+import { type Conversation, pendingMilestones, taskResultMarkdown } from "../src/conversations.js";
+import { type Task, decodeTaskPayload, encodeTaskPayload, newTaskId } from "../src/tasks.js";
+import { GITHUB_REPO_RE, REPO_FORMAT_HINT, REPO_RE } from "../src/repo-id.js";
 import { helpText, isRepoAllowed, messageText, parseCommand, repoFromToken, resolveRepo } from "../src/targeting.js";
 import { branchName, makeRedactor } from "../src/worker.js";
+import {
+  GITHUB_REPO_RE as WEB_GITHUB_REPO_RE,
+  REPO_ERROR,
+  REPO_RE as WEB_REPO_RE,
+  allowListRepos,
+} from "../web/src/pages/projects/validation.js";
 
 describe("targeting", () => {
   it("parses commands, with or without a mention", () => {
@@ -52,6 +60,29 @@ describe("targeting", () => {
     expect(repoFromToken("https://github.com/acme/web/pull/3")).toBe("acme/web");
     expect(repoFromToken("nonsense")).toBeNull();
   });
+  it("reads GitLab and Bitbucket ids and URLs, a self-managed GitLab's included", () => {
+    expect(repoFromToken("gitlab:acme/platform/web")).toBe("gitlab:acme/platform/web");
+    expect(repoFromToken("bitbucket:acme-ws/api.")).toBe("bitbucket:acme-ws/api");
+    expect(repoFromToken("https://gitlab.com/acme/platform/web/-/merge_requests/3")).toBe("gitlab:acme/platform/web");
+    expect(repoFromToken("https://bitbucket.org/acme-ws/api/pull-requests/4")).toBe("bitbucket:acme-ws/api");
+    expect(repoFromToken("https://git.acme.test/acme/web")).toBeNull();
+    expect(repoFromToken("https://git.acme.test/acme/web", "https://git.acme.test")).toBe("gitlab:acme/web");
+    expect(repoFromToken("https://git.acme.test/gitlab/acme/web/-/tree/main", "https://git.acme.test/gitlab")).toBe("gitlab:acme/web");
+    expect(repoFromToken("https://git.acme.test:8443/acme/web", "https://git.acme.test:8443")).toBe("gitlab:acme/web");
+    expect(repoFromToken("https://gitlab.com/acme/web", "https://git.acme.test")).toBe("gitlab:acme/web");
+    expect(repoFromToken("gitlab:acme")).toBeNull();
+    expect(repoFromToken("gitlab:acme/../web")).toBeNull();
+    expect(repoFromToken("bitbucket:acme/web/extra")).toBeNull();
+  });
+  it("binds GitLab and Bitbucket repositories by id or link", () => {
+    expect(parseCommand("<@U1> bind gitlab:acme/platform/web")).toEqual({ kind: "bind", repo: "gitlab:acme/platform/web" });
+    expect(parseCommand("bind bitbucket:acme-ws/api")).toEqual({ kind: "bind", repo: "bitbucket:acme-ws/api" });
+    expect(parseCommand("bind <https://gitlab.com/acme/web|gitlab.com/acme/web>")).toEqual({ kind: "bind", repo: "gitlab:acme/web" });
+    expect(parseCommand("bind <https://bitbucket.org/acme-ws/api/src/main/|bitbucket.org/acme-ws/api>")).toEqual({ kind: "bind", repo: "bitbucket:acme-ws/api" });
+    expect(parseCommand("bind <https://git.acme.test/acme/web>", "https://git.acme.test")).toEqual({ kind: "bind", repo: "gitlab:acme/web" });
+    expect(parseCommand("bind <https://git.acme.test/acme/web>")).toBeNull();
+    expect(parseCommand("bind gitlab:acme")).toBeNull();
+  });
   it("keeps other people's mentions in the text for Pointer", () => {
     expect(messageText("<@UBOT> ask <@U2> about <https://x.y/a|the doc>", "UBOT")).toBe("ask <@U2> about https://x.y/a");
     expect(messageText("<@UBOT>", "UBOT")).toBe("");
@@ -61,6 +92,42 @@ describe("targeting", () => {
     expect(help).toContain("Pointer");
     for (const cmd of ["bind owner/repo", "unbind", "status", "listen here", "stop listening"]) expect(help).toContain(cmd);
     expect(help).toMatch(/pull request/i);
+    expect(help).toContain("bind gitlab:group/project");
+    expect(help).toContain("bind bitbucket:workspace/repo");
+  });
+  it("checks repositories in the console the way the server does", () => {
+    const ids = [
+      "acme/web",
+      "Acme/web.app",
+      "gitlab:acme/web",
+      "gitlab:acme/platform/team/web",
+      "bitbucket:acme-ws/api",
+      "acme",
+      "acme/web/x",
+      "../x",
+      "acme/..",
+      "gitlab:acme",
+      "gitlab:acme/../web",
+      "bitbucket:acme/api/x",
+      "github:acme/web",
+      "GitLab:acme/web",
+      "gitlab:acme/~web",
+    ];
+    for (const id of ids) {
+      expect(WEB_REPO_RE.test(id), id).toBe(REPO_RE.test(id));
+      expect(WEB_GITHUB_REPO_RE.test(id), id).toBe(GITHUB_REPO_RE.test(id));
+    }
+    expect(REPO_ERROR).toBe(REPO_FORMAT_HINT);
+  });
+  it("suggests the exact repositories of every code host's allow list", () => {
+    const view = publicView(
+      ConfigSchema.parse({
+        github: { token: "t", allowedOwners: ["acme", "acme/web"], extra: [{ id: "gh-abc123", token: "ghp_extra_connection_0000000000", allowed: ["Partner-Co/Acme"] }] },
+        gitlab: { token: "t", allowed: ["acme", "acme/platform/web"] },
+        bitbucket: { token: "t", allowed: ["acme-ws", "acme-ws/api"] },
+      }),
+    );
+    expect(allowListRepos(view)).toEqual(["acme/web", "Partner-Co/Acme", "gitlab:acme/platform/web", "bitbucket:acme-ws/api"]);
   });
   it("resolves precedence: explicit > thread > channel", () => {
     expect(resolveRepo({ override: "a/a", threadRepo: "b/b", channelRepo: "c/c" })).toBe("a/a");
@@ -471,5 +538,59 @@ describe("worker helpers", () => {
   it("parses the team's report with a fallback", () => {
     expect(parseReport({ kind: "change", title: "t", summary: "s", verification: "v", risks: "" }, "x").kind).toBe("change");
     expect(parseReport(undefined, "plain answer")).toMatchObject({ kind: "answer", summary: "plain answer" });
+  });
+});
+
+describe("console milestones on any code host", () => {
+  const task = (repo: string, prUrl: string, over: Partial<Task> = {}): Task => ({
+    id: "t-0001",
+    createdAt: "2026-11-19T10:00:00Z",
+    updatedAt: "2026-11-19T10:30:00Z",
+    status: "done",
+    repo,
+    channel: "web",
+    threadTs: "c-1",
+    userId: "admin",
+    instruction: "Collapse the sidebar",
+    kind: "change",
+    prUrl,
+    report: { title: "Collapse the sidebar", summary: "Done.", verification: "", risks: "" },
+    ...over,
+  });
+  const conversation = (t: Task): Conversation => ({
+    id: "c-1",
+    title: "Sidebar",
+    createdAt: t.createdAt,
+    updatedAt: t.updatedAt,
+    pending: false,
+    messages: [],
+    taskIds: [t.id],
+  });
+
+  it("links GitHub pull requests as before", () => {
+    const t = task("acme/web", "https://github.com/acme/web/pull/3");
+    expect(taskResultMarkdown(t)).toContain("— [review the pull request](https://github.com/acme/web/pull/3)");
+    const running = task("acme/web", "https://github.com/acme/web/pull/3", { status: "running", fixRound: { round: 1, rounds: 2, failing: ["test"], at: t.updatedAt } });
+    const texts = pendingMilestones(conversation(running), [running]).map((m) => m.text);
+    expect(texts).toEqual([
+      "Opened [pull request #3](https://github.com/acme/web/pull/3): **Collapse the sidebar**. Waiting for its checks…",
+      "The pull request's checks failed: test. The team is fixing them (round 1 of 2)…",
+    ]);
+  });
+
+  it("calls GitLab's a merge request with its !number, and reads Bitbucket's number", () => {
+    const mr = "https://gitlab.example.com/acme/web/-/merge_requests/12";
+    expect(taskResultMarkdown(task("gitlab:acme/web", mr))).toContain(`— [review the merge request](${mr})`);
+    const stopped = task("gitlab:acme/web", mr, { status: "failed", error: "Timed out.", prDraft: true });
+    expect(taskResultMarkdown(stopped)).toContain(`saved in a draft merge request: [!12](${mr})`);
+    const running = task("gitlab:acme/web", mr, { status: "running", fixRound: { round: 1, rounds: 2, failing: ["test"], at: "2026-11-19T10:30:00Z" } });
+    expect(pendingMilestones(conversation(running), [running]).map((m) => m.text)).toEqual([
+      `Opened [merge request !12](${mr}): **Collapse the sidebar**. Waiting for its checks…`,
+      "The merge request's checks failed: test. The team is fixing them (round 1 of 2)…",
+    ]);
+
+    const pr = "https://bitbucket.org/acme/web/pull-requests/5";
+    const bb = task("bitbucket:acme/web", pr, { status: "running" });
+    expect(pendingMilestones(conversation(bb), [bb])[0]!.text).toContain(`Opened [pull request #5](${pr})`);
   });
 });

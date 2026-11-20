@@ -445,14 +445,14 @@ describe("monday.com automation routes", () => {
 
     expect(await error({ boards: { [BOARD]: AUTOMATION } })).toEqual({ status: 400, error: `Board ${BOARD} is not one of the boards Pointer may use. Add it under Boards first.` });
     expect((await post("/api/monday", { allowedBoardIds: [] })).status).toBe(200);
-    expect(await error({ boards: { [BOARD]: AUTOMATION } })).toEqual({ status: 400, error: "Connect GitHub first: tickets become repo tasks that open pull requests." });
+    expect(await error({ boards: { [BOARD]: AUTOMATION } })).toEqual({ status: 400, error: "GitHub is not connected. Ask the owner to connect it on the admin page." });
     expect((await post("/api/github", { token: "github_pat_0123456789abcdefghij", allowedOwners: ["acme"] })).status).toBe(200);
     expect(await error({ boards: { [BOARD]: { ...AUTOMATION, repo: "other/web" } } })).toEqual({
       status: 400,
-      error: "No GitHub connection may work on other/web. Allowed owners and repositories: acme.",
+      error: "Not allowed to work on other/web. Allowed on GitHub: acme.",
     });
     expect(await error({ boards: { abc: AUTOMATION } })).toEqual({ status: 400, error: '"abc" is not a board id. Board ids are numbers, like 1234567890.' });
-    expect(await error({ boards: { [BOARD]: { ...AUTOMATION, repo: "nope" } } })).toEqual({ status: 400, error: `Board ${BOARD}: Repos look like owner/repo.` });
+    expect(await error({ boards: { [BOARD]: { ...AUTOMATION, repo: "nope" } } })).toEqual({ status: 400, error: `Board ${BOARD}: Repositories look like owner/repo (GitHub), gitlab:group/project or bitbucket:workspace/repo.` });
     expect(await error({ boards: { [BOARD]: { ...AUTOMATION, startLabel: " " } } })).toEqual({ status: 400, error: `Board ${BOARD}: Choose the status that starts a task.` });
     expect(await error({ boards: { [BOARD]: { ...AUTOMATION, doneLabel: "Ready for dev" } } })).toMatchObject({ status: 400, error: expect.stringMatching(/also the done label/) });
 

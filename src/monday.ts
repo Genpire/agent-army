@@ -88,7 +88,7 @@ function formatError(e: ErrorSummary): string {
 const errMessage = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
 /** monday.com update bodies are HTML: escape the text and keep its line breaks. */
-function textToHtml(text: string): string {
+export function textToHtml(text: string): string {
   return text
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
@@ -100,7 +100,7 @@ function textToHtml(text: string): string {
 const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
 
 /** Plain text from an update's HTML body; used when monday.com returns no `text_body`. */
-function htmlToText(html: string): string {
+export function htmlToText(html: string): string {
   return html
     .replace(/\r\n?/g, "\n")
     .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, "")

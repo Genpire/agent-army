@@ -3,39 +3,51 @@ import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { strToU8, zipSync } from "fflate";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { REPORT_SCHEMA, type SharedFile, orchestratorPrompt, parseReport } from "../src/agents.js";
+import { REPORT_SCHEMA, type Report, type SharedFile, orchestratorPrompt, parseReport } from "../src/agents.js";
 import { type AttachmentInfo, AttachmentRepo } from "../src/attachments.js";
+import type { CodeHost, HostViewer } from "../src/code-host.js";
 import { type Config, ConfigSchema } from "../src/config.js";
 import { deriveKey } from "../src/crypto.js";
 import { NOTES_MAX_CHARS, NotesRepo } from "../src/notes.js";
+import { type CodeHostKind, repoPath } from "../src/repo-id.js";
 import { FsStore } from "../src/store.js";
 import { REPO_RULES, type AgentSpec, defaultTeam, rosterText } from "../src/team.js";
-import { GitHub } from "../src/github.js";
+import { type CheckInfo, GitHub, type PrRef, type StatusInfo } from "../src/github.js";
 import { BROWSER_SERVER, BROWSER_TOOLS, browserServer } from "../src/browser.js";
 import type { PlanItem } from "../src/progress.js";
-import type { ThreadState } from "../src/tasks.js";
+import type { Task, ThreadState } from "../src/tasks.js";
 import {
+  type ExecFile,
   FALLBACK_COMMIT_EMAIL,
   FIX_RUN_MAX_MS,
+  type FollowChecksDeps,
+  type GitRun,
+  checkoutRepo,
   commitIdentity,
   configSecrets,
   draftPrBody,
   firstRunTimeoutMs,
   fixComment,
   fixRunTimeoutMs,
+  followPrChecks,
+  gitRunner,
   jobDeadline,
   makeRedactor,
   materializeAttachments,
   notesToSave,
   planChecklist,
   prFooter,
+  prLabel,
+  prRef,
+  publishPr,
+  resultHeadline,
   saveProjectNotes,
+  saveUnfinishedPr,
   screenshotFailureLine,
   screenshotsSection,
   stoppedComment,
   stoppedSlackText,
   subagentLabel,
-  taskGitHubToken,
   taskPrompt,
   taskTimeoutMin,
   teamQueryOptions,
@@ -544,7 +556,7 @@ describe("shared files in the orchestrator prompt", () => {
   });
 });
 
-describe("GitHub connection for a task", () => {
+describe("code host credentials in the config", () => {
   const PRIMARY = "github_pat_primary_0000000000000";
   const EXTRA = "ghp_extra_connection_000000000000";
   const withExtra = () =>
@@ -552,30 +564,9 @@ describe("GitHub connection for a task", () => {
       github: {
         token: PRIMARY,
         allowedOwners: ["Acme"],
-        extra: [{ id: "gh-abc123", token: EXTRA, login: "shosh", allowed: ["Partner-Co/Acme"] }],
+        extra: [{ id: "gh-abc123", token: EXTRA, login: "octo-dev", allowed: ["Partner-Co/Acme"] }],
       },
     });
-
-  it("uses the primary token when it is the only connection, as before", () => {
-    const config = ConfigSchema.parse({ github: { token: PRIMARY, allowedOwners: ["Acme"] } });
-    expect(taskGitHubToken(config, "Acme/acme-platform")).toEqual({ ok: true, token: PRIMARY });
-    expect(taskGitHubToken(config, "acme/web")).toEqual({ ok: true, token: PRIMARY });
-    const open = ConfigSchema.parse({ github: { token: PRIMARY } });
-    expect(taskGitHubToken(open, "anyone/thing")).toEqual({ ok: true, token: PRIMARY });
-  });
-
-  it("uses the extra connection's token for the repository it covers", () => {
-    const config = withExtra();
-    expect(taskGitHubToken(config, "Partner-Co/Acme")).toEqual({ ok: true, token: EXTRA });
-    expect(taskGitHubToken(config, "partner-co/acme")).toEqual({ ok: true, token: EXTRA });
-    expect(taskGitHubToken(config, "Acme/web")).toEqual({ ok: true, token: PRIMARY });
-  });
-
-  it("refuses a repository no connection is allowed to work on, with a clear message", () => {
-    const expected = { ok: false, error: "No GitHub connection is allowed to work on Partner-Co/other; add one on the admin page." };
-    expect(taskGitHubToken(withExtra(), "Partner-Co/other")).toEqual(expected);
-    expect(taskGitHubToken(ConfigSchema.parse({}), "Partner-Co/other")).toEqual(expected);
-  });
 
   it("redacts every credential in the config, including every GitHub token and its git header", () => {
     const config = withExtra();
@@ -601,6 +592,23 @@ describe("GitHub connection for a task", () => {
     // An empty config has nothing to redact and leaves text alone.
     expect(makeRedactor(configSecrets(ConfigSchema.parse({})))("plain text")).toBe("plain text");
   });
+
+  it("redacts the GitLab and Bitbucket tokens in every form their clients send them", () => {
+    const config = withExtra();
+    config.gitlab.token = "glpat-secret-gitlab-token-000";
+    config.bitbucket.token = "ATATT-secret-bitbucket-token-000";
+    config.bitbucket.email = "octo-dev@example.com";
+    const basic = (user: string, token: string) => Buffer.from(`${user}:${token}`).toString("base64");
+    const leaked = [
+      config.gitlab.token,
+      basic("oauth2", config.gitlab.token),
+      config.bitbucket.token,
+      basic("octo-dev@example.com", config.bitbucket.token),
+      basic("x-token-auth", config.bitbucket.token),
+    ];
+    const text = makeRedactor(configSecrets(config))(`fatal: ${leaked.join(" | ")}`);
+    for (const secret of leaked) expect(text).not.toContain(secret);
+  });
 });
 
 describe("commitIdentity", () => {
@@ -616,6 +624,302 @@ describe("commitIdentity", () => {
       expect(commitIdentity("Pointer", viewer)).toEqual({ name: "Pointer", email: FALLBACK_COMMIT_EMAIL });
     }
     expect(FALLBACK_COMMIT_EMAIL).not.toContain("users.noreply.github.com");
+  });
+
+  it("is the GitHub client's own identity, also for a string id (another host's viewer)", () => {
+    const github = new GitHub("ghp_identity_token_000000");
+    expect(github.commitIdentity("Pointer", { id: 1234567, login: "octo-dev" })).toEqual(commitIdentity("Pointer", { id: 1234567, login: "octo-dev" }));
+    expect(commitIdentity("Pointer", { id: "1234567", login: "octo-dev" })).toEqual({ name: "Pointer", email: FALLBACK_COMMIT_EMAIL });
+  });
+});
+
+// ---------- The repo task on any code host, through a fake CodeHost ----------
+
+const HOST_TOKEN = "glpat-fake-host-token-0123456789";
+const HOST_HEADER = `Authorization: Basic ${Buffer.from(`oauth2:${HOST_TOKEN}`).toString("base64")}`;
+const MR_URL = "https://gitlab.example.com/acme/web/-/merge_requests/12";
+const notUsed = (what: string) => vi.fn(async (): Promise<never> => {
+  throw new Error(`${what} is not used here`);
+});
+
+/** A GitLab-like code host whose every call is recorded. */
+function fakeHost(kind: CodeHostKind = "gitlab") {
+  return {
+    kind,
+    cloneUrl: vi.fn((repo: string) => `https://gitlab.example.com/${repoPath(repo)}.git`),
+    gitAuthArgs: vi.fn(() => ["-c", `http.https://gitlab.example.com/.extraheader=${HOST_HEADER}`]),
+    secrets: vi.fn(() => [HOST_TOKEN, HOST_HEADER, HOST_HEADER.split(" ").pop()!]),
+    viewer: vi.fn(async (): Promise<HostViewer> => ({ id: 42, login: "octo-dev", email: "octo-dev@example.com" })),
+    commitIdentity: vi.fn((name: string, viewer: HostViewer | undefined) =>
+      viewer?.email ? { name: `${name} (via ${viewer.login})`, email: viewer.email } : { name, email: FALLBACK_COMMIT_EMAIL },
+    ),
+    defaultBranch: vi.fn(async (_repo: string) => "main"),
+    findOpenPr: vi.fn(async (_repo: string, _branch: string): Promise<PrRef | null> => null),
+    createPr: vi.fn(
+      async (_repo: string, o: { title: string; body: string; head: string; base: string; draft?: boolean }): Promise<PrRef> => ({
+        number: 12,
+        html_url: MR_URL,
+        node_id: "",
+        draft: Boolean(o.draft),
+      }),
+    ),
+    commentOnPr: vi.fn(async (_repo: string, _number: number, _body: string) => {}),
+    updatePr: vi.fn(async (_repo: string, _number: number, _patch: { title?: string; body?: string }) => {}),
+    markReady: vi.fn(async (_repo: string, _pr: PrRef) => {}),
+    getPull: notUsed("getPull"),
+    prFeedback: vi.fn(async () => []),
+    issueComments: vi.fn(async () => []),
+    prWebUrl: vi.fn((_repo: string, n: number) => `https://gitlab.example.com/acme/web/-/merge_requests/${n}`),
+    checksFor: vi.fn(async (_repo: string, _sha: string): Promise<{ checks: CheckInfo[]; statuses: StatusInfo[] }> => ({ checks: [], statuses: [] })),
+    checkAnnotations: vi.fn(async (_repo: string, _check: CheckInfo) => [{ path: "src/app.ts", startLine: 3, level: "failure", title: null, message: "Expected 2" }]),
+    jobLog: vi.fn(async (_repo: string, _check: CheckInfo): Promise<string | undefined> => undefined),
+    deploymentsFor: vi.fn(async () => []),
+    deploymentStatuses: vi.fn(async () => []),
+    listRepos: notUsed("listRepos"),
+    recentCommits: notUsed("recentCommits"),
+    listPulls: notUsed("listPulls"),
+    listIssues: notUsed("listIssues"),
+    readFile: notUsed("readFile"),
+    searchCode: notUsed("searchCode"),
+  } satisfies CodeHost;
+}
+
+describe("git through the code host", () => {
+  it("clones with the host's URL and auth arguments, only on commands that need them, and authors commits as the host says", async () => {
+    const host = fakeHost();
+    const calls: { args: string[]; cwd: string; prompt?: string }[] = [];
+    const run: ExecFile = async (_file, args, opts) => {
+      calls.push({ args, cwd: opts.cwd, prompt: opts.env.GIT_TERMINAL_PROMPT });
+      return { stdout: "\n" };
+    };
+    const git = gitRunner({ host, cwd: "/work/repo", redact: makeRedactor(host.secrets()), run });
+    const out = await checkoutRepo({ host, repo: "gitlab:acme/platform/web", dir: "/work/repo", workRoot: "/work", git, pointerName: "Pointer", redact: (t) => t });
+
+    expect(out).toEqual({ base: "main", author: { name: "Pointer (via octo-dev)", email: "octo-dev@example.com" } });
+    expect(calls[0]).toEqual({
+      args: [
+        "-c",
+        `http.https://gitlab.example.com/.extraheader=${HOST_HEADER}`,
+        "clone",
+        "--depth",
+        "50",
+        "--no-tags",
+        "https://gitlab.example.com/acme/platform/web.git",
+        "/work/repo",
+      ],
+      cwd: "/work",
+      prompt: "0",
+    });
+    // Only the clone carries the credentials; nothing is written into .git/config.
+    expect(calls.slice(1).map((c) => c.args)).toEqual([
+      ["config", "user.name", "Pointer (via octo-dev)"],
+      ["config", "user.email", "octo-dev@example.com"],
+    ]);
+    expect(calls.slice(1).every((c) => c.cwd === "/work/repo")).toBe(true);
+    expect(host.defaultBranch).toHaveBeenCalledWith("gitlab:acme/platform/web");
+  });
+
+  it("refuses a clone URL that carries credentials or is not https, before running git", async () => {
+    for (const url of [`https://oauth2:${HOST_TOKEN}@gitlab.example.com/acme/web.git`, "http://gitlab.example.com/acme/web.git", "ext::sh -c touch% /tmp/x"]) {
+      const host = fakeHost();
+      host.cloneUrl.mockReturnValue(url);
+      const git = vi.fn(async () => "");
+      const err = await checkoutRepo({ host, repo: "gitlab:acme/web", dir: "/w/repo", workRoot: "/w", git, pointerName: "Pointer", redact: (t) => t }).catch(
+        (e: Error) => e,
+      );
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).not.toContain(HOST_TOKEN);
+      expect(git).not.toHaveBeenCalled();
+    }
+  });
+
+  it("authors commits with the host's fallback when the token owner cannot be looked up", async () => {
+    const host = fakeHost();
+    host.viewer.mockRejectedValue(new Error(`GitLab GET /user failed (HTTP 401): ${HOST_TOKEN}`));
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const git = vi.fn(async (_args: string[]) => "");
+    const out = await checkoutRepo({ host, repo: "gitlab:acme/web", dir: "/w/repo", workRoot: "/w", git, pointerName: "Pointer", redact: makeRedactor(host.secrets()) });
+    expect(out.author).toEqual({ name: "Pointer", email: FALLBACK_COMMIT_EMAIL });
+    expect(JSON.stringify(errors.mock.calls)).not.toContain(HOST_TOKEN);
+    errors.mockRestore();
+  });
+
+  it("redacts the host's credentials from git errors, even with a redactor that does not know them", async () => {
+    const host = fakeHost();
+    const run: ExecFile = async (_file, args) => {
+      throw Object.assign(new Error(`Command failed: git ${args.join(" ")}`), { stderr: "" });
+    };
+    for (const redact of [makeRedactor(host.secrets()), (t: string) => t]) {
+      const git = gitRunner({ host, cwd: "/w/repo", redact, run });
+      const err = (await git(["push", "origin", "HEAD:refs/heads/army/x"], { auth: true }).catch((e: Error) => e)) as Error;
+      expect(err.message).toMatch(/^git push failed: Command failed: git /);
+      for (const secret of [HOST_TOKEN, HOST_HEADER, HOST_HEADER.split(" ").pop()!]) expect(err.message).not.toContain(secret);
+    }
+  });
+});
+
+describe("pull and merge requests through the code host", () => {
+  const report: Report = { kind: "change", title: "Collapse the sidebar", summary: "Collapses under 768px.", verification: "", risks: "", projectNotes: "" };
+
+  it("opens a merge request on a gitlab: repository, worded as one", async () => {
+    const host = fakeHost();
+    const { pr, updated } = await publishPr({ host, repo: "gitlab:acme/web", branch: "army/sidebar", base: "main", title: report.title, body: "Body", redact: (t) => t });
+    expect(updated).toBe(false);
+    expect(host.createPr).toHaveBeenCalledWith("gitlab:acme/web", { title: "Collapse the sidebar", body: "Body", head: "army/sidebar", base: "main" });
+    expect(`Opened ${prLabel(pr.number, host.kind)}: ${report.title}`).toBe("Opened merge request !12: Collapse the sidebar");
+    expect(resultHeadline({ userId: "U1", title: report.title, outcome: "published", prUrl: pr.html_url, host: host.kind })).toBe(
+      `:white_check_mark: <@U1> *Collapse the sidebar* — <${MR_URL}|review the merge request>`,
+    );
+  });
+
+  it("keeps GitHub's wording byte for byte", () => {
+    const url = "https://github.com/acme/web/pull/3";
+    expect(resultHeadline({ userId: "U1", title: "T", outcome: "published", prUrl: url })).toBe(`:white_check_mark: <@U1> *T* — <${url}|review the pull request>`);
+    expect(resultHeadline({ userId: "U1", title: "T", outcome: "blocked" })).toBe(":warning: <@U1> *Blocked: T*");
+    expect(resultHeadline({ userId: "U1", title: "T", outcome: "answered" })).toBe(":speech_balloon: <@U1> *T*");
+    expect(prLabel(3)).toBe("pull request #3");
+    expect(prRef(3, "bitbucket")).toBe("#3");
+    expect(prLabel(3, "bitbucket")).toBe("pull request #3");
+  });
+
+  it("updates the open request on the branch: an update comment, and a draft becomes ready with the finished title", async () => {
+    const host = fakeHost();
+    const draft: PrRef = { number: 12, html_url: MR_URL, node_id: "", draft: true };
+    host.findOpenPr.mockResolvedValue(draft);
+    const { pr, updated } = await publishPr({ host, repo: "gitlab:acme/web", branch: "army/sidebar", base: "main", title: "T", body: "B", redact: (t) => t });
+    expect([pr, updated]).toEqual([draft, true]);
+    expect(host.createPr).not.toHaveBeenCalled();
+    expect(host.commentOnPr).toHaveBeenCalledWith("gitlab:acme/web", 12, "**Update: T**\n\nB");
+    expect(host.markReady).toHaveBeenCalledWith("gitlab:acme/web", draft);
+    expect(host.updatePr).toHaveBeenCalledWith("gitlab:acme/web", 12, { title: "T", body: "B" });
+  });
+
+  it("saves unfinished work in a new draft (building its body only then), or comments on the open request", async () => {
+    const host = fakeHost();
+    const body = vi.fn(async () => "Draft body");
+    const saved = await saveUnfinishedPr({ host, repo: "gitlab:acme/web", branch: "army/x", base: "main", title: "WIP: x", body, comment: "Stopped" });
+    expect(saved.draft).toBe(true);
+    expect(host.createPr).toHaveBeenCalledWith("gitlab:acme/web", { title: "WIP: x", body: "Draft body", head: "army/x", base: "main", draft: true });
+
+    const open = fakeHost();
+    open.findOpenPr.mockResolvedValue({ number: 12, html_url: MR_URL, node_id: "", draft: false });
+    const lazy = vi.fn(async () => "never");
+    await saveUnfinishedPr({ host: open, repo: "gitlab:acme/web", branch: "army/x", base: "main", title: "WIP: x", body: lazy, comment: "Stopped" });
+    expect(open.commentOnPr).toHaveBeenCalledWith("gitlab:acme/web", 12, "Stopped");
+    expect(open.createPr).not.toHaveBeenCalled();
+    expect(lazy).not.toHaveBeenCalled();
+  });
+
+  it("says where a stopped task's work is, in the host's words", () => {
+    const text = stoppedSlackText({ userId: "U1", reason: "Timed out.", pr: { html_url: MR_URL, number: 12, draft: true }, cost: "", host: "gitlab" });
+    expect(text).toContain(`saved in a draft merge request: <${MR_URL}|!12>`);
+  });
+
+  it("tells the team a review on GitLab started the follow-up", () => {
+    const prompt = taskPrompt({ userId: "octo-dev", instruction: "Address the feedback", trigger: "review", repo: "gitlab:acme/web", base: "main", branch: "army/x", resumed: true, attachments: 0 });
+    expect(prompt).toContain("Request from GitLab (user octo-dev):");
+    expect(prompt).toContain("This follow-up was started by feedback on the merge request, not by a message in Slack.");
+  });
+});
+
+describe("following the checks through the code host", () => {
+  const failing: CheckInfo = {
+    id: 7,
+    name: "test",
+    status: "completed",
+    conclusion: "failure",
+    detailsUrl: "https://gitlab.example.com/acme/web/-/jobs/7",
+    title: null,
+    summary: null,
+    text: null,
+    app: "gitlab-ci",
+  };
+  const passing: CheckInfo = { ...failing, id: 8, conclusion: "success", detailsUrl: "https://gitlab.example.com/acme/web/-/jobs/8" };
+  const fixed: Report = { kind: "change", title: "Fix the failing test", summary: "Fixed the sum.", verification: "npm test passes", risks: "", projectNotes: "" };
+
+  function setup(o: { run?: { report?: Report; failure?: string }; budget?: number } = {}) {
+    const host = fakeHost();
+    host.checksFor.mockImplementation(async (_repo, sha) => ({ checks: [sha === "sha-1" ? failing : passing], statuses: [] }));
+    host.jobLog.mockResolvedValue(`$ npm test\nFAIL src/app.test.ts\nauth: ${HOST_TOKEN}`);
+    let head = "sha-1";
+    const gitCalls: string[][] = [];
+    const git: GitRun = async (args) => {
+      gitCalls.push(args);
+      if (args[0] === "rev-parse") return head;
+      if (args[0] === "status") return "M src/app.ts";
+      if (args[0] === "commit") head = "sha-2";
+      if (args[0] === "rev-list") return head === "sha-2" ? "1" : "0";
+      return "";
+    };
+    let t = 0;
+    const stages: string[] = [];
+    const events: { kind: string; text: string }[] = [];
+    const task: Pick<Task, "ci" | "fixRound"> = {};
+    const push = vi.fn(async () => "");
+    const runRound = vi.fn(async (_prompt: string, _o: { budgetUsd: number; runMs: number; since: string; phaseLabel: string }) => o.run ?? { report: fixed });
+    const d: FollowChecksDeps = {
+      host,
+      repo: "gitlab:acme/web",
+      pr: { number: 12 },
+      limits: { ciWaitMin: 15, ciFixRounds: 2 },
+      deadline: undefined,
+      base: "main",
+      branch: "army/x",
+      request: "Fix the sum",
+      budgetLeft: () => o.budget ?? 10,
+      git,
+      push,
+      runRound,
+      task,
+      timeline: { add: (e) => void events.push({ kind: e.kind, text: e.text }), checks: () => {} },
+      onStage: async (text) => void stages.push(text),
+      progress: async () => {},
+      redact: makeRedactor(host.secrets()),
+      now: () => t,
+      wait: { pollMs: 1000, graceMs: 0, now: () => t, sleep: async (ms) => void (t += ms) },
+    };
+    return { d, host, git, gitCalls, push, runRound, stages, events, task };
+  }
+
+  it("waits, has the team fix a failing job with the host's annotations and log, pushes, comments and waits again", async () => {
+    const { d, host, push, runRound, stages, events, task } = setup();
+    const result = await followPrChecks(d);
+
+    expect(result?.outcome).toMatchObject({ state: "passed", fixRounds: 1 });
+    expect(host.checksFor).toHaveBeenCalledWith("gitlab:acme/web", "sha-1");
+    expect(host.checksFor).toHaveBeenCalledWith("gitlab:acme/web", "sha-2");
+    expect(host.checkAnnotations).toHaveBeenCalledWith("gitlab:acme/web", failing);
+    expect(host.jobLog).toHaveBeenCalledWith("gitlab:acme/web", failing);
+
+    const [prompt, opts] = runRound.mock.calls[0]!;
+    expect(prompt).toContain("The merge request's checks failed after your last push (fix round 1 of 2)");
+    expect(prompt).toContain("What failed (from GitLab;");
+    expect(prompt).toContain("- src/app.ts:3 failure: Expected 2");
+    expect(prompt).toContain("FAIL src/app.test.ts");
+    expect(prompt).not.toContain(HOST_TOKEN);
+    expect(opts).toMatchObject({ budgetUsd: 10, since: "sha-1", phaseLabel: "Fixing the failing checks (round 1 of 2)" });
+
+    expect(push).toHaveBeenCalledTimes(1);
+    expect(host.commentOnPr).toHaveBeenCalledWith("gitlab:acme/web", 12, expect.stringContaining("**Fixed failing checks (round 1):** Fix the failing test"));
+    expect(stages).toEqual(["Waiting for the merge request's checks", "Fixing the failing checks (round 1 of 2)", "Waiting for the merge request's checks"]);
+    expect(events.map((e) => e.kind)).toEqual(["checks", "fix-round", "push", "checks"]);
+    expect(task.fixRound).toMatchObject({ round: 1, rounds: 2, failing: ["test"] });
+    expect(task.ci).toEqual({ state: "passed", fixRounds: 1, names: [], total: 1 });
+  });
+
+  it("pushes nothing when the fix stops early or is blocked, or the budget is too small", async () => {
+    const stopped = setup({ run: { failure: "Timed out after 25 minutes." } });
+    expect(await followPrChecks(stopped.d)).toMatchObject({ outcome: { state: "failed" }, note: "Fixing the checks stopped early: Timed out after 25 minutes." });
+    expect(stopped.push).not.toHaveBeenCalled();
+
+    const blocked = setup({ run: { report: { ...fixed, kind: "blocked", title: "Needs a secret" } } });
+    expect((await followPrChecks(blocked.d))?.note).toContain("**Checks blocked: Needs a secret**");
+    expect(blocked.push).not.toHaveBeenCalled();
+
+    const poor = setup({ budget: 0.5 });
+    expect((await followPrChecks(poor.d))?.note).toBe("Not enough of the task's budget was left to fix them.");
+    expect(poor.runRound).not.toHaveBeenCalled();
+    expect(poor.host.commentOnPr).not.toHaveBeenCalled();
   });
 });
 

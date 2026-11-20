@@ -23,7 +23,8 @@ import {
   ticketStopped,
   ticketSyncDeps,
 } from "../src/ticket-sync.js";
-import { handleGithubWebhook, resetWebhookStateForTests } from "../src/webhook.js";
+import { textToAdf } from "../src/jira.js";
+import { handleGithubWebhook, handlePrClosed, resetWebhookStateForTests } from "../src/webhook.js";
 import { configSecrets, makeRedactor } from "../src/worker.js";
 
 const BOARD = "4012345678";
@@ -350,7 +351,186 @@ describe("GitHub pull request closed → ticket", () => {
     expect(logs.mock.calls.map((c) => String(c[0]))).toEqual([
       "[github] pull_request acme/web#7: ignored: pull request not closed",
       "[github] pull_request acme/web#8: ignored: not a pull request the team opened",
-      "[github] pull_request acme/web#7: ignored: no monday.com ticket",
+      "[github] pull_request acme/web#7: ignored: no ticket",
     ]);
+  });
+
+  it("links a merge request on another host when the webhook gives no link", async () => {
+    const t = await setup();
+    await t.deps.configRepo.update((c) => {
+      c.gitlab = { ...c.gitlab, token: "glpat-secret-token-0123456789", baseUrl: "https://gitlab.example.com", allowed: ["acme"] };
+    });
+    await t.deps.tasks.savePrThread("gitlab:acme/web", 12, { channel: WEB_CHANNEL, threadTs: "c-000000001-abcdef" });
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    await handlePrClosed("merge_request", { repo: "gitlab:acme/web", prNumber: 12, merged: true }, t.deps);
+    expect(t.calls.at(-1)).toEqual({ op: "update", itemId: ITEM, body: `Merged: https://gitlab.example.com/acme/web/-/merge_requests/12${SIGNATURE}` });
+  });
+});
+
+// ---------- Jira issues ----------
+
+const JIRA_SITE = "https://acme.atlassian.net";
+const JIRA_TOKEN = "ATATT3x-jira-secret-token-0123456789";
+const ISSUE = "ACME-123";
+
+function jiraConfig(configure?: (c: Config) => void): Config {
+  return config((c) => {
+    c.jira = {
+      ...c.jira,
+      siteUrl: JIRA_SITE,
+      email: "bot@example.com",
+      token: JIRA_TOKEN,
+      automation: {
+        enabled: true,
+        webhookSecret: "jira-webhook-secret-0123456789",
+        projects: {
+          ACME: { repo: "acme/web", startStatus: "Ready for dev", workingStatus: "In Progress", reviewStatus: "In Review", doneStatus: "Done", stuckStatus: "Blocked" },
+        },
+      },
+    };
+    configure?.(c);
+  });
+}
+
+const jiraTask = (over: Partial<Task> = {}) =>
+  task({ trigger: "jira", ticket: { provider: "jira", boardId: "ACME", itemId: ISSUE, name: "Login redirect", url: `${JIRA_SITE}/browse/${ISSUE}` }, ...over });
+
+function fakeJira(where: { key: string; projectKey: string } = { key: ISSUE, projectKey: "ACME" }) {
+  const calls: { op: "move" | "comment"; key: string; status?: string; text?: string }[] = [];
+  const jira = {
+    issueProject: async () => where,
+    transitionTo: async (key: string, status: string) => {
+      calls.push({ op: "move", key, status });
+      return { status, changed: true };
+    },
+    addComment: async (key: string, text: string) => {
+      calls.push({ op: "comment", key, text });
+      return { id: "1" };
+    },
+  };
+  return { jira, calls };
+}
+
+describe("ticket sync for Jira issues", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("moves the issue through the project's statuses and comments, signed", async () => {
+    const logs = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { jira, calls } = fakeJira();
+    const events: TicketEvent[] = [];
+    const d: TicketSyncDeps = { config: jiraConfig(), jira, record: (e) => void events.push(e), consoleUrl: CONSOLE };
+    await ticketStarted(d, jiraTask());
+    await ticketPrOpened(d, jiraTask(), { url: "https://github.com/acme/web/pull/7", number: 7 });
+    await ticketStopped(d, jiraTask(), { reason: "Timed out." });
+    await ticketPrClosed(d, jiraTask({ status: "done" }), { url: "https://github.com/acme/web/pull/7", merged: true });
+    expect(calls).toEqual([
+      { op: "move", key: ISSUE, status: "In Progress" },
+      { op: "comment", key: ISSUE, text: `The team started on this: ${CONSOLE}${SIGNATURE}` },
+      { op: "move", key: ISSUE, status: "In Review" },
+      { op: "comment", key: ISSUE, text: `Opened pull request #7 for review: https://github.com/acme/web/pull/7${SIGNATURE}` },
+      { op: "move", key: ISSUE, status: "Blocked" },
+      { op: "comment", key: ISSUE, text: `The team stopped: Timed out.\nTo continue, reply in its conversation: ${CONSOLE}${SIGNATURE}` },
+      { op: "move", key: ISSUE, status: "Done" },
+      { op: "comment", key: ISSUE, text: `Merged: https://github.com/acme/web/pull/7${SIGNATURE}` },
+    ]);
+    expect(events[0]).toEqual({ kind: "ticket", ok: true, text: 'Ticket "Login redirect": status set to "In Progress"; comment posted', url: `${JIRA_SITE}/browse/${ISSUE}` });
+    expect(logs.mock.calls.map((c) => String(c[0]))[0]).toBe(`[ticket] issue ${ISSUE}: started: updated`);
+  });
+
+  it("leaves the status alone for an empty status or a project no longer automated, and says when Jira is not connected", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const { jira, calls } = fakeJira();
+    await ticketStarted({ config: jiraConfig((c) => void (c.jira.automation.projects.ACME!.workingStatus = "")), jira }, jiraTask());
+    await ticketStarted({ config: jiraConfig((c) => void (c.jira.automation.projects = {})), jira }, jiraTask());
+    expect(calls.map((c) => c.op)).toEqual(["comment", "comment"]);
+
+    const events: TicketEvent[] = [];
+    await ticketStarted({ config: jiraConfig((c) => void (c.jira.token = undefined)), record: (e) => void events.push(e) }, jiraTask());
+    expect(events).toEqual([{ kind: "ticket", ok: false, text: 'Ticket "Login redirect" not updated: Jira is not connected' }]);
+  });
+
+  it("leaves an issue alone once it moved to a project Pointer may not use, and follows a move within allowed ones", async () => {
+    const logs = vi.spyOn(console, "log").mockImplementation(() => {});
+    const moved = fakeJira({ key: "OTHER-9", projectKey: "OTHER" });
+    const events: TicketEvent[] = [];
+    const scoped = jiraConfig((c) => void (c.jira.allowedProjectKeys = ["ACME"]));
+    await ticketStarted({ config: scoped, jira: moved.jira, record: (e) => void events.push(e) }, jiraTask());
+    expect(moved.calls).toEqual([]);
+    expect(events).toEqual([
+      { kind: "ticket", ok: false, text: 'Ticket "Login redirect" not updated: the issue is now in project OTHER, which Pointer may not use', url: `${JIRA_SITE}/browse/${ISSUE}` },
+    ]);
+    expect(logs.mock.calls.map((c) => String(c[0]))).toContain(`[ticket] issue ${ISSUE}: started: skipped, the issue is now in project OTHER, which Pointer may not use`);
+
+    // With every project allowed, the issue is updated under its new key.
+    const renamed = fakeJira({ key: "WEB-4", projectKey: "WEB" });
+    await ticketStarted({ config: jiraConfig(), jira: renamed.jira }, jiraTask());
+    expect(renamed.calls.map((c) => c.key)).toEqual(["WEB-4", "WEB-4"]);
+  });
+
+  it("uses Jira's REST API from the configuration: the transition to the status, and the comment in ADF", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const requests: { method: string; path: string; body?: unknown }[] = [];
+    vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      requests.push({ method: init?.method ?? "GET", path: url.pathname, ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}) });
+      if (url.pathname === `/rest/api/3/issue/${ISSUE}`) return Response.json({ key: ISSUE, fields: { project: { key: "ACME" } } });
+      if (url.pathname.endsWith("/transitions") && init?.method === "GET") {
+        return Response.json({ transitions: [{ id: "11", name: "Start", to: { name: "In Progress" } }] });
+      }
+      if (url.pathname.endsWith("/transitions")) return new Response(null, { status: 204 });
+      return Response.json({ id: "100" }, { status: 201 });
+    });
+    const events: TicketEvent[] = [];
+    await ticketStarted({ config: jiraConfig(), record: (e) => void events.push(e), consoleUrl: CONSOLE }, jiraTask());
+    expect(requests).toEqual([
+      { method: "GET", path: `/rest/api/3/issue/${ISSUE}` },
+      { method: "GET", path: `/rest/api/3/issue/${ISSUE}/transitions` },
+      { method: "POST", path: `/rest/api/3/issue/${ISSUE}/transitions`, body: { transition: { id: "11" } } },
+      { method: "POST", path: `/rest/api/3/issue/${ISSUE}/comment`, body: { body: textToAdf(`The team started on this: ${CONSOLE}${SIGNATURE}`) } },
+    ]);
+    expect(events[0]!.ok).toBe(true);
+  });
+
+  it("moves the issue to done when the team's pull request is merged", async () => {
+    resetWebhookStateForTests();
+    const store = new FsStore(await mkdtemp(join(tmpdir(), "army-jira-merged-")));
+    const configRepo = new ConfigRepo(store, deriveKey("k"), 0);
+    const base = jiraConfig();
+    await configRepo.update((c) => {
+      c.github = { token: "ghp_secret_token", allowedOwners: ["acme"], extra: [], webhookSecret: "whsec-test-0123456789abcdef" };
+      c.jira = base.jira;
+    });
+    const tasks = new TaskRepo(store);
+    await tasks.savePrThread("acme/web", 7, { channel: WEB_CHANNEL, threadTs: "c-000000001-abcdef" });
+    await tasks.save(jiraTask({ status: "done", kind: "change", prUrl: "https://github.com/acme/web/pull/7" }));
+    const requests: string[] = [];
+    vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      requests.push(`${init?.method ?? "GET"} ${url.pathname}`);
+      if (url.pathname === `/rest/api/3/issue/${ISSUE}`) return Response.json({ key: ISSUE, fields: { project: { key: "ACME" } } });
+      if (url.pathname.endsWith("/transitions") && init?.method === "GET") return Response.json({ transitions: [{ id: "31", name: "Done", to: { name: "Done" } }] });
+      if (url.pathname.endsWith("/transitions")) return new Response(null, { status: 204 });
+      return Response.json({ id: "100" }, { status: 201 });
+    });
+    const logs = vi.spyOn(console, "log").mockImplementation(() => {});
+    const deps = { configRepo, tasks, runner: { kind: "local" as const, launch: async () => undefined }, slack: () => ({}) as never, store };
+    await handleGithubWebhook("pull_request", { action: "closed", pull_request: { number: 7, merged: true, html_url: "https://github.com/acme/web/pull/7" }, repository: { full_name: "acme/web" } }, deps);
+    expect(requests).toEqual([
+      `GET /rest/api/3/issue/${ISSUE}`,
+      `GET /rest/api/3/issue/${ISSUE}/transitions`,
+      `POST /rest/api/3/issue/${ISSUE}/transitions`,
+      `POST /rest/api/3/issue/${ISSUE}/comment`,
+    ]);
+    expect(logs.mock.calls.map((c) => String(c[0]))).toContain(`[github] pull_request acme/web#7: ticket ${ISSUE} marked done`);
+
+    // Jira disconnected: nothing is called.
+    await configRepo.update((c) => void (c.jira.token = undefined));
+    requests.length = 0;
+    await handleGithubWebhook("pull_request", { action: "closed", pull_request: { number: 7, merged: true }, repository: { full_name: "acme/web" } }, deps);
+    expect(requests).toEqual([]);
+    expect(logs.mock.calls.map((c) => String(c[0]))).toContain("[github] pull_request acme/web#7: ignored: Jira not connected");
   });
 });

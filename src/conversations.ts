@@ -12,6 +12,7 @@ import type {
   StartRepoTask,
 } from "./pointer-types.js";
 import { describeTasks } from "./progress.js";
+import { HOST_TERMS, repoHost } from "./repo-id.js";
 import type { Runner } from "./runner.js";
 import type { Store } from "./store.js";
 import { describeTimeline, plainLine, readTimeline } from "./task-events.js";
@@ -248,8 +249,17 @@ export const closeActivity = (steps: ActivityStep[], at: string): ActivityStep[]
 
 // ---------- Task milestones ----------
 
-const prNumber = (url: string) => url.match(/\/pull\/(\d+)/)?.[1];
-const prLink = (url: string, label?: string) => `[${label ?? `pull request #${prNumber(url) ?? ""}`.trim()}](${url})`;
+/** The number in a pull or merge request's URL: GitHub /pull/12, GitLab /-/merge_requests/12, Bitbucket /pull-requests/12. */
+const prNumber = (url: string) => url.match(/\/(?:pull|merge_requests|pull-requests)\/(\d+)/)?.[1];
+/** What the task's code host calls a pull request, and how it writes its number ("#12", "!12" on GitLab). */
+const termsOf = (t: Pick<Task, "repo">) => {
+  const host = repoHost(t.repo);
+  return { pr: HOST_TERMS[host].pr, ref: (url: string) => `${host === "gitlab" ? "!" : "#"}${prNumber(url) ?? ""}` };
+};
+const prLink = (t: Pick<Task, "repo">, url: string, label?: string) => {
+  const terms = termsOf(t);
+  return `[${label ?? `${terms.pr} ${terms.ref(url)}`.trim()}](${url})`;
+};
 const usdText = (n: number | undefined) => (n === undefined ? "" : ` · ~$${n.toFixed(2)}`);
 
 /** The checks line of a result, Markdown, or "" when the repository has none. */
@@ -275,12 +285,13 @@ const firstLine = (text: string) => plainLine(text.split("\n").find((l) => l.tri
 export function taskResultMarkdown(t: Task): string {
   const footer = `_${t.repo}${t.branch ? ` · \`${t.branch}\`` : ""}${usdText(t.costUsd)}_`;
   const notes = t.notes ?? [];
+  const terms = termsOf(t);
   if (t.status === "failed") {
     const reason = t.error ?? "The task stopped.";
     if (t.prUrl) {
-      const where = t.prDraft ? "a draft pull request" : "the pull request";
+      const where = t.prDraft ? `a draft ${terms.pr}` : `the ${terms.pr}`;
       return [
-        `**Stopped:** ${reason} The unfinished work is saved in ${where}: ${prLink(t.prUrl, `#${prNumber(t.prUrl) ?? ""}`)}. Reply here (for example "continue") to pick it up on the same branch.`,
+        `**Stopped:** ${reason} The unfinished work is saved in ${where}: ${prLink(t, t.prUrl, terms.ref(t.prUrl))}. Reply here (for example "continue") to pick it up on the same branch.`,
         ...notes,
         footer,
       ].join("\n\n");
@@ -293,7 +304,7 @@ export function taskResultMarkdown(t: Task): string {
     t.kind === "blocked"
       ? `**Blocked: ${title}**`
       : t.kind === "change" && t.prUrl
-        ? `**Done: ${title}** — ${prLink(t.prUrl, "review the pull request")}`
+        ? `**Done: ${title}** — ${prLink(t, t.prUrl, `review the ${terms.pr}`)}`
         : `**${title}**`;
   return [
     head,
@@ -335,7 +346,7 @@ export function pendingMilestones(c: Conversation, tasks: Task[]): ChatMessage[]
       const title = t.report?.title ? `: **${t.report.title}**` : "";
       // A follow-up pushes to the pull request an earlier task of this conversation opened.
       const verb = tasks.some((o) => o.id < t.id && o.prUrl === t.prUrl) ? "Updated" : "Opened";
-      add(t, "pr", t.stage?.at ?? t.updatedAt, `${verb} ${prLink(t.prUrl)}${title}. Waiting for its checks…`);
+      add(t, "pr", t.stage?.at ?? t.updatedAt, `${verb} ${prLink(t, t.prUrl)}${title}. Waiting for its checks…`);
     }
     if (t.fixRound) {
       const failing = t.fixRound.failing.length ? `: ${t.fixRound.failing.slice(0, 8).join(", ")}` : "";
@@ -343,7 +354,7 @@ export function pendingMilestones(c: Conversation, tasks: Task[]): ChatMessage[]
         t,
         "checks",
         t.fixRound.at,
-        `The pull request's checks failed${failing}. The team is fixing them (round ${t.fixRound.round} of ${t.fixRound.rounds})…`,
+        `The ${termsOf(t).pr}'s checks failed${failing}. The team is fixing them (round ${t.fixRound.round} of ${t.fixRound.rounds})…`,
         false,
         t.fixRound.round,
       );
@@ -397,7 +408,7 @@ export type DirectTaskResult =
   /** 409: a spending cap is used up (no conversation is created). */
   | { ok: false; status: 400 | 409 | 502; error: string; conversationId?: string };
 
-/** What the GitHub webhook needs to follow up in a console conversation (no Slack there). */
+/** What the code hosts' webhooks need to follow up in a console conversation (no Slack there). */
 export interface WebThreads {
   /** Adds a Pointer message (Markdown); false when the conversation no longer exists. */
   post(conversationId: string, markdown: string): Promise<boolean>;
@@ -533,7 +544,7 @@ export class ConversationService implements WebThreads {
   /**
    * A repo task straight from the console, without asking Pointer: a new
    * conversation whose first message is the instruction, then the task. The
-   * same checks as Slack (GitHub connected, allow lists). A monday.com ticket
+   * same checks as Slack (the repository's code host connected, its allow list). A monday.com ticket
    * starts one too (trigger "monday", with the ticket, named after it).
    */
   async startDirectTask(repo: string, instruction: string, opts: DirectTaskOptions = {}): Promise<DirectTaskResult> {

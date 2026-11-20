@@ -18,6 +18,7 @@ import { VStack } from "@astryxdesign/core/VStack";
 import { type ReactNode, useMemo, useState } from "react";
 import { ConfirmButton } from "../../components/ConfirmButton";
 import { href } from "../../lib/router";
+import { useConfig } from "../../lib/state";
 import { ACCESS_OPTIONS, type AgentSpec } from "../../lib/types";
 import { useAction } from "../../lib/useAction";
 import { useSkillLibrary } from "../skills/useSkillLibrary";
@@ -139,6 +140,39 @@ function SkillsField({ value, onChange, lead }: { value: string[]; onChange: (sk
       <Text type="supporting">
         {forEveryone.length ? `Every agent also has ${forEveryone.join(", ")}. ` : ""}
         Install skills and choose who uses them on the {manage}.
+      </Text>
+    </VStack>
+  );
+}
+
+/** The connected apps (Integrations, Apps) this agent may use. Apps that are off are listed but marked. */
+function AppsField({ value, onChange, lead }: { value: string[]; onChange: (apps: string[]) => void; lead: string }) {
+  const { config } = useConfig();
+  const apps = config.apps;
+  const connected = new Set(apps.map((a) => a.id));
+  const manage = (
+    <Link href={href("integrations", "apps")} isStandalone>
+      Integrations page
+    </Link>
+  );
+  if (apps.length === 0) {
+    return <Text type="supporting">No apps are connected yet. Connect Linear, Notion, Sentry and others on the {manage}; {lead} uses them, and the agents you choose.</Text>;
+  }
+  return (
+    <VStack gap={2}>
+      <MultiSelector
+        label="Apps"
+        isLabelHidden
+        placeholder="Pick apps"
+        options={apps.map((a) => ({ value: a.id, label: a.enabled ? a.name : `${a.name} (off)` }))}
+        value={value.filter((id) => connected.has(id))}
+        onChange={onChange}
+        triggerDisplay="badges"
+        hasSearch={apps.length > 12}
+        width="100%"
+      />
+      <Text type="supporting">
+        An agent that only looks gets an app's read-only tools. Choose each app's tools and what it may do on the {manage}.
       </Text>
     </VStack>
   );
@@ -279,6 +313,11 @@ function AgentForm({ target, takenIds, lead, onClose, onSave, onDelete }: Omit<A
             <Divider />
             <FormSection title="Skills" description="Skills from the team's library this agent has loaded when it starts work.">
               <SkillsField value={draft.skills} onChange={set("skills")} lead={lead} />
+            </FormSection>
+
+            <Divider />
+            <FormSection title="Apps" description="Connected apps this agent may use through their MCP servers: in repo tasks, and to look things up in Slack conversations.">
+              <AppsField value={draft.apps} onChange={set("apps")} lead={lead} />
             </FormSection>
 
             <Divider />

@@ -17,15 +17,18 @@ import {
 import { AttachmentRepo, type ThreadRef, classify, expandZip } from "./attachments.js";
 import { Spending } from "./budget.js";
 import { type Screenshot, browserAvailable, browserServer, collectScreenshots } from "./browser.js";
-import { type CiOutcome, ciFailureDetails, ciFixPrompt, ciSummary, ciSummaryLine, storedCiSummary, waitForChecks } from "./ci.js";
-import { type Config, ConfigRepo, resolveMasterKey } from "./config.js";
-import { GitHub, type PrRef, isHumanFeedback } from "./github.js";
-import { connectionForRepo, githubTokens } from "./github-access.js";
+import { type CiOutcome, type WaitOptions, ciFailureDetails, ciFixPrompt, ciSummary, ciSummaryLine, storedCiSummary, waitForChecks } from "./ci.js";
+import { repoTaskApps } from "./apps.js";
+import type { CodeHost } from "./code-host.js";
+import { allHostSecrets, codeHostFor } from "./code-host-factory.js";
+import { type Config, ConfigRepo, integrationSecrets, resolveMasterKey } from "./config.js";
+import { type PrRef, isHumanFeedback } from "./github.js";
 import { checkBashCommand } from "./guard.js";
 import { NOTES_MAX_CHARS, NotesRepo } from "./notes.js";
 import { formatFeedback } from "./pr-feedback.js";
 import { BYPASS_ENV, type PreviewResult, checkPreview, previewSlackLine } from "./preview.js";
 import { type PlanItem, ProgressTracker, formatProgress } from "./progress.js";
+import { type CodeHostKind, HOST_TERMS, repoHost } from "./repo-id.js";
 import { findRepoSetup, repoSetupContext, runSetupCommand, setupEnv } from "./repo-setup.js";
 import { ScreenshotRepo } from "./screenshots.js";
 import { HISTORY_SCAN, routeRepoTask } from "./sizing.js";
@@ -38,7 +41,7 @@ import { type RepoAgentOptions, type Team, type TeamSkills, agentLabel, buildRep
 import { ticketFinished, ticketPrOpened, ticketStarted, ticketStopped, ticketSyncDeps } from "./ticket-sync.js";
 import { UsageRepo } from "./usage.js";
 
-const exec = promisify(execFile);
+const execFileAsync = promisify(execFile);
 
 /** How a subagent call appears in the Slack progress line, e.g. ":hammer_and_wrench: Sara (Coder)". */
 export function subagentLabel(team: Team, subagentType: string | undefined): string {
@@ -68,7 +71,12 @@ export function teamQueryOptions(
   ];
   return {
     ...(skills ?? {}),
-    systemPrompt: { type: "preset", preset: "claude_code", append: orchestratorPrompt(config, context) },
+    systemPrompt: {
+      type: "preset",
+      preset: "claude_code",
+      // The apps rule says which agent may use which app (apps.ts).
+      append: opts.apps?.promptRule ? `${orchestratorPrompt(config, context)}\n${opts.apps.promptRule}` : orchestratorPrompt(config, context),
+    },
     // Each agent carries its own effort (its setting, or this one).
     effort: config.team.pointer.taskEffort,
     agents: buildRepoAgents(config.team, opts),
@@ -294,58 +302,47 @@ export function makeRedactor(secrets: (string | undefined)[]) {
 
 /**
  * Every credential the config holds, for makeRedactor: Claude, Slack and
- * monday.com, the GitHub webhook secret, every GitHub connection's token (not
- * only the one in use), each also in the form git sends it (the Basic auth
- * header and its value), and the values of every repository's setup
- * variables (any of them may be a secret; makeRedactor skips very short ones).
+ * monday.com, the GitHub webhook secret, every code host's credential (every
+ * GitHub connection's token, not only the one in use, GitLab's and
+ * Bitbucket's) in every form its client sends it (allHostSecrets: tokens, git
+ * auth headers and their Basic values), the other integrations'
+ * (integrationSecrets), and the values of every repository's setup variables
+ * (any of them may be a secret; makeRedactor skips very short ones).
  */
 export function configSecrets(c: Config): (string | undefined)[] {
-  const github = githubTokens(c).flatMap((token) => {
-    const header = new GitHub(token).gitAuthHeader();
-    return [token, header, header.split(" ").pop()];
-  });
   // Repo variables are redacted unless they are plainly not secret (a word like "development", a port):
   // hiding those would garble every Slack message and PR text that happens to contain the word.
   const repoEnv = Object.values(c.repoSetup)
     .flatMap((setup) => Object.values(setup.env))
     .filter((value) => !/^(?:[A-Za-z]+|\d+)$/.test(value.trim()));
-  return [c.anthropic.apiKey, c.slack.botToken, c.slack.signingSecret, c.monday.token, c.monday.automation.webhookSecret, c.github.webhookSecret, ...github, ...repoEnv];
+  return [
+    c.anthropic.apiKey,
+    c.slack.botToken,
+    c.slack.signingSecret,
+    c.monday.token,
+    c.monday.automation.webhookSecret,
+    c.github.webhookSecret,
+    ...allHostSecrets(c),
+    ...integrationSecrets(c),
+    ...repoEnv,
+  ];
 }
 
-/**
- * The GitHub token a task on `repo` uses: the connection allowed to work on it
- * (the most specific allow-list match), or why there is none.
- */
-export function taskGitHubToken(config: Config, repo: string): { ok: true; token: string } | { ok: false; error: string } {
-  const token = connectionForRepo(config, repo)?.token;
-  if (token) return { ok: true, token };
-  return { ok: false, error: `No GitHub connection is allowed to work on ${repo}; add one on the admin page.` };
-}
-
-/** Used only when the token owner cannot be looked up: a reserved domain, so GitHub links it to nobody. */
-export const FALLBACK_COMMIT_EMAIL = "pointer@agent-army.invalid";
-
-/**
- * Who the task's commits are authored by. The email is the token owner's
- * GitHub noreply address, so GitHub and Vercel attribute the commits to the
- * account that pushes them and opens the pull request. A Vercel team blocks
- * Git deployments whose commit author is not a member, and an address like
- * "agent-army@users.noreply.github.com" would belong to an unrelated GitHub
- * user named agent-army.
- */
-export function commitIdentity(
-  pointerName: string,
-  viewer: { id: number; login: string } | undefined,
-): { name: string; email: string } {
-  if (!viewer || !Number.isInteger(viewer.id) || viewer.id <= 0 || !/^[A-Za-z0-9-]+$/.test(viewer.login)) {
-    return { name: pointerName, email: FALLBACK_COMMIT_EMAIL };
-  }
-  return { name: `${pointerName} (via ${viewer.login})`, email: `${viewer.id}+${viewer.login}@users.noreply.github.com` };
-}
+// Who a task's commits on GitHub are authored by; each host's client decides for its own (CodeHost.commitIdentity).
+export { FALLBACK_COMMIT_EMAIL, githubCommitIdentity as commitIdentity } from "./github.js";
 
 // ---------- Pull request texts ----------
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+const capitalized = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
+
+/** How the host refers to a pull or merge request by number: "#12" (GitHub, Bitbucket), "!12" (GitLab). */
+export function prRef(number: number, host: CodeHostKind = "github"): string {
+  return `${host === "gitlab" ? "!" : "#"}${number}`;
+}
+
+/** "pull request #12", "merge request !12". */
+export const prLabel = (number: number, host: CodeHostKind = "github") => `${HOST_TERMS[host].pr} ${prRef(number, host)}`;
 
 /** The draft pull request's title for unfinished work: the request's first line, short. */
 export function wipTitle(instruction: string): string {
@@ -438,10 +435,35 @@ export function newScreenshots(shots: Screenshot[], seen: Set<string>): Screensh
   return fresh;
 }
 
-/** The Slack result when a stopped task's work was saved in a pull request. */
-export function stoppedSlackText(o: { userId: string; reason: string; pr: Pick<PrRef, "html_url" | "number" | "draft">; cost: string }): string {
-  const where = o.pr.draft ? "a draft pull request" : "the pull request";
-  return `:warning: <@${o.userId}> Stopped: ${o.reason} The unfinished work is saved in ${where}: <${o.pr.html_url}|#${o.pr.number}>. Reply here (for example "continue") to pick it up on the same branch.${o.cost}`;
+/** The Slack result when a stopped task's work was saved in a pull (or merge) request. */
+export function stoppedSlackText(o: {
+  userId: string;
+  reason: string;
+  pr: Pick<PrRef, "html_url" | "number" | "draft">;
+  cost: string;
+  host?: CodeHostKind;
+}): string {
+  const pr = HOST_TERMS[o.host ?? "github"].pr;
+  const where = o.pr.draft ? `a draft ${pr}` : `the ${pr}`;
+  return `:warning: <@${o.userId}> Stopped: ${o.reason} The unfinished work is saved in ${where}: <${o.pr.html_url}|${prRef(o.pr.number, o.host)}>. Reply here (for example "continue") to pick it up on the same branch.${o.cost}`;
+}
+
+/** The first line of the Slack result: blocked, published (with the link to review), or answered. */
+export function resultHeadline(o: {
+  userId: string;
+  title: string;
+  outcome: "blocked" | "published" | "answered";
+  prUrl?: string;
+  host?: CodeHostKind;
+}): string {
+  switch (o.outcome) {
+    case "blocked":
+      return `:warning: <@${o.userId}> *Blocked: ${o.title}*`;
+    case "published":
+      return `:white_check_mark: <@${o.userId}> *${o.title}* — <${o.prUrl}|review the ${HOST_TERMS[o.host ?? "github"].pr}>`;
+    case "answered":
+      return `:speech_balloon: <@${o.userId}> *${o.title}*`;
+  }
 }
 
 /** Posted on the pull request after a fix round pushed. */
@@ -486,8 +508,9 @@ export function taskPrompt(o: {
   /** Where the request was made; "slack" when omitted. */
   where?: TaskSurface;
 }): string {
+  const terms = HOST_TERMS[repoHost(o.repo)];
   const from =
-    o.trigger === "review" ? `GitHub (user ${o.userId})` : o.where === "web" ? "the admin console (the owner)" : `Slack (user ${o.userId})`;
+    o.trigger === "review" ? `${terms.name} (user ${o.userId})` : o.where === "web" ? "the admin console (the owner)" : `Slack (user ${o.userId})`;
   const lines = [
     `Request from ${from}:`,
     o.instruction,
@@ -502,7 +525,7 @@ export function taskPrompt(o: {
       `The previous run stopped early (${o.stopped.reason.replace(/\.$/, "")}; at ${o.stopped.at}). Its unfinished work is on this branch: check \`git log\` and \`git diff origin/${o.base}...HEAD\`, then continue where it left off.`,
     );
   }
-  if (o.trigger === "review") lines.push("This follow-up was started by feedback on the pull request, not by a message in Slack.");
+  if (o.trigger === "review") lines.push(`This follow-up was started by feedback on the ${terms.pr}, not by a message in Slack.`);
   if (o.attachments) {
     lines.push(`The requester shared ${o.attachments} file(s) for this task: see "Files shared for this task" in your instructions.`);
   }
@@ -604,6 +627,241 @@ const CHECKS_OUTCOME: Record<CiOutcome["state"], string> = {
   unavailable: " (checks not readable)",
 };
 
+// ---------- Git and the code host (GitHub, GitLab, Bitbucket through CodeHost) ----------
+
+/** Runs git in the checkout (or `cwd`); `auth` adds the code host's credentials to that one command. */
+export type GitRun = (args: string[], opts?: { auth?: boolean; cwd?: string }) => Promise<string>;
+
+/** execFile, promisified (no shell): what gitRunner runs git with (tests pass a fake). */
+export type ExecFile = (file: string, args: string[], opts: { cwd: string; maxBuffer: number; env: NodeJS.ProcessEnv }) => Promise<{ stdout: string }>;
+
+const execGit: ExecFile = (file, args, opts) => execFileAsync(file, args, opts);
+
+/**
+ * git for a task. The host's credentials go on the command line of each
+ * command that needs them (CodeHost.gitAuthArgs, `-c http.<host>.extraheader=…`),
+ * never into .git/config or the remote URL, where the agents' own git commands
+ * would find them. Errors are redacted, the auth arguments included.
+ */
+export function gitRunner(o: { host: Pick<CodeHost, "gitAuthArgs">; cwd: string; redact: (text: string) => string; run?: ExecFile }): GitRun {
+  const run = o.run ?? execGit;
+  return async (args, opts = {}) => {
+    const auth = opts.auth ? o.host.gitAuthArgs() : [];
+    try {
+      const { stdout } = await run("git", [...auth, ...args], {
+        cwd: opts.cwd ?? o.cwd,
+        maxBuffer: 16 * 1024 * 1024,
+        env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+      });
+      return stdout.trim();
+    } catch (err) {
+      const e = err as { stderr?: string; message: string };
+      // execFile's message repeats the whole command line, auth arguments and all.
+      throw new Error(o.redact(makeRedactor(auth)(`git ${args[0]} failed: ${e.stderr?.trim() || e.message}`)));
+    }
+  };
+}
+
+/** An https URL without a user or password: credentials in a clone URL would be kept in .git/config. */
+function isPlainHttpsUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && !url.username && !url.password;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Clones the repository through its host into `dir` and authors the task's
+ * commits as the host says (CodeHost.commitIdentity: the token owner, so the
+ * host and its deployers attribute them to that account). Returns the base branch.
+ */
+export async function checkoutRepo(o: {
+  host: Pick<CodeHost, "cloneUrl" | "defaultBranch" | "viewer" | "commitIdentity">;
+  repo: string;
+  dir: string;
+  workRoot: string;
+  git: GitRun;
+  pointerName: string;
+  redact: (text: string) => string;
+}): Promise<{ base: string; author: { name: string; email: string } }> {
+  const base = await o.host.defaultBranch(o.repo);
+  const url = o.host.cloneUrl(o.repo);
+  if (!isPlainHttpsUrl(url)) throw new Error(`The code host gave a clone URL for ${o.repo} that is not plain https.`);
+  await o.git(["clone", "--depth", "50", "--no-tags", url, o.dir], { auth: true, cwd: o.workRoot });
+  const viewer = await o.host.viewer().catch((err: unknown) => {
+    console.error("[worker] could not look up the token owner:", o.redact(String(err)));
+    return undefined;
+  });
+  const author = o.host.commitIdentity(o.pointerName, viewer);
+  await o.git(["config", "user.name", author.name]);
+  await o.git(["config", "user.email", author.email]);
+  return { base, author };
+}
+
+/**
+ * Opens the pull (merge) request for the finished work, or updates the one
+ * already open on the branch: a comment with the update and, when it is a
+ * draft of unfinished work, ready for review with the finished work's title
+ * and description instead of the "WIP: …" ones. `title` and `body` are
+ * redacted by the caller.
+ */
+export async function publishPr(o: {
+  host: Pick<CodeHost, "findOpenPr" | "createPr" | "commentOnPr" | "markReady" | "updatePr">;
+  repo: string;
+  branch: string;
+  base: string;
+  title: string;
+  body: string;
+  redact: (text: string) => string;
+}): Promise<{ pr: PrRef; updated: boolean }> {
+  const existing = await o.host.findOpenPr(o.repo, o.branch);
+  if (!existing) return { pr: await o.host.createPr(o.repo, { title: o.title, body: o.body, head: o.branch, base: o.base }), updated: false };
+  await o.host.commentOnPr(o.repo, existing.number, `**Update: ${o.title}**\n\n${o.body}`);
+  if (existing.draft) {
+    await o.host
+      .markReady(o.repo, existing)
+      .then(() => o.host.updatePr(o.repo, existing.number, { title: o.title, body: o.body }))
+      .catch((err: unknown) => console.error(`[worker] could not mark the pull request ready: ${o.redact(errorText(err))}`));
+  }
+  return { pr: existing, updated: true };
+}
+
+/**
+ * Keeps a stopped task's pushed work: a comment on the pull (merge) request
+ * already open on the branch, or a new draft. `body` is only built for a new
+ * draft. Texts are redacted by the caller.
+ */
+export async function saveUnfinishedPr(o: {
+  host: Pick<CodeHost, "findOpenPr" | "createPr" | "commentOnPr">;
+  repo: string;
+  branch: string;
+  base: string;
+  title: string;
+  body: () => Promise<string>;
+  comment: string;
+}): Promise<PrRef> {
+  const existing = await o.host.findOpenPr(o.repo, o.branch);
+  if (existing) {
+    await o.host.commentOnPr(o.repo, existing.number, o.comment);
+    return existing;
+  }
+  return o.host.createPr(o.repo, { title: o.title, body: await o.body(), head: o.branch, base: o.base, draft: true });
+}
+
+export interface FollowChecksDeps {
+  host: Pick<CodeHost, "kind" | "checksFor" | "checkAnnotations" | "jobLog" | "commentOnPr">;
+  repo: string;
+  pr: Pick<PrRef, "number">;
+  limits: Pick<Config["limits"], "ciWaitMin" | "ciFixRounds">;
+  /** When everything must be done (jobDeadline); undefined = no limit. */
+  deadline: number | undefined;
+  base: string;
+  branch: string;
+  request: string;
+  /** What is left of the task's budget for a fix round. */
+  budgetLeft: () => number;
+  git: GitRun;
+  push: () => Promise<unknown>;
+  /** One fix round of the team; it adds the round's cost to the task and keeps its project notes. */
+  runRound: (prompt: string, o: { budgetUsd: number; runMs: number; since: string; phaseLabel: string }) => Promise<{ report?: Report; failure?: string }>;
+  /** Keeps the checks' outcome and the fix round in progress as it goes (the console and Pointer read them). */
+  task: Pick<Task, "ci" | "fixRound">;
+  timeline: Pick<TimelineRecorder, "add" | "checks">;
+  /** The task moved to a step of the checks phase. */
+  onStage: (text: string) => Promise<void>;
+  /** The live progress message (Slack). */
+  progress: (text: string) => Promise<void>;
+  redact: (text: string) => string;
+  now?: () => number;
+  /** Overrides for polling the checks (tests: poll interval, grace, sleep, clock). */
+  wait?: Pick<WaitOptions, "pollMs" | "graceMs" | "sleep" | "now">;
+}
+
+/**
+ * After a push: wait for the pull (merge) request's checks on the host and,
+ * while they fail and rounds, budget and time are left, let the team fix them
+ * (with what the host says failed: annotations and job logs), push the fix,
+ * comment on the request and wait again. Returns the last outcome and, when
+ * the team could not fix them, why.
+ */
+export async function followPrChecks(d: FollowChecksDeps): Promise<{ outcome: CiOutcome; note?: string } | undefined> {
+  const now = d.now ?? Date.now;
+  const { ciWaitMin, ciFixRounds: rounds } = d.limits;
+  const pr = HOST_TERMS[d.host.kind].pr;
+  let fixRounds = 0;
+  let last: CiOutcome | undefined;
+  for (;;) {
+    const waitMs = Math.min(ciWaitMin * 60_000, d.deadline === undefined ? Infinity : d.deadline - now());
+    if (waitMs < 60_000) return last && { outcome: last, note: "No time was left to wait for the checks after the last fix." };
+    await d.onStage(`Waiting for the ${pr}'s checks`);
+    await d.progress(`:hourglass_flowing_sand: Waiting for the ${pr}'s checks…`);
+    const sha = await d.git(["rev-parse", "HEAD"]);
+    const waitStart = now();
+    // Each poll's checks go to the timeline, so the console lists them live.
+    const watched = {
+      checksFor: async (repo: string, ref: string) => {
+        const data = await d.host.checksFor(repo, ref);
+        d.timeline.checks(checkItems(data));
+        return data;
+      },
+    };
+    const wait = await waitForChecks(watched, d.repo, sha, { waitMs, ...d.wait });
+    last = ciSummary(wait, fixRounds);
+    d.timeline.add(
+      {
+        kind: "checks",
+        text: plainLine(ciSummaryLine(last, ciWaitMin, d.host.kind).replace(/\*/g, "")) || "The repository has no checks",
+        ok: last.state === "passed" || last.state === "none",
+        ms: now() - waitStart,
+      },
+      true,
+    );
+    // Kept as it goes, so the console and Pointer see the checks before the task ends.
+    const stored = storedCiSummary(last);
+    if (stored) d.task.ci = stored;
+    if (wait.state !== "failed" || fixRounds >= rounds) return { outcome: last };
+
+    // The task's own budget (capped by what was left of the caps when it started).
+    const budgetUsd = d.budgetLeft();
+    if (budgetUsd < 1) return { outcome: last, note: "Not enough of the task's budget was left to fix them." };
+    const fixMs = fixRunTimeoutMs(d.deadline, now());
+    if (fixMs === null) return { outcome: last, note: "Not enough time was left to fix them." };
+
+    fixRounds += 1;
+    const round = `round ${fixRounds} of ${rounds}`;
+    d.task.fixRound = { round: fixRounds, rounds, failing: last.names.slice(0, 20), at: new Date(now()).toISOString() };
+    d.timeline.add({ kind: "fix-round", text: `Checks failed (${last.names.join(", ")}): fixing them (${round})` }, true);
+    await d.onStage(`Fixing the failing checks (${round})`);
+    await d.progress(`:wrench: Checks failed (${truncate(last.names.join(", "), 200)}): the team is fixing them (${round})…`);
+    const details = await ciFailureDetails(d.host, d.repo, wait, d.redact);
+    const run = await d.runRound(
+      ciFixPrompt(details, { round: fixRounds, rounds, base: d.base, branch: d.branch, request: d.request, host: d.host.kind }),
+      { budgetUsd, runMs: fixMs, since: sha, phaseLabel: `Fixing the failing checks (${round})` },
+    );
+    last = ciSummary(wait, fixRounds);
+
+    // An unfinished or blocked fix is not pushed: the request keeps its last complete state.
+    if (!run.report || run.failure) return { outcome: last, note: `Fixing the checks stopped early: ${run.failure}` };
+    if (run.report.kind === "blocked") {
+      // Markdown; the Slack result converts it.
+      return { outcome: last, note: `**Checks blocked: ${run.report.title}** ${truncate(run.report.summary, 800)}` };
+    }
+    await d.git(["add", "-A"]);
+    if ((await d.git(["status", "--porcelain"])) !== "") await d.git(["commit", "-m", `Fix failing checks: ${run.report.title}`]);
+    if (Number(await d.git(["rev-list", "--count", `${sha}..HEAD`])) === 0) {
+      return { outcome: last, note: "The team changed nothing for the failing checks." };
+    }
+    await d.progress(":rocket: Pushing the fix…");
+    await d.push();
+    d.timeline.add({ kind: "push", text: `Pushed the fix (round ${fixRounds}): ${run.report.title}` }, true);
+    await d.host
+      .commentOnPr(d.repo, d.pr.number, d.redact(fixComment(fixRounds, run.report)))
+      .catch((err: unknown) => console.error(`[worker] fix comment not posted: ${d.redact(errorText(err))}`));
+  }
+}
+
 async function main(): Promise<void> {
   const payload = process.env.TASK_B64;
   if (!payload) throw new Error("TASK_B64 is not set; the worker is started by the server, not by hand.");
@@ -630,8 +888,10 @@ async function main(): Promise<void> {
   const slack = !web && botToken ? slackClient(botToken) : undefined;
 
   const pointerName = config.team.pointer.name;
-  // Every credential, including every GitHub connection's token, not only this task's.
-  const redact = makeRedactor(configSecrets(config));
+  // Every credential, including every code host connection's token, not only this task's;
+  // once the task's code host is known, its client's own credential forms too (see below).
+  let redactor = makeRedactor(configSecrets(config));
+  const redact = (text: string) => redactor(text);
   // The fuller timeline the admin console shows (Slack and console tasks alike).
   const timeline = new TimelineRecorder(store, task.id, { redact });
   const screenshotStore = new ScreenshotRepo(store, masterKey);
@@ -675,8 +935,9 @@ async function main(): Promise<void> {
     }
   };
 
-  // The connection allowed to work on this repository clones, pushes and opens the pull request.
-  const access = taskGitHubToken(config, task.repo);
+  // The repository's code host (the GitHub connection allowed to work on it, GitLab or Bitbucket)
+  // clones, pushes and opens the pull or merge request.
+  const access = codeHostFor(config, task.repo);
   if (!access.ok) {
     task.status = "failed";
     task.error = access.error;
@@ -687,8 +948,11 @@ async function main(): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  const github = new GitHub(access.token);
-  const authHeader = github.gitAuthHeader();
+  const host = access.host;
+  // Whatever forms of its credential the client sends (configSecrets already has the usual ones).
+  redactor = makeRedactor([...configSecrets(config), ...host.secrets()]);
+  // What the host calls a pull request ("merge request" on GitLab), for every message below.
+  const prWord = HOST_TERMS[host.kind].pr;
 
   // Real path: the agents' file tools are given folders by path and do not follow links.
   const workRoot = await realpath(await mkdtemp(join(process.env.WORK_DIR ?? tmpdir(), "army-")));
@@ -699,20 +963,7 @@ async function main(): Promise<void> {
   const shotsDir = join(workRoot, "screenshots");
   // The skills library as a local plugin: next to the checkout as well, so no skill file is ever committed.
   const skillsDir = join(workRoot, "skills-plugin");
-  const git = async (args: string[], opts: { auth?: boolean; cwd?: string } = {}) => {
-    const full = opts.auth ? ["-c", `http.https://github.com/.extraheader=${authHeader}`, ...args] : args;
-    try {
-      const { stdout } = await exec("git", full, {
-        cwd: opts.cwd ?? repoDir,
-        maxBuffer: 16 * 1024 * 1024,
-        env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
-      });
-      return stdout.trim();
-    } catch (err) {
-      const e = err as { stderr?: string; message: string };
-      throw new Error(redact(`git ${args[0]} failed: ${e.stderr?.trim() || e.message}`));
-    }
-  };
+  const git = gitRunner({ host, cwd: repoDir, redact });
 
   task.status = "running";
   await tasks.save(task);
@@ -727,18 +978,7 @@ async function main(): Promise<void> {
     // ---------- 1. Check out the project ----------
     await stage("clone", `Cloning ${task.repo}`);
     await progress(`:package: Cloning \`${task.repo}\`…`, true);
-    const base = await github.defaultBranch(task.repo);
-    await git(["clone", "--depth", "50", "--no-tags", `https://github.com/${task.repo}.git`, repoDir], {
-      auth: true,
-      cwd: workRoot,
-    });
-    const viewer = await github.viewer().catch((err: unknown) => {
-      console.error("[worker] could not look up the token owner:", redact(String(err)));
-      return undefined;
-    });
-    const author = commitIdentity(pointerName, viewer);
-    await git(["config", "user.name", author.name]);
-    await git(["config", "user.email", author.email]);
+    const { base } = await checkoutRepo({ host, repo: task.repo, dir: repoDir, workRoot, git, pointerName, redact });
 
     // A follow-up in the same Slack thread keeps building on the same branch.
     const thread = await tasks.getThread(task.channel, task.threadTs);
@@ -825,14 +1065,22 @@ async function main(): Promise<void> {
     const skills = await prepareSkills(new SkillLibrary(store, masterKey), skillsDir, redact);
     if (skills) timeline.add({ kind: "note", text: skillsNote(skills) });
 
-    // Reviews and comments on the pull request since the last run, by people with write access.
+    // Apps (MCP servers) assigned to the team's agents; an app that cannot be reached is left out, never fails the task.
+    const apps = await repoTaskApps(config, { configRepo: new ConfigRepo(store, masterKey), redact }).catch((err: unknown) => {
+      console.warn("[worker] apps not available:", redact(errorText(err)).slice(0, 300));
+      return undefined;
+    });
+    if (apps) timeline.add({ kind: "note", text: `Apps for this task: ${Object.keys(apps.servers).length}` });
+
+    // Reviews and comments on the pull (merge) request since the last run, by people with write access
+    // (each host maps its own roles onto GitHub's associations, see CodeHost.prFeedback).
     // Feedback written from now on is new to the next run (see lastRunAt below).
     const seenAt = new Date().toISOString();
     let feedback = "";
     if (resumed && prior?.prNumber) {
       try {
-        const items = (await github.prFeedback(task.repo, prior.prNumber)).filter((f) => isHumanFeedback(f, prior.lastRunAt));
-        feedback = redact(formatFeedback(items, { prNumber: prior.prNumber, prUrl: prior.prUrl }));
+        const items = (await host.prFeedback(task.repo, prior.prNumber)).filter((f) => isHumanFeedback(f, prior.lastRunAt));
+        feedback = redact(formatFeedback(items, { prNumber: prior.prNumber, prUrl: prior.prUrl, repo: task.repo }));
       } catch (err) {
         console.error(`[worker] could not read the pull request's feedback: ${redact(errorText(err))}`);
       }
@@ -854,7 +1102,7 @@ async function main(): Promise<void> {
 
     const sharedNote = attachments.length ? ` and ${attachments.length} shared file${attachments.length === 1 ? "" : "s"}` : "";
     await stage("plan", `${pointerName} is reading ${task.repo}${sharedNote} and planning`);
-    if (feedback) timeline.add({ kind: "note", text: "Read the new review feedback on the pull request" });
+    if (feedback) timeline.add({ kind: "note", text: `Read the new review feedback on the ${prWord}` });
     if (browser) timeline.add({ kind: "note", text: "The team has a headless browser for checks" });
 
     // Spending (budget.ts, sizing.ts): the task's budget is what is left of the caps, at most the per-task
@@ -901,6 +1149,7 @@ async function main(): Promise<void> {
       attachments,
       ...(browser ? { browser: { shotsDir } } : {}),
       ...(setup ? { repoSetup: repoSetupContext(setup, setupResult) } : {}),
+      host: host.kind,
     };
 
     const everyMin = config.limits.progressEveryMin;
@@ -978,7 +1227,7 @@ async function main(): Promise<void> {
           options: {
             cwd: repoDir,
             abortController: opts.abort,
-            ...teamQueryOptions(runConfig, opts.context, attachmentsDir, { browser, skills }),
+            ...teamQueryOptions(runConfig, opts.context, attachmentsDir, { browser, skills, apps }),
             // Headless: nothing can prompt, so anything not in allowedTools is denied.
             permissionMode: "dontAsk",
             settingSources: ["project"], // loads the project's own CLAUDE.md
@@ -1027,98 +1276,53 @@ async function main(): Promise<void> {
     };
 
     /**
-     * After a push: wait for the pull request's checks and, while they fail
-     * and rounds, budget and time are left, let the team fix them, push the
-     * fix and wait again. Returns the last outcome and, when the team could
-     * not fix them, why.
+     * One more round of the team after the first (fixing checks, checking the
+     * preview): bounded by `runMs`, its cost added to the task's, its project
+     * notes kept.
      */
-    const followChecks = async (pr: PrRef): Promise<{ outcome: CiOutcome; note?: string } | undefined> => {
-      const { ciWaitMin, ciFixRounds: rounds } = config.limits;
-      let fixRounds = 0;
-      let last: CiOutcome | undefined;
-      for (;;) {
-        const waitMs = Math.min(ciWaitMin * 60_000, deadline === undefined ? Infinity : deadline - Date.now());
-        if (waitMs < 60_000) return last && { outcome: last, note: "No time was left to wait for the checks after the last fix." };
-        await stage("checks", "Waiting for the pull request's checks");
-        await progress(":hourglass_flowing_sand: Waiting for the pull request's checks…", true);
-        const sha = await git(["rev-parse", "HEAD"]);
-        const waitStart = Date.now();
-        // Each poll's checks go to the timeline, so the console lists them live.
-        const watched = {
-          checksFor: async (repo: string, ref: string) => {
-            const data = await github.checksFor(repo, ref);
-            timeline.checks(checkItems(data));
-            return data;
-          },
-        };
-        const wait = await waitForChecks(watched, task.repo, sha, { waitMs });
-        last = ciSummary(wait, fixRounds);
-        timeline.add(
-          {
-            kind: "checks",
-            text: plainLine(ciSummaryLine(last, ciWaitMin).replace(/\*/g, "")) || "The repository has no checks",
-            ok: last.state === "passed" || last.state === "none",
-            ms: Date.now() - waitStart,
-          },
-          true,
-        );
-        // Kept as it goes, so the console and Pointer see the checks before the task ends.
-        const stored = storedCiSummary(last);
-        if (stored) task.ci = stored;
-        if (wait.state !== "failed" || fixRounds >= rounds) return { outcome: last };
-
-        // The task's own budget (capped by what was left of the caps when it started).
-        const budgetUsd = taskBudgetUsd - (task.costUsd ?? 0);
-        if (budgetUsd < 1) return { outcome: last, note: "Not enough of the task's budget was left to fix them." };
-        const fixMs = fixRunTimeoutMs(deadline, Date.now());
-        if (fixMs === null) return { outcome: last, note: "Not enough time was left to fix them." };
-
-        fixRounds += 1;
-        const round = `round ${fixRounds} of ${rounds}`;
-        task.fixRound = { round: fixRounds, rounds, failing: last.names.slice(0, 20), at: new Date().toISOString() };
-        timeline.add({ kind: "fix-round", text: `Checks failed (${last.names.join(", ")}): fixing them (${round})` }, true);
-        await stage("checks", `Fixing the failing checks (${round})`);
-        await progress(`:wrench: Checks failed (${truncate(last.names.join(", "), 200)}): the team is fixing them (${round})…`, true);
-        const details = await ciFailureDetails(github, task.repo, wait, redact);
-        const notesBefore = await loadNotes();
-        const fixAbort = new AbortController();
-        const fixTimer = setTimeout(() => fixAbort.abort(), fixMs);
-        const run = await runTeam(ciFixPrompt(details, { round: fixRounds, rounds, base, branch, request: task.instruction }), {
-          budgetUsd,
-          abort: fixAbort,
-          timeoutMin: Math.round(fixMs / 60_000),
-          since: sha,
-          context: { ...context, projectNotes: notesBefore },
-          phaseLabel: `Fixing the failing checks (${round})`,
-        }).finally(() => clearTimeout(fixTimer));
-        task.costUsd = (task.costUsd ?? 0) + run.costUsd;
-        task.turns = (task.turns ?? 0) + run.turns;
-        last = ciSummary(wait, fixRounds);
-        if (run.report) await saveProjectNotes(notes, task.repo, notesBefore, run.report.projectNotes, redact);
-
-        // An unfinished or blocked fix is not pushed: the pull request keeps its last complete state.
-        if (!run.report || run.failure) return { outcome: last, note: `Fixing the checks stopped early: ${run.failure}` };
-        if (run.report.kind === "blocked") {
-          // Markdown; the Slack result converts it.
-          return { outcome: last, note: `**Checks blocked: ${run.report.title}** ${truncate(run.report.summary, 800)}` };
-        }
-        await git(["add", "-A"]);
-        if ((await git(["status", "--porcelain"])) !== "") await git(["commit", "-m", `Fix failing checks: ${run.report.title}`]);
-        if (Number(await git(["rev-list", "--count", `${sha}..HEAD`])) === 0) {
-          return { outcome: last, note: "The team changed nothing for the failing checks." };
-        }
-        await progress(":rocket: Pushing the fix…", true);
-        await push();
-        timeline.add({ kind: "push", text: `Pushed the fix (round ${fixRounds}): ${run.report.title}` }, true);
-        await github
-          .commentOnPr(task.repo, pr.number, redact(fixComment(fixRounds, run.report)))
-          .catch((err: unknown) => console.error(`[worker] fix comment not posted: ${redact(errorText(err))}`));
-      }
+    const extraRound = async (roundPrompt: string, o: { budgetUsd: number; runMs: number; since: string; phaseLabel: string }) => {
+      const notesBefore = await loadNotes();
+      const roundAbort = new AbortController();
+      const roundTimer = setTimeout(() => roundAbort.abort(), o.runMs);
+      const run = await runTeam(roundPrompt, {
+        budgetUsd: o.budgetUsd,
+        abort: roundAbort,
+        timeoutMin: Math.round(o.runMs / 60_000),
+        since: o.since,
+        context: { ...context, projectNotes: notesBefore },
+        phaseLabel: o.phaseLabel,
+      }).finally(() => clearTimeout(roundTimer));
+      task.costUsd = (task.costUsd ?? 0) + run.costUsd;
+      task.turns = (task.turns ?? 0) + run.turns;
+      if (run.report) await saveProjectNotes(notes, task.repo, notesBefore, run.report.projectNotes, redact);
+      return run;
     };
 
+    /** After a push: the request's checks and the fix rounds (followPrChecks). */
+    const followChecks = (pr: PrRef) =>
+      followPrChecks({
+        host,
+        repo: task.repo,
+        pr,
+        limits: config.limits,
+        deadline,
+        base,
+        branch,
+        request: task.instruction,
+        budgetLeft: () => taskBudgetUsd - (task.costUsd ?? 0),
+        git,
+        push,
+        runRound: extraRound,
+        task,
+        timeline,
+        onStage: (text) => stage("checks", text),
+        progress: (text) => progress(text, true),
+        redact,
+      });
+
     /**
-     * After the checks: open the pull request's preview deployment in the
-     * browser with one more round of the team that changes nothing (see
+     * After the checks: open the pull (merge) request's preview deployment in
+     * the browser with one more round of the team that changes nothing (see
      * preview.ts). Its cost counts toward the task's; screenshots go the same
      * way as the others.
      */
@@ -1135,7 +1339,7 @@ async function main(): Promise<void> {
         browser: Boolean(browser),
         budget: { maxUsd: config.limits.maxBudgetUsd, spentUsd: task.costUsd ?? 0 },
         deadline,
-        github,
+        host,
         repo: task.repo,
         sha,
         since: await git(["show", "-s", "--format=%cI", "HEAD"]).catch(() => undefined),
@@ -1153,23 +1357,8 @@ async function main(): Promise<void> {
           await progress(`:globe_with_meridians: ${text}…`, true);
         },
         onEvent: (e) => timeline.add({ kind: "preview", ...e }, true),
-        runRound: async (roundPrompt, { budgetUsd, runMs }) => {
-          const notesBefore = await loadNotes();
-          const roundAbort = new AbortController();
-          const roundTimer = setTimeout(() => roundAbort.abort(), runMs);
-          const run = await runTeam(roundPrompt, {
-            budgetUsd,
-            abort: roundAbort,
-            timeoutMin: Math.round(runMs / 60_000),
-            since: sha,
-            context: { ...context, projectNotes: notesBefore },
-            phaseLabel: "Checking the preview deployment",
-          }).finally(() => clearTimeout(roundTimer));
-          task.costUsd = (task.costUsd ?? 0) + run.costUsd;
-          task.turns = (task.turns ?? 0) + run.turns;
-          if (run.report) await saveProjectNotes(notes, task.repo, notesBefore, run.report.projectNotes, redact);
-          return run;
-        },
+        runRound: (roundPrompt, { budgetUsd, runMs }) =>
+          extraRound(roundPrompt, { budgetUsd, runMs, since: sha, phaseLabel: "Checking the preview deployment" }),
         postScreenshots: async (url) => {
           const before = shotsForPr();
           await postScreenshots((n) => `:camera: ${plural(n, "screenshot")} from the preview at ${url}.`);
@@ -1266,7 +1455,7 @@ async function main(): Promise<void> {
       });
 
     if (failure || !report) {
-      // ---------- Stopped early: the work so far goes into a draft pull request ----------
+      // ---------- Stopped early: the work so far goes into a draft pull (merge) request ----------
       const reason = failure ?? "The team finished without a report.";
       let saved: PrRef | undefined;
       let pushed = false;
@@ -1275,26 +1464,25 @@ async function main(): Promise<void> {
       const stoppedIn = timeline.phase;
       if (ahead > 0) {
         try {
-          await stage("publish", "Saving the unfinished work in a draft pull request");
-          await progress(":rocket: Saving the unfinished work in a draft pull request…", true);
+          await stage("publish", `Saving the unfinished work in a draft ${prWord}`);
+          await progress(`:rocket: Saving the unfinished work in a draft ${prWord}…`, true);
           await push();
           pushed = true;
           timeline.add({ kind: "push", text: `Pushed branch ${branch}` });
-          const existing = await github.findOpenPr(task.repo, branch);
-          if (existing) {
-            await github.commentOnPr(task.repo, existing.number, redact(stoppedComment(reason, first.plan, where)));
-            saved = existing;
-          } else {
-            const filesChanged = (await git(["diff", "--name-only", startSha, "HEAD"])).split("\n").filter(Boolean).length;
-            saved = await github.createPr(task.repo, {
-              title: redact(wipTitle(task.instruction)),
-              body: redact(draftPrBody({ reason, plan: first.plan, filesChanged, screenshots: shotsForPr(), footer, where })),
-              head: branch,
-              base,
-              draft: true,
-            });
-          }
-          timeline.add({ kind: "pr", text: `${saved.draft ? "Draft pull request" : "Pull request"} #${saved.number} keeps the unfinished work`, url: saved.html_url }, true);
+          saved = await saveUnfinishedPr({
+            host,
+            repo: task.repo,
+            branch,
+            base,
+            title: redact(wipTitle(task.instruction)),
+            body: async () => {
+              const filesChanged = (await git(["diff", "--name-only", startSha, "HEAD"])).split("\n").filter(Boolean).length;
+              return redact(draftPrBody({ reason, plan: first.plan, filesChanged, screenshots: shotsForPr(), footer, where }));
+            },
+            comment: redact(stoppedComment(reason, first.plan, where)),
+          });
+          const label = prLabel(saved.number, host.kind);
+          timeline.add({ kind: "pr", text: `${saved.draft ? `Draft ${label}` : capitalized(label)} keeps the unfinished work`, url: saved.html_url }, true);
         } catch (err) {
           console.error(`[worker] unfinished work not published: ${redact(errorText(err))}`);
           timeline.add({ kind: "error", text: `The unfinished work was not published: ${redact(errorText(err))}` });
@@ -1308,29 +1496,29 @@ async function main(): Promise<void> {
         task.prUrl = saved.html_url;
         task.prDraft = Boolean(saved.draft);
         await saveThreadState(nextThreadState(saved, { reason, at: new Date().toISOString() }));
-        const text = stoppedSlackText({ userId: task.userId, reason, pr: saved, cost: cost() });
+        const text = stoppedSlackText({ userId: task.userId, reason, pr: saved, cost: cost(), host: host.kind });
         await finish([text, ...resultNotes].join("\n\n"), ":warning: Stopped");
       } else {
         await saveThreadState(nextThreadState());
         const partial = !ahead
           ? ""
           : pushed
-            ? ` The unfinished work is on branch \`${branch}\`, but no pull request could be opened.`
+            ? ` The unfinished work is on branch \`${branch}\`, but no ${prWord} could be opened.`
             : " Partial work was not published.";
         if (partial) task.notes = [partial.trim()];
         await finish([`:x: <@${task.userId}> ${reason}${partial}${cost()}`, ...resultNotes].join("\n\n"), ":x: Stopped");
       }
       task.notes = [...(task.notes ?? []), ...resultNotes];
       await ticketStopped(ticket, task, { reason, ...(saved ? { prUrl: saved.html_url, draft: Boolean(saved.draft) } : {}) });
-      await timeline.close(false, saved ? `Stopped: ${reason} The work so far is in pull request #${saved.number}.` : `Stopped: ${reason}`, stoppedIn);
+      await timeline.close(false, saved ? `Stopped: ${reason} The work so far is in ${prLabel(saved.number, host.kind)}.` : `Stopped: ${reason}`, stoppedIn);
     } else {
       const publish = ahead > 0 && report.kind !== "blocked";
       let pr: PrRef | undefined;
       let ci: { outcome: CiOutcome; note?: string } | undefined;
 
       if (publish) {
-        await stage("publish", "Publishing the branch and opening the pull request");
-        await progress(":rocket: Publishing the branch and opening the pull request…", true);
+        await stage("publish", `Publishing the branch and opening the ${prWord}`);
+        await progress(`:rocket: Publishing the branch and opening the ${prWord}…`, true);
         await push();
         timeline.add({ kind: "push", text: `Pushed branch ${branch}` });
         const prBody = redact(
@@ -1344,38 +1532,26 @@ async function main(): Promise<void> {
             .filter(Boolean)
             .join("\n\n"),
         );
-        const existing = await github.findOpenPr(task.repo, branch);
-        if (existing) {
-          await github.commentOnPr(task.repo, existing.number, `**Update: ${redact(report.title)}**\n\n${prBody}`);
-          pr = existing;
-          // Unfinished work kept in a draft is finished now: ready for review, with the
-          // finished work's title and description instead of the "WIP: …" ones.
-          if (existing.draft) {
-            await github
-              .markReadyForReview(existing.node_id)
-              .then(() => github.updatePr(task.repo, existing.number, { title: redact(report.title), body: prBody }))
-              .catch((err: unknown) => console.error(`[worker] could not mark the pull request ready: ${redact(errorText(err))}`));
-          }
-        } else {
-          pr = await github.createPr(task.repo, { title: redact(report.title), body: prBody, head: branch, base });
-        }
-        timeline.add({ kind: "pr", text: `${existing ? "Updated" : "Opened"} pull request #${pr.number}: ${report.title}`, url: pr.html_url }, true);
+        const published = await publishPr({ host, repo: task.repo, branch, base, title: redact(report.title), body: prBody, redact });
+        pr = published.pr;
+        const updated = published.updated;
+        timeline.add({ kind: "pr", text: `${updated ? "Updated" : "Opened"} ${prLabel(pr.number, host.kind)}: ${report.title}`, url: pr.html_url }, true);
         // Saved now, not at the end: waiting for the checks can take a while (the console shows the link meanwhile).
         await saveThreadState(nextThreadState(pr));
         task.prUrl = pr.html_url;
         task.prDraft = false;
         await tasks.save(task).catch((err: unknown) => console.error("[worker] task not saved:", redact(String(err))));
-        await ticketPrOpened(ticket, task, { url: pr.html_url, number: pr.number, title: redact(report.title), updated: Boolean(existing) });
+        await ticketPrOpened(ticket, task, { url: pr.html_url, number: pr.number, title: redact(report.title), updated });
 
         if (config.limits.ciWaitMin <= 0) timeline.skip("checks", "Waiting for checks is turned off");
         if (config.limits.ciWaitMin > 0) {
           try {
             ci = await followChecks(pr);
           } catch (err) {
-            // The pull request is open; only the follow-up on its checks broke (e.g. a fix could not be pushed).
+            // The request is open; only the follow-up on its checks broke (e.g. a fix could not be pushed).
             const message = redact(errorText(err));
             console.error(`[worker] checks not followed: ${message}`);
-            resultNotes.push(`Following the pull request's checks failed: ${truncate(message, 300)}`);
+            resultNotes.push(`Following the ${prWord}'s checks failed: ${truncate(message, 300)}`);
           }
           // Only fix rounds can have added any; those already posted are skipped.
           await postScreenshots((n) => `:camera: ${plural(n, "more screenshot")} from fixing the checks.`);
@@ -1410,18 +1586,19 @@ async function main(): Promise<void> {
             : `Answered: ${report.title}`;
       await ticketFinished(ticket, task);
       await timeline.close(report.kind !== "blocked", endText);
-      const head =
-        report.kind === "blocked"
-          ? `:warning: <@${task.userId}> *Blocked: ${report.title}*`
-          : publish
-            ? `:white_check_mark: <@${task.userId}> *${report.title}* — <${pr?.html_url}|review the pull request>`
-            : `:speech_balloon: <@${task.userId}> *${report.title}*`;
+      const head = resultHeadline({
+        userId: task.userId,
+        title: report.title,
+        outcome: report.kind === "blocked" ? "blocked" : publish ? "published" : "answered",
+        prUrl: pr?.html_url,
+        host: host.kind,
+      });
       const parts = [
         head,
         toMrkdwn(report.summary),
         report.verification && `*Verification:* ${toMrkdwn(report.verification)}`,
         report.risks && `*Risks:* ${toMrkdwn(report.risks)}`,
-        ci && ciSummaryLine(ci.outcome, config.limits.ciWaitMin),
+        ci && ciSummaryLine(ci.outcome, config.limits.ciWaitMin, host.kind),
         ci?.note && toMrkdwn(ci.note),
         task.preview && previewSlackLine(task.preview),
         ...resultNotes,
