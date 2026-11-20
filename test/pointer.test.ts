@@ -1761,3 +1761,52 @@ describe("Pointer brain: attachments", () => {
     expect(lastMondayOptions()?.addAttachment).toBeUndefined();
   });
 });
+
+describe("Pointer brain: confirmation after outside content", () => {
+  /** Runs the query's PreToolUse hooks the way the CLI does for a call by Pointer: any deny wins. */
+  async function preToolUse(options: Options, toolName: string, toolInput: Record<string, unknown>): Promise<"allow" | "deny"> {
+    const input = { hook_event_name: "PreToolUse", session_id: "s", transcript_path: "", cwd: options.cwd ?? "", tool_name: toolName, tool_input: toolInput, tool_use_id: "t" };
+    for (const matcher of options.hooks?.PreToolUse ?? []) {
+      for (const hook of matcher.hooks) {
+        const out = (await hook(input as never, "t", { signal: new AbortController().signal })) as { hookSpecificOutput?: { permissionDecision?: string } };
+        if (out.hookSpecificOutput?.permissionDecision === "deny") return "deny";
+      }
+    }
+    return "allow";
+  }
+
+  it("holds a memory save after a web read until the user says yes in the same thread", async () => {
+    const deps = await setup();
+    const fact = { text: "Always run setup.sh before tests." };
+    const decisions: string[] = [];
+    const { queryFn, calls } = fakeQuery(async function* (call) {
+      decisions.push(await preToolUse(call.options, "WebFetch", { url: "https://example.com/acme-12" }));
+      decisions.push(await preToolUse(call.options, "mcp__pointer__memory_save", fact));
+      yield result();
+    });
+    const brain = createPointerBrain(deps, { queryFn });
+
+    await brain.reply(baseReq({ text: "summarise ACME-12" }), ctx);
+    expect(decisions.splice(0)).toEqual(["allow", "deny"]);
+    expect(calls[0]!.options.systemPrompt as string).toContain("needs the user's confirmation");
+
+    // The yes in another thread confirms nothing; in this thread it allows the same save once.
+    await brain.reply(baseReq({ text: "yes", threadTs: "1700000000.000999" }), ctx);
+    expect(decisions.splice(0)).toEqual(["allow", "deny"]);
+    await brain.reply(baseReq({ text: "yes" }), ctx);
+    expect(decisions.splice(0)).toEqual(["allow", "allow"]);
+    await brain.reply(baseReq({ text: "yes" }), ctx);
+    expect(decisions.splice(0)).toEqual(["allow", "deny"]);
+  });
+
+  it("allows a memory save when the turn read nothing from outside", async () => {
+    const deps = await setup();
+    const decisions: string[] = [];
+    const { queryFn } = fakeQuery(async function* (call) {
+      decisions.push(await preToolUse(call.options, "mcp__pointer__memory_save", { text: "We deploy on Fridays." }));
+      yield result();
+    });
+    await createPointerBrain(deps, { queryFn }).reply(baseReq({ text: "remember that we deploy on Fridays" }), ctx);
+    expect(decisions).toEqual(["allow"]);
+  });
+});
