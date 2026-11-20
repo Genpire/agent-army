@@ -536,6 +536,10 @@ describe("admin API and Slack events", () => {
       expect(await error({ repo: "../x" })).toEqual({ status: 400, error: REPO_FORMAT_HINT });
       expect(await error({ repo: "acme/web", env: { PATH: "/tmp" } })).toEqual({ status: 400, error: "PATH is reserved by the platform." });
       expect(await error({ repo: "acme/web", env: { ANTHROPIC_API_KEY: "x" } })).toEqual({ status: 400, error: "ANTHROPIC_API_KEY is reserved by the platform." });
+      // Names that would send Claude Code's requests, and the platform's key, elsewhere.
+      for (const name of ["ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "AWS_SECRET_ACCESS_KEY", "https_proxy", "NODE_EXTRA_CA_CERTS"]) {
+        expect(await error({ repo: "acme/web", env: { [name]: "x" } })).toEqual({ status: 400, error: `${name} is reserved by the platform.` });
+      }
       expect(await error({ repo: "acme/web", env: { EMPTY: "" } })).toEqual({
         status: 400,
         error: "Empty values are not allowed; send null to delete a variable.",

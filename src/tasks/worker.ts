@@ -18,7 +18,7 @@ import { AttachmentRepo, type ThreadRef, classify, expandZip } from "../chat/att
 import { Spending } from "../spending/budget.js";
 import { type Screenshot, browserAvailable, browserServer, collectScreenshots } from "./browser.js";
 import { type CiOutcome, type WaitOptions, ciFailureDetails, ciFixPrompt, ciSummary, ciSummaryLine, storedCiSummary, waitForChecks } from "./ci.js";
-import { type ProviderSession, providerProblem, providerRuntime } from "../ai/ai-providers.js";
+import { type ProviderSession, providerProblem, providerRuntime, secretParts } from "../ai/ai-providers.js";
 import { repoTaskApps } from "../integrations/apps/apps.js";
 import { repoTaskEngines } from "../ai/engines.js";
 import type { CodeHost } from "../integrations/code-hosts/code-host.js";
@@ -311,16 +311,19 @@ export function makeRedactor(secrets: (string | undefined)[]) {
  * monday.com, the GitHub webhook secret, every code host's credential (every
  * GitHub connection's token, not only the one in use, GitLab's and
  * Bitbucket's) in every form its client sends it (allHostSecrets: tokens, git
- * auth headers and their Basic values), the other integrations'
- * (integrationSecrets), and the values of every repository's setup variables
- * (any of them may be a secret; makeRedactor skips very short ones).
+ * auth headers and their Basic values), the other integrations' and the AI
+ * providers' (integrationSecrets), and the values of every repository's setup
+ * variables (any of them may be a secret; makeRedactor skips very short
+ * ones). Secrets made of parts (a JSON key file, header lines) come with the
+ * parts that can be printed on their own (secretParts).
  */
 export function configSecrets(c: Config): (string | undefined)[] {
   // Repo variables are redacted unless they are plainly not secret (a word like "development", a port):
   // hiding those would garble every Slack message and PR text that happens to contain the word.
   const repoEnv = Object.values(c.repoSetup)
     .flatMap((setup) => Object.values(setup.env))
-    .filter((value) => !/^(?:[A-Za-z]+|\d+)$/.test(value.trim()));
+    .filter((value) => !/^(?:[A-Za-z]+|\d+)$/.test(value.trim()))
+    .flatMap((value) => secretParts(value));
   return [
     c.anthropic.apiKey,
     c.slack.botToken,
@@ -1166,8 +1169,13 @@ export async function main(): Promise<void> {
     // this repository, which cannot override the platform's own names.
     providerSession = await runtime.session();
     const providerEnv = providerSession.env;
+    // Names reserved after they were saved (ANTHROPIC_BASE_URL, HTTPS_PROXY, AWS_…) are left out: they would
+    // redirect Claude Code itself, and the platform's key with it. Their names only are logged.
+    const repoVars = setupEnv(setup);
+    const leftOut = Object.keys(setup?.env ?? {}).filter((name) => !(name in repoVars));
+    if (leftOut.length) console.warn(`[worker] repo variables reserved by the platform were left out: ${leftOut.join(", ")}`);
     const agentEnv: Record<string, string> = {
-      ...setupEnv(setup),
+      ...repoVars,
       PATH: process.env.PATH ?? "",
       HOME: process.env.HOME ?? "/tmp",
       LANG: process.env.LANG ?? "C.UTF-8",

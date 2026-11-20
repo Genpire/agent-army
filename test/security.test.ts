@@ -38,6 +38,32 @@ describe("security fixes from review", () => {
     expect(checkBashCommand("npm test")).toBeNull();
   });
 
+  it("blocks reading the cloud providers' and coding engines' credentials", () => {
+    for (const cmd of [
+      "echo $AWS_SECRET_ACCESS_KEY",
+      "echo ${AWS_SESSION_TOKEN}",
+      "printf %s \"$AWS_ACCESS_KEY_ID\"",
+      "echo $AWS_BEARER_TOKEN_BEDROCK",
+      "cat $GOOGLE_APPLICATION_CREDENTIALS",
+      "jq -r .private_key \"$GOOGLE_APPLICATION_CREDENTIALS\"",
+      "echo $ANTHROPIC_VERTEX_PROJECT_ID",
+      "echo $ANTHROPIC_GOOGLE_CLOUD_WORKSPACE_ID $ANTHROPIC_GOOGLE_CLOUD_PROJECT",
+      "echo $ANTHROPIC_FOUNDRY_API_KEY",
+      "python -c 'import os; print(os.environ[\"OPENAI_API_KEY\"])'",
+      "echo $CODEX_API_KEY",
+      "node -e 'console.log(process.env.GEMINI_API_KEY)'",
+      // The key file itself, found by listing the temp folder.
+      "cat /tmp/ai-credentials-123-AbCdEf/google_application_credentials.json",
+      "cat /tmp/ai-credentials-*/*",
+    ]) {
+      expect(checkBashCommand(cmd), cmd).not.toBeNull();
+    }
+    // Names that only look alike, and the region, are fine.
+    for (const cmd of ["AWS_REGION=us-east-1 npm test", "echo $MY_OPENAI_API_KEY_NAME", "grep -r GEMINI src/", "aws --version"]) {
+      expect(checkBashCommand(cmd), cmd).toBeNull();
+    }
+  });
+
   it("keeps notes added while a task ran", () => {
     const previous = "- uses pnpm";
     const current = "- uses pnpm\n- tests need Docker";

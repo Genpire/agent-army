@@ -15,6 +15,8 @@ import {
   buildRuntime,
   connectionOf,
   connectionProblem,
+  connectionSecretParts,
+  effectiveSettings,
   presetFor,
   providerProblem,
   testConnection,
@@ -123,7 +125,21 @@ const ACTIVE = z
   .strict()
   .refine((x) => x.chatProvider || x.taskProvider, "Choose the provider for chat, for repo tasks, or both.");
 
-/** The saved connection with the changes applied, or why the changes do not fit the preset. */
+/** A field's label inside a sentence: "Token" → "token"; names and acronyms ("API key", "Bedrock API key") as they are. */
+function labelInSentence(label: string, preset: AiPreset): string {
+  const first = label.split(" ")[0] ?? "";
+  return first === first.toUpperCase() || preset.name.includes(first) ? label : label.charAt(0).toLowerCase() + label.slice(1);
+}
+
+const listed = (items: string[]) => (items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`);
+
+/**
+ * The saved connection with the changes applied, or why the changes do not
+ * fit the preset. When a setting the secrets' address depends on changes (a
+ * base URL, a resource, a region: PresetField.address), the saved secrets are
+ * not reused: each must come again in the same changes (or be removed with
+ * null), so a saved token is never sent to a new host, by a test or a save.
+ */
 export function applyChanges(preset: AiPreset, saved: ConnectionValues | undefined, changes: Changes): { conn: ConnectionValues } | { error: string } {
   const secretKeys = new Set(preset.fields.filter((f) => f.secret).map((f) => f.key));
   const settingKeys = new Set(preset.fields.filter((f) => !f.secret).map((f) => f.key));
@@ -133,15 +149,23 @@ export function applyChanges(preset: AiPreset, saved: ConnectionValues | undefin
   if (preset.id === "anthropic" && Object.keys(changes.models ?? {}).some((t) => t !== "main")) {
     return { error: "Anthropic runs Claude's own models: only the main model can be chosen." };
   }
-  const secrets = { ...(saved?.secrets ?? {}) };
-  for (const [key, value] of Object.entries(changes.secrets ?? {})) {
-    if (value === null) delete secrets[key];
-    else if (value.trim()) secrets[key] = value.trim();
-  }
   const settings = { ...(saved?.settings ?? {}) };
   for (const [key, value] of Object.entries(changes.settings ?? {})) {
     if (value.trim()) settings[key] = value.trim();
     else delete settings[key];
+  }
+  // Compared with their defaults applied: a region typed as its default has not moved.
+  const before = effectiveSettings(preset, saved?.settings ?? {});
+  const after = effectiveSettings(preset, settings);
+  const moved = Boolean(saved) && preset.fields.some((f) => f.address && before[f.key] !== after[f.key]);
+  const secrets = moved ? {} : { ...(saved?.secrets ?? {}) };
+  for (const [key, value] of Object.entries(changes.secrets ?? {})) {
+    if (value === null) delete secrets[key];
+    else if (value.trim()) secrets[key] = value.trim();
+  }
+  if (moved) {
+    const again = preset.fields.filter((f) => f.secret && saved?.secrets[f.key] && !(f.key in secrets) && changes.secrets?.[f.key] !== null);
+    if (again.length) return { error: `Paste the ${listed(again.map((f) => labelInSentence(f.label, preset)))} again for the new address.` };
   }
   const models: Partial<Record<ModelTier, string>> = { ...(saved?.models ?? {}) };
   for (const [tier, value] of Object.entries(changes.models ?? {}) as [ModelTier, string][]) {
@@ -172,8 +196,8 @@ export function aiRoutes(deps: IntegrationRouteDeps, check: ConnectionTestDeps =
     const parsed = schema.safeParse(raw ?? {});
     return parsed.success ? { data: parsed.data } : { error: parsed.error.issues[0]?.message ?? "Invalid input." };
   };
-  /** Errors from a provider are redacted again with every secret the config holds, the new values included. */
-  const redactor = (config: Config, conn: ConnectionValues) => makeRedactor([...configSecrets(config), ...Object.values(conn.secrets)]);
+  /** Errors from a provider are redacted again with every secret the config holds, the new values (and their parts) included. */
+  const redactor = (config: Config, conn: ConnectionValues) => makeRedactor([...configSecrets(config), ...connectionSecretParts(conn.secrets)]);
 
   router.get("/api/ai/providers", requireAdmin, async (_req, res) => {
     res.json(providersView(await configRepo.load(true)));

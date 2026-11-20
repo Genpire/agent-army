@@ -55,6 +55,7 @@ import { checkAnthropic, checkGithub, checkSlack } from "./core/validate.js";
 import { UsageRepo } from "./spending/usage.js";
 import { handleGithubWebhook, parseGithubPayload, verifyGithubSignature } from "./integrations/code-hosts/webhook.js";
 import { configSecrets, makeRedactor } from "./tasks/worker.js";
+import { removeStaleCredentialFolders } from "./ai/ai-providers.js";
 import { aiRoutes } from "./routes/ai.js";
 import { appsRoutes } from "./routes/apps.js";
 import { bitbucketRoutes } from "./routes/bitbucket.js";
@@ -1314,6 +1315,7 @@ function agentIdAt(input: unknown, index: number): string | undefined {
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  void removeStaleCredentialFolders(); // Google key files left by processes that died (ai-providers.ts)
   const port = Number(process.env.PORT ?? 8080);
   const { app, runner, store } = await createApp();
   app.listen(port, () => {

@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import { removeStaleCredentialFolders } from "./ai/ai-providers.js";
 import { main } from "./tasks/worker.js";
 
 /**
@@ -7,6 +8,7 @@ import { main } from "./tasks/worker.js";
  * lives in tasks/worker.ts.
  */
 if (process.argv[1] && resolve(process.argv[1]).endsWith("worker.js")) {
+  void removeStaleCredentialFolders(); // Google key files left by workers that died (ai-providers.ts)
   main().catch((err) => {
     console.error("[worker] fatal:", err instanceof Error ? err.message : err);
     process.exit(1);
