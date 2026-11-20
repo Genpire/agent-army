@@ -3,7 +3,24 @@ import { HStack } from "@astryxdesign/core/HStack";
 import { Layout, LayoutContent, LayoutHeader } from "@astryxdesign/core/Layout";
 import { Text } from "@astryxdesign/core/Text";
 import { VStack } from "@astryxdesign/core/VStack";
+import { spacingVars } from "@astryxdesign/core/theme/tokens.stylex";
+import * as stylex from "@stylexjs/stylex";
 import type { ReactNode } from "react";
+import { useRoute } from "../lib/router";
+import { hasChatFab } from "../pages/chat/fab";
+
+const styles = stylex.create({
+  // The button's height plus its offset from the viewport's edge (36 + 24
+  // desktop, 32 + 16 narrow; see ChatLauncher) and a gap. The frame's own end
+  // padding does not count: full-bleed tables reach into it.
+  fabClearance: {
+    flexShrink: 0,
+    height: {
+      default: `calc(${spacingVars["--spacing-12"]} + ${spacingVars["--spacing-6"]})`,
+      "@media (max-width: 768px)": `calc(${spacingVars["--spacing-12"]} + ${spacingVars["--spacing-3"]})`,
+    },
+  },
+});
 
 export interface PageFrameProps {
   title: string;
@@ -18,6 +35,7 @@ export interface PageFrameProps {
 
 /** Every page's frame: a header with title, description and actions, then the content at a readable width. */
 export function PageFrame({ title, description, actions, nav, children }: PageFrameProps) {
+  const { page } = useRoute();
   return (
     <Layout
       height="fill"
@@ -49,6 +67,8 @@ export function PageFrame({ title, description, actions, nav, children }: PageFr
       content={
         <LayoutContent isScrollable>
           {children}
+          {/* Room under the last content for the floating chat button, so at the end of the scroll it covers nothing. */}
+          {hasChatFab(page) && <VStack aria-hidden xstyle={styles.fabClearance} />}
         </LayoutContent>
       }
     />

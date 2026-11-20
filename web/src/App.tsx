@@ -31,6 +31,8 @@ import type { PublicConfig } from "./lib/types";
 import ActivityPage from "./pages/activity";
 import { LoginScreen, SetupScreen } from "./pages/auth";
 import ChatPage from "./pages/chat";
+import { ChatLauncher } from "./pages/chat/ChatLauncher";
+import { ChatSessionProvider } from "./pages/chat/ChatSession";
 import IntegrationsPage from "./pages/integrations";
 import MemoryPage from "./pages/memory";
 import OfficePage from "./pages/office";
@@ -91,52 +93,56 @@ function Console({ config }: { config: PublicConfig }) {
   const missing = missingIntegrations(config);
 
   return (
-    <AppShell
-      contentPadding={0}
-      sideNav={
-        <SideNav
-          collapsible
-          resizable={{ defaultWidth: 248, minWidth: 208, maxWidth: 320 }}
-          header={
-            <SideNavHeading
-              heading="Agent Army"
-              icon={<NavIcon icon={<Icon icon={CursorArrowRaysIcon} size="sm" />} />}
-              headingHref={href("overview")}
-            />
-          }
-          footer={
-            <SideNavSection title="Account" isHeaderHidden>
-              <SideNavItem label="Settings" icon={Cog6ToothIcon} href={href("settings")} isSelected={route.page === "settings"} />
-              <SideNavItem
-                label="Sign out"
-                icon={ArrowRightStartOnRectangleIcon}
-                onClick={async () => {
-                  await api.post("/api/logout").catch(() => undefined);
-                  await refresh();
-                }}
+    // The chat window (opened by the floating button) and the Chat page share the current conversation.
+    <ChatSessionProvider>
+      <AppShell
+        contentPadding={0}
+        sideNav={
+          <SideNav
+            collapsible
+            resizable={{ defaultWidth: 248, minWidth: 208, maxWidth: 320 }}
+            header={
+              <SideNavHeading
+                heading="Agent Army"
+                icon={<NavIcon icon={<Icon icon={CursorArrowRaysIcon} size="sm" />} />}
+                headingHref={href("overview")}
               />
+            }
+            footer={
+              <SideNavSection title="Account" isHeaderHidden>
+                <SideNavItem label="Settings" icon={Cog6ToothIcon} href={href("settings")} isSelected={route.page === "settings"} />
+                <SideNavItem
+                  label="Sign out"
+                  icon={ArrowRightStartOnRectangleIcon}
+                  onClick={async () => {
+                    await api.post("/api/logout").catch(() => undefined);
+                    await refresh();
+                  }}
+                />
+              </SideNavSection>
+            }>
+            <SideNavSection title="Console" isHeaderHidden>
+              {NAV.map((item) => (
+                <SideNavItem
+                  key={item.page}
+                  label={item.label}
+                  icon={item.icon}
+                  href={href(item.page)}
+                  isSelected={route.page === item.page}
+                  endContent={
+                    item.page === "integrations" && missing > 0 ? (
+                      <StatusDot variant="warning" label={`${missing} to connect`} tooltip={`${missing} of Claude, Slack and a code host still to connect`} />
+                    ) : undefined
+                  }
+                />
+              ))}
             </SideNavSection>
-          }>
-          <SideNavSection title="Console" isHeaderHidden>
-            {NAV.map((item) => (
-              <SideNavItem
-                key={item.page}
-                label={item.label}
-                icon={item.icon}
-                href={href(item.page)}
-                isSelected={route.page === item.page}
-                endContent={
-                  item.page === "integrations" && missing > 0 ? (
-                    <StatusDot variant="warning" label={`${missing} to connect`} tooltip={`${missing} of Claude, Slack and a code host still to connect`} />
-                  ) : undefined
-                }
-              />
-            ))}
-          </SideNavSection>
-          <Divider />
-        </SideNav>
-      }>
-      <PageComponent key={route.page} />
-    </AppShell>
+            <Divider />
+          </SideNav>
+        }>
+        <PageComponent key={route.page} />
+      </AppShell>
+      <ChatLauncher page={route.page} />
+    </ChatSessionProvider>
   );
 }
