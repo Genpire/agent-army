@@ -1,5 +1,6 @@
 import type { WebClient } from "@slack/web-api";
-import { ATTACHMENT_LIMITS, type AttachmentRepo, type ThreadRef } from "../chat/attachments.js";
+import { ATTACHMENT_LIMITS, type AttachmentRepo, type ThreadRef, classify } from "../chat/attachments.js";
+import { transcribeAttachment } from "../chat/transcribe.js";
 import { type Config, isChatReady } from "../core/config.js";
 import { repoAccessError } from "../integrations/code-hosts/code-host-access.js";
 import {
@@ -281,6 +282,11 @@ async function storeSharedFiles(
       const file = await downloadSlackFile(ctx.slack, ctx.botToken, f);
       const added = await repo.add(where, { ...file, source: "slack", sourceId: f.id });
       if (!added.ok) unread.push(`${fileLabel(f)} (${reasonText(added.error)})`);
+      // Voice clips and other audio: Pointer reads what was said (transcribe.ts), never the sound.
+      else if (classify(added.info.name, added.info.mime) === "audio") {
+        const heard = await transcribeAttachment(repo, where, added.info, ctx.config, { bytes: file.bytes });
+        if (!heard.ok) unread.push(`${fileLabel(f)} (voice message not transcribed: ${reasonText(heard.error)})`);
+      }
     } catch (err) {
       unread.push(`${fileLabel(f)} (${reasonText(ctx.redact(errorText(err)))})`);
     }

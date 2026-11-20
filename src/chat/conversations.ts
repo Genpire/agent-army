@@ -1,5 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { providerProblem } from "../ai/ai-providers.js";
+import { ATTACHMENT_LIMITS, type AttachmentInfo, type AttachmentRepo, type ThreadRef, checkUpload, classify, isAttachmentId } from "./attachments.js";
+import { type TranscribeOptions, type TranscribeResult, transcribeAttachment } from "./transcribe.js";
 import type { Spending } from "../spending/budget.js";
 import type { Config, ConfigRepo } from "../core/config.js";
 import { KeyedQueue } from "../slack/listen.js";
@@ -31,7 +33,12 @@ import { configSecrets, makeRedactor } from "../tasks/worker.js";
  * into the conversation: their live progress through the task records, their
  * milestones (pull request opened, checks failing, result) as Pointer
  * messages derived from the task records when the conversation is read.
- * Message text is never logged.
+ * Files and voice messages are uploaded to the conversation's thread in the
+ * attachment store first (channel "web", thread = the conversation id, the
+ * same place Slack files live), then sent with a message: Pointer reads them
+ * like Slack files and repo tasks started here get them. Before the first
+ * message a conversation's uploads go to a draft id it then takes.
+ * Message text, file contents and transcripts are never logged.
  */
 
 export const WEB_USER_ID = "admin";
@@ -47,6 +54,13 @@ const LIVE_TEXT_MAX = 20_000;
 export const ACTIVITY_MAX = 100;
 /** Repo tasks of one conversation returned with it, newest first. */
 const TASKS_SHOWN = 30;
+/** Files one message carries (as many as Slack reads per message). */
+export const MAX_FILES_PER_MESSAGE = 10;
+/** The longest voice message the console records. */
+export const MAX_RECORDING_MS = 10 * 60_000;
+/** Drafts (uploads before a conversation's first message) kept in memory, and for how long. */
+const DRAFTS_MAX = 200;
+const DRAFT_TTL_MS = 24 * 60 * 60_000;
 
 export const CONVERSATION_ID_RE = /^c-[0-9a-z]{9}-[0-9a-f]{6}$/;
 
@@ -65,11 +79,16 @@ export interface ActivityStep {
 /** What a task milestone message reports: the pull request opened, checks failing (a fix round), the result. */
 export type TaskMilestone = "pr" | "checks" | "end";
 
+/** A file sent with a message; its bytes are at GET /api/conversations/:id/attachments/:fileId. */
+export type MessageFile = Pick<AttachmentInfo, "id" | "name" | "mime" | "size" | "durationMs">;
+
 export interface ChatMessage {
   id: string;
   role: "user" | "pointer";
-  /** Markdown. */
+  /** Markdown; may be empty when the message carries files. */
   text: string;
+  /** Files and voice messages sent with this (user) message. */
+  files?: MessageFile[];
   at: string;
   costUsd?: number;
   isError?: boolean;
@@ -375,13 +394,28 @@ export function insertByTime(messages: ChatMessage[], added: ChatMessage[]): Cha
   return out;
 }
 
-/** The conversation so far as Pointer's history (oldest first, the newest HISTORY_MAX). */
+const isVoice = (f: Pick<MessageFile, "name" | "mime">) => classify(f.name, f.mime) === "audio";
+const fileNames = (files: MessageFile[]) => files.map((f) => `${f.name}${isVoice(f) ? " (voice message)" : ""}`).join(", ");
+
+/** What Pointer reads for a message sent with files only, like Slack's bare file shares. */
+export function filesOnlyText(files: MessageFile[]): string {
+  if (files.length === 1 && isVoice(files[0]!)) return `(sent a voice message without text: ${fileNames(files)})`;
+  return `(shared ${files.length === 1 ? "a file" : `${files.length} files`} without a message: ${fileNames(files)})`;
+}
+
+/** A conversation's name when its first message has files only. */
+function filesTitle(files: MessageFile[]): string {
+  if (files.length === 1) return isVoice(files[0]!) ? "Voice message" : files[0]!.name;
+  return `${files.length} files`;
+}
+
+/** The conversation so far as Pointer's history (oldest first, the newest HISTORY_MAX); messages note the files they carried. */
 export function toHistory(messages: ChatMessage[], pointerName: string): ConversationMessage[] {
   return messages.slice(-HISTORY_MAX).map((m) => ({
     ts: m.at,
     ...(m.role === "user" ? { userId: WEB_USER_ID } : {}),
     name: m.role === "user" ? WEB_USER_NAME : pointerName,
-    text: m.text,
+    text: m.files?.length ? (m.text ? `${m.text}\n[Attached: ${fileNames(m.files)}]` : filesOnlyText(m.files)) : m.text,
     isPointer: m.role === "pointer",
   }));
 }
@@ -399,10 +433,36 @@ export interface ConversationDeps {
   spending?: Pick<Spending, "checkTask" | "checkChat" | "notify">;
   /** The concurrency limit Slack answers use; without it, answers run unlimited (tests). */
   brainSlot?: <T>(fn: () => Promise<T>) => Promise<T>;
+  /** The attachment store Slack files use; without it, the console takes no files (older tests). */
+  attachments?: AttachmentRepo;
   now?: () => Date;
 }
 
 export type SendResult = { ok: true; conversation: Conversation } | { ok: false; status: 400 | 404 | 409; error: string };
+
+/** Files to send with a message (ids from uploads to this conversation, or to `draftId` before its first message). */
+export interface SendFiles {
+  attachmentIds?: string[];
+  /** POST /api/conversations: the draft the files were uploaded to; the conversation takes its id. */
+  draftId?: string;
+}
+
+/** One file uploaded from the console: the browser's name and type, and its bytes. */
+export interface Upload {
+  name: string;
+  type: string;
+  bytes: Uint8Array;
+  /** A voice message's length as recorded (display only). */
+  durationMs?: number;
+}
+
+export type UploadResult =
+  | { ok: true; conversationId: string; info: AttachmentInfo }
+  | { ok: false; status: 400 | 404 | 409 | 413 | 415; error: string };
+
+export type TranscribeCallResult =
+  | TranscribeResult
+  | { ok: false; reason: "not-found"; error: string };
 
 export type DirectTaskResult =
   | { ok: true; conversationId: string; taskId: string }
@@ -431,10 +491,28 @@ export interface DirectTaskOptions {
 
 const STILL_ANSWERING = "Pointer is still answering. Wait for the reply, then send your next message.";
 const NOT_FOUND = "Conversation not found.";
+const NO_FILES = "Files cannot be attached here.";
+const DRAFT_GONE = "The files you attached are no longer waiting here (the server restarted). Remove them and attach them again.";
+const FILE_GONE = "A file you attached is no longer here. Remove it and attach it again.";
 const NOT_CONNECTED = "Claude is not connected. Add the Anthropic API key on the Integrations page, then ask again.";
 const INTERRUPTED = "This reply was interrupted (the server restarted). Send your message again.";
 
 const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+/** Where a console conversation's files live: the same store and key Slack threads use. */
+const threadOf = (conversationId: string): ThreadRef => ({ channel: WEB_CHANNEL, threadTs: conversationId });
+
+/** Files the conversation's messages already carry. */
+const sentFileIds = (c: Conversation): Set<string> => new Set(c.messages.flatMap((m) => (m.files ?? []).map((f) => f.id)));
+
+/** Why a new message cannot be sent as written, or null. */
+function messageProblem(body: string, attachmentIds: string[]): string | null {
+  if (!body && attachmentIds.length === 0) return "Write a message first.";
+  if (body.length > MESSAGE_MAX_CHARS) return `Messages are limited to ${MESSAGE_MAX_CHARS} characters.`;
+  if (new Set(attachmentIds).size > MAX_FILES_PER_MESSAGE) return `A message can carry ${MAX_FILES_PER_MESSAGE} files.`;
+  if (attachmentIds.some((id) => !isAttachmentId(id))) return FILE_GONE;
+  return null;
+}
 
 export class ConversationService implements WebThreads {
   readonly repo: ConversationRepo;
@@ -443,6 +521,8 @@ export class ConversationService implements WebThreads {
   private readonly live = new Map<string, { reply: LiveReply; redact: (text: string) => string }>();
   /** Answers running in this process; a pending conversation without one was interrupted. */
   private readonly answering = new Map<string, Promise<void>>();
+  /** Ids handed out for uploads before a conversation's first message, with when (ms). */
+  private readonly drafts = new Map<string, number>();
 
   constructor(private readonly deps: ConversationDeps) {
     this.repo = new ConversationRepo(deps.store);
@@ -460,51 +540,181 @@ export class ConversationService implements WebThreads {
     return this.repo.list();
   }
 
-  /** Starts a conversation with its first message; Pointer answers in the background. */
-  async create(text: string): Promise<SendResult> {
+  /**
+   * Starts a conversation with its first message; Pointer answers in the
+   * background. With files, `draftId` is the id they were uploaded to, and
+   * the conversation takes it.
+   */
+  async create(text: string, files: SendFiles = {}): Promise<SendResult> {
     const body = text.trim();
-    if (!body) return { ok: false, status: 400, error: "Write a message first." };
-    if (body.length > MESSAGE_MAX_CHARS) return { ok: false, status: 400, error: `Messages are limited to ${MESSAGE_MAX_CHARS} characters.` };
-    const now = this.iso();
-    const first: ChatMessage = { id: newMessageId(), role: "user", text: body, at: now };
-    const c: Conversation = {
-      id: newConversationId(this.now().getTime()),
-      title: conversationTitle(body),
-      createdAt: now,
-      updatedAt: now,
-      pending: true,
-      messages: [first],
-      taskIds: [],
-    };
-    await this.queue.run(c.id, async () => {
+    const ids = files.attachmentIds ?? [];
+    const problem = messageProblem(body, ids);
+    if (problem) return { ok: false, status: 400, error: problem };
+    let id = newConversationId(this.now().getTime());
+    if (ids.length || files.draftId) {
+      if (!files.draftId || !this.isDraft(files.draftId)) return { ok: false, status: 400, error: DRAFT_GONE };
+      id = files.draftId;
+    }
+    return this.queue.run(id, async (): Promise<SendResult> => {
+      if (await this.repo.get(id)) return { ok: false, status: 409, error: "That conversation has already started." };
+      const picked = await this.pickFiles(id, ids, new Set());
+      if (!picked.ok) return { ok: false, status: 400, error: picked.error };
+      const now = this.iso();
+      const first: ChatMessage = { id: newMessageId(), role: "user", text: body, at: now, ...(picked.files.length ? { files: picked.files } : {}) };
+      const c: Conversation = {
+        id,
+        title: conversationTitle(body || filesTitle(picked.files)),
+        createdAt: now,
+        updatedAt: now,
+        pending: true,
+        messages: [first],
+        taskIds: [],
+      };
       await this.repo.save(c, this.now());
+      this.drafts.delete(id);
       // Inside the queue: nothing reads the conversation between the save and the answer starting.
       this.answerLater(c.id, first);
+      return { ok: true, conversation: c };
     });
-    return { ok: true, conversation: c };
   }
 
-  /** Adds a message; 409 while Pointer is still answering the last one. */
-  send(id: string, text: string): Promise<SendResult> {
+  /** Adds a message, with the files uploaded for it; 409 while Pointer is still answering the last one. */
+  send(id: string, text: string, files: Pick<SendFiles, "attachmentIds"> = {}): Promise<SendResult> {
     const body = text.trim();
-    if (!body) return Promise.resolve({ ok: false, status: 400, error: "Write a message first." });
-    if (body.length > MESSAGE_MAX_CHARS) {
-      return Promise.resolve({ ok: false, status: 400, error: `Messages are limited to ${MESSAGE_MAX_CHARS} characters.` });
-    }
+    const ids = files.attachmentIds ?? [];
+    const problem = messageProblem(body, ids);
+    if (problem) return Promise.resolve({ ok: false, status: 400, error: problem });
     return this.queue.run(id, async (): Promise<SendResult> => {
       const c = await this.repo.get(id);
       if (!c) return { ok: false, status: 404, error: NOT_FOUND };
       this.recoverInterrupted(c);
       if (c.pending) return { ok: false, status: 409, error: STILL_ANSWERING };
+      const picked = await this.pickFiles(id, ids, sentFileIds(c));
+      if (!picked.ok) return { ok: false, status: 400, error: picked.error };
       // Task milestones first, so they sit before the new message (and Pointer sees them).
       c.messages = insertByTime(c.messages, pendingMilestones(c, await this.tasksOf(c)));
-      const message: ChatMessage = { id: newMessageId(), role: "user", text: body, at: this.iso() };
+      const message: ChatMessage = {
+        id: newMessageId(),
+        role: "user",
+        text: body,
+        at: this.iso(),
+        ...(picked.files.length ? { files: picked.files } : {}),
+      };
       c.messages.push(message);
       c.pending = true;
       await this.repo.save(c, this.now());
       this.answerLater(c.id, message);
       return { ok: true, conversation: c };
     });
+  }
+
+  // ---------- Files and voice messages ----------
+
+  /** An id for uploads before a conversation's first message; the conversation takes it when it starts. */
+  startDraft(): string {
+    const now = this.now().getTime();
+    for (const [id, at] of this.drafts) if (now - at > DRAFT_TTL_MS) this.drafts.delete(id);
+    while (this.drafts.size >= DRAFTS_MAX) this.drafts.delete(this.drafts.keys().next().value!);
+    const id = newConversationId(now);
+    this.drafts.set(id, now);
+    return id;
+  }
+
+  private isDraft(id: string): boolean {
+    const at = this.drafts.get(id);
+    return at !== undefined && this.now().getTime() - at <= DRAFT_TTL_MS;
+  }
+
+  /** The conversation, or a draft's uploads, exists: its files may be read, added and transcribed. */
+  async hasFiles(id: string): Promise<boolean> {
+    if (!CONVERSATION_ID_RE.test(id)) return false;
+    return this.isDraft(id) || Boolean(await this.repo.get(id));
+  }
+
+  /**
+   * Stores one console upload in the conversation's thread (`id`, or "new" to
+   * start a draft). Its type is decided from its bytes (checkUpload); at most
+   * MAX_FILES_PER_MESSAGE files wait unsent, and the thread's limit applies.
+   */
+  async upload(id: string, file: Upload): Promise<UploadResult> {
+    const repo = this.deps.attachments;
+    if (!repo) return { ok: false, status: 404, error: NO_FILES };
+    if (id !== "new" && !(await this.hasFiles(id))) return { ok: false, status: 404, error: NOT_FOUND };
+    const checked = checkUpload(file.name, file.type, file.bytes);
+    if (!checked.ok) {
+      const status = file.bytes.byteLength > ATTACHMENT_LIMITS.maxFileBytes ? 413 : file.bytes.byteLength === 0 || !file.name.trim() ? 400 : 415;
+      return { ok: false, status, error: checked.error };
+    }
+    const target = id === "new" ? this.startDraft() : id;
+    return this.queue.run(target, async (): Promise<UploadResult> => {
+      const c = await this.repo.get(target);
+      const sent = c ? sentFileIds(c) : new Set<string>();
+      const stored = await repo.list(threadOf(target));
+      if (stored.filter((f) => f.source === "web" && !sent.has(f.id)).length >= MAX_FILES_PER_MESSAGE) {
+        return { ok: false, status: 409, error: `A message can carry ${MAX_FILES_PER_MESSAGE} files. Send these first, or remove some.` };
+      }
+      if (stored.length >= ATTACHMENT_LIMITS.maxFilesPerThread) {
+        return { ok: false, status: 409, error: `This conversation already has ${stored.length} files, the most it can hold. Start a new conversation for more.` };
+      }
+      const duration = classify(checked.name, checked.mime) === "audio" && file.durationMs !== undefined ? Math.min(Math.max(0, file.durationMs), MAX_RECORDING_MS) : undefined;
+      const added = await repo.add(threadOf(target), {
+        name: checked.name,
+        mime: checked.mime,
+        bytes: file.bytes,
+        source: "web",
+        ...(duration !== undefined ? { durationMs: duration } : {}),
+      });
+      if (!added.ok) return { ok: false, status: 409, error: added.error };
+      return { ok: true, conversationId: target, info: added.info };
+    });
+  }
+
+  /** Removes a file uploaded but not sent yet; 409 once a message carries it. */
+  async removeUpload(id: string, fileId: string): Promise<{ ok: true } | { ok: false; status: 404 | 409; error: string }> {
+    const repo = this.deps.attachments;
+    if (!repo || !(await this.hasFiles(id))) return { ok: false, status: 404, error: NOT_FOUND };
+    return this.queue.run(id, async () => {
+      const c = await this.repo.get(id);
+      if (c && sentFileIds(c).has(fileId)) return { ok: false as const, status: 409 as const, error: "That file was already sent; it stays with its message." };
+      const info = (await repo.list(threadOf(id))).find((f) => f.id === fileId);
+      if (!info || info.source !== "web") return { ok: false as const, status: 404 as const, error: "File not found." };
+      await repo.remove(threadOf(id), fileId);
+      return { ok: true as const };
+    });
+  }
+
+  /** One of the conversation's own files, with its bytes; null when it has no such file. */
+  async file(id: string, fileId: string): Promise<{ info: AttachmentInfo; bytes: Buffer } | null> {
+    const repo = this.deps.attachments;
+    if (!repo || !isAttachmentId(fileId) || !(await this.hasFiles(id))) return null;
+    const info = (await repo.list(threadOf(id))).find((f) => f.id === fileId);
+    const bytes = info ? await repo.get(threadOf(id), fileId) : null;
+    return info && bytes ? { info, bytes } : null;
+  }
+
+  /** Transcribes one of the conversation's voice messages (transcribe.ts) and keeps the transcript for Pointer. */
+  async transcribe(id: string, fileId: string, opts: TranscribeOptions = {}): Promise<TranscribeCallResult> {
+    const repo = this.deps.attachments;
+    if (!repo || !isAttachmentId(fileId) || !(await this.hasFiles(id))) return { ok: false, reason: "not-found", error: "File not found." };
+    const info = (await repo.list(threadOf(id))).find((f) => f.id === fileId);
+    if (!info) return { ok: false, reason: "not-found", error: "File not found." };
+    return transcribeAttachment(repo, threadOf(id), info, await this.deps.configRepo.load(), opts);
+  }
+
+  /** The uploads named in a new message, checked: this conversation's own console uploads, not sent before. */
+  private async pickFiles(id: string, ids: string[], sent: Set<string>): Promise<{ ok: true; files: MessageFile[] } | { ok: false; error: string }> {
+    if (!ids.length) return { ok: true, files: [] };
+    const repo = this.deps.attachments;
+    if (!repo) return { ok: false, error: NO_FILES };
+    const stored = await repo.list(threadOf(id));
+    const files: MessageFile[] = [];
+    for (const fileId of new Set(ids)) {
+      const info = stored.find((f) => f.id === fileId && f.source === "web");
+      if (!info) return { ok: false, error: FILE_GONE };
+      if (sent.has(fileId)) return { ok: false, error: `${info.name} was already sent.` };
+      files.push({ id: info.id, name: info.name, mime: info.mime, size: info.size, ...(info.durationMs !== undefined ? { durationMs: info.durationMs } : {}) });
+    }
+    return { ok: true, files };
   }
 
   /** The conversation with its tasks and the reply being written; adds the milestone messages it lacks. */
@@ -536,8 +746,13 @@ export class ConversationService implements WebThreads {
     };
   }
 
+  /** Erases the conversation and its files (uploads, voice messages, files Pointer attached). */
   async remove(id: string): Promise<boolean> {
-    const removed = await this.queue.run(id, () => this.repo.remove(id));
+    const removed = await this.queue.run(id, async () => {
+      const done = await this.repo.remove(id);
+      if (done) await this.deps.attachments?.removeAll(threadOf(id)).catch((err: unknown) => console.error("[web] files not erased:", errorText(err).slice(0, 200)));
+      return done;
+    });
     if (removed) this.live.delete(id);
     return removed;
   }
@@ -702,7 +917,7 @@ export class ConversationService implements WebThreads {
     const before = c.messages.slice(0, Math.max(0, c.messages.findIndex((m) => m.id === message.id)));
     const thread = await this.deps.tasks.getThread(WEB_CHANNEL, id);
     const req: PointerRequest = {
-      text: message.text,
+      text: message.text || filesOnlyText(message.files ?? []),
       userId: WEB_USER_ID,
       userName: WEB_USER_NAME,
       channel: WEB_CHANNEL,
@@ -717,6 +932,18 @@ export class ConversationService implements WebThreads {
       taskStatus: () => this.taskStatus(id, redact),
       onActivity: (e) => applyActivity(reply, e, this.iso()),
     };
+    const files = this.deps.attachments;
+    if (files) {
+      // As in Slack: every file of the conversation so far (sent with a message, or attached by Pointer's tools),
+      // never uploads still waiting in the composer.
+      const sent = sentFileIds(c);
+      try {
+        req.attachments = (await files.list(threadOf(id))).filter((f) => f.source !== "web" || sent.has(f.id));
+      } catch (err) {
+        console.error("[web] attachments failed:", redact(errorText(err)).slice(0, 200));
+      }
+      ctx.addAttachment = (file) => files.add(threadOf(id), file);
+    }
     const slot = this.deps.brainSlot ?? (<T>(fn: () => Promise<T>) => fn());
     const answer = await slot(() => this.deps.brain.reply(req, ctx));
     void this.deps.usage
