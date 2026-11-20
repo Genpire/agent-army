@@ -16,19 +16,19 @@ import {
   repoCapUsd,
   taskBudgetFor,
   taskDecision,
-} from "../src/budget.js";
-import { type Budget, BudgetSchema, type Config, ConfigRepo } from "../src/core/config.js";
-import { ConversationService } from "../src/conversations.js";
-import { deriveKey } from "../src/core/crypto.js";
-import { handleSlackEvent, resetDispatchStateForTests } from "../src/dispatch.js";
-import { MemoryRepo } from "../src/memory.js";
-import type { PointerBrain, PointerContext, PointerReply, PointerRequest, SlackMessageEvent, StartRepoTaskResult } from "../src/pointer-types.js";
-import { createApp } from "../src/server.js";
-import { FsStore } from "../src/core/store.js";
-import { type Task, TaskRepo, newTaskId } from "../src/tasks.js";
-import { startThreadTask } from "../src/thread-task.js";
-import { UsageRepo } from "../src/usage.js";
-import { handleGithubWebhook, resetWebhookStateForTests } from "../src/webhook.js";
+} from "../../src/spending/budget.js";
+import { type Budget, BudgetSchema, type Config, ConfigRepo } from "../../src/core/config.js";
+import { ConversationService } from "../../src/conversations.js";
+import { deriveKey } from "../../src/core/crypto.js";
+import { handleSlackEvent, resetDispatchStateForTests } from "../../src/dispatch.js";
+import { MemoryRepo } from "../../src/memory.js";
+import type { PointerBrain, PointerContext, PointerReply, PointerRequest, SlackMessageEvent, StartRepoTaskResult } from "../../src/pointer-types.js";
+import { createApp } from "../../src/server.js";
+import { FsStore } from "../../src/core/store.js";
+import { type Task, TaskRepo, newTaskId } from "../../src/tasks.js";
+import { startThreadTask } from "../../src/thread-task.js";
+import { UsageRepo } from "../../src/spending/usage.js";
+import { handleGithubWebhook, resetWebhookStateForTests } from "../../src/webhook.js";
 
 const NOW = new Date("2026-11-18T12:00:00Z");
 const budget = (b: Partial<Budget> = {}): Budget => BudgetSchema.parse(b);

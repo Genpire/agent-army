@@ -2,9 +2,9 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { FsStore } from "../src/core/store.js";
-import { type Task, TaskRepo, newTaskId } from "../src/tasks.js";
-import { UsageRepo, monthBounds, monthKey, repoSpend, usageLine } from "../src/usage.js";
+import { FsStore } from "../../src/core/store.js";
+import { type Task, TaskRepo, newTaskId } from "../../src/tasks.js";
+import { UsageRepo, monthBounds, monthKey, repoSpend, usageLine } from "../../src/spending/usage.js";
 
 const setup = async () => {
   const store = new FsStore(await mkdtemp(join(tmpdir(), "army-usage-")));

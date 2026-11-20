@@ -34,7 +34,7 @@ import {
   unreact,
   userName,
 } from "./slack.js";
-import { type CapStatus, type Spending, monthlyStatus, repoStatus } from "./budget.js";
+import { type CapStatus, type Spending, monthlyStatus, repoStatus } from "./spending/budget.js";
 import type { ThreadState } from "./tasks.js";
 import { resolveTaskRepo, startThreadTask } from "./thread-task.js";
 import {
@@ -46,7 +46,7 @@ import {
 } from "./targeting.js";
 import { configSecrets, makeRedactor } from "./worker.js";
 import { describeTasks } from "./progress.js";
-import { type MonthUsage, usageLine, usd } from "./usage.js";
+import { type MonthUsage, usageLine, usd } from "./spending/usage.js";
 
 // In-memory routing state: the web service runs as a single instance (max-instances 1).
 function freshState() {

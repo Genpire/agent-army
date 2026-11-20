@@ -24,7 +24,7 @@ import { FsStore } from "../src/core/store.js";
 import { TimelineRecorder } from "../src/task-events.js";
 import { type Task, TaskRepo, WEB_CHANNEL } from "../src/tasks.js";
 import { defaultTeam } from "../src/team.js";
-import { UsageRepo } from "../src/usage.js";
+import { UsageRepo } from "../src/spending/usage.js";
 import { handleGithubWebhook, resetWebhookStateForTests } from "../src/webhook.js";
 
 const API_KEY = "sk-ant-secret-key-0123456789";

@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { AttachmentRepo } from "./attachments.js";
-import { Spending } from "./budget.js";
+import { Spending } from "./spending/budget.js";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { z } from "zod";
 import {
@@ -52,7 +52,7 @@ import { TaskRepo } from "./tasks.js";
 import { SKILL_NAME_RE, TeamSchema } from "./team.js";
 import { rememberConsoleUrl } from "./ticket-sync.js";
 import { checkAnthropic, checkGithub, checkSlack } from "./core/validate.js";
-import { UsageRepo } from "./usage.js";
+import { UsageRepo } from "./spending/usage.js";
 import { handleGithubWebhook, parseGithubPayload, verifyGithubSignature } from "./webhook.js";
 import { configSecrets, makeRedactor } from "./worker.js";
 import { aiRoutes } from "./routes/ai.js";

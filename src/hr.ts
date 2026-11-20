@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Options, query } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
-import type { Spending } from "./budget.js";
+import type { Spending } from "./spending/budget.js";
 import type { Budget, Config } from "./core/config.js";
 import { type ProviderRuntime, defaultModel, providerRuntime } from "./ai/ai-providers.js";
 import type { QueryFn } from "./pointer.js";
@@ -23,7 +23,7 @@ import {
   agentLabel,
   defaultTeam,
 } from "./team.js";
-import { type MonthUsage, type UsageRepo, repoSpend, usd } from "./usage.js";
+import { type MonthUsage, type UsageRepo, repoSpend, usd } from "./spending/usage.js";
 import { configSecrets, makeRedactor } from "./worker.js";
 
 /**

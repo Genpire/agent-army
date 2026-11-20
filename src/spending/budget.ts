@@ -1,7 +1,7 @@
 import type { WebClient } from "@slack/web-api";
-import type { Budget, Config } from "./core/config.js";
-import { slackErrorCode } from "./slack.js";
-import type { Store } from "./core/store.js";
+import type { Budget, Config } from "../core/config.js";
+import { slackErrorCode } from "../slack.js";
+import type { Store } from "../core/store.js";
 import { type MonthUsage, type UsageRepo, repoSpend, usd } from "./usage.js";
 
 /**

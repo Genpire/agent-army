@@ -1,5 +1,5 @@
-import type { Store } from "./core/store.js";
-import type { Task, TaskRepo } from "./tasks.js";
+import type { Store } from "../core/store.js";
+import type { Task, TaskRepo } from "../tasks.js";
 
 /**
  * What Claude has cost this month, so the owner can see where the credit goes.

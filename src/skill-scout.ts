@@ -4,12 +4,12 @@ import { join } from "node:path";
 import { type Options, query } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { defaultModel, providerRuntime } from "./ai/ai-providers.js";
-import type { Spending } from "./budget.js";
+import type { Spending } from "./spending/budget.js";
 import type { Config } from "./core/config.js";
 import type { QueryFn } from "./pointer.js";
 import { parseGitHubSkillUrl } from "./skills.js";
 import { type Team, enabledAgents } from "./team.js";
-import type { UsageRepo } from "./usage.js";
+import type { UsageRepo } from "./spending/usage.js";
 import { configSecrets, makeRedactor } from "./worker.js";
 
 /**

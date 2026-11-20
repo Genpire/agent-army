@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { providerProblem } from "./ai/ai-providers.js";
-import type { Spending } from "./budget.js";
+import type { Spending } from "./spending/budget.js";
 import type { Config, ConfigRepo } from "./core/config.js";
 import { KeyedQueue } from "./listen.js";
 import type {
@@ -19,7 +19,7 @@ import type { Store } from "./core/store.js";
 import { describeTimeline, plainLine, readTimeline } from "./task-events.js";
 import { type Task, type TaskRepo, type TaskTicket, type ThreadState, WEB_CHANNEL, newTaskId } from "./tasks.js";
 import { type ThreadTaskResult, resolveTaskRepo, startThreadTask } from "./thread-task.js";
-import type { UsageRepo } from "./usage.js";
+import type { UsageRepo } from "./spending/usage.js";
 import { configSecrets, makeRedactor } from "./worker.js";
 
 /**

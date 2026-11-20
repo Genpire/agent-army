@@ -34,7 +34,7 @@ import { createApp } from "../src/server.js";
 import { FsStore } from "../src/core/store.js";
 import { type Task, TaskRepo, newTaskId } from "../src/tasks.js";
 import { type AgentSpec, type Team, defaultTeam } from "../src/team.js";
-import { UsageRepo } from "../src/usage.js";
+import { UsageRepo } from "../src/spending/usage.js";
 
 const API_KEY = "sk-ant-api03-secret-key-0123456789abcdef";
 const SLACK_TOKEN = "xoxb-1111-2222-secretslacktoken";

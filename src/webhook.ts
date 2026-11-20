@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
-import type { TaskBudgetCheck } from "./budget.js";
+import type { TaskBudgetCheck } from "./spending/budget.js";
 import { type Config, REPO_RE } from "./core/config.js";
 import { BOT_MARKER, WRITE_ASSOCIATIONS } from "./github.js";
 import { isRepoAllowedOnHost } from "./code-host-access.js";
