@@ -1,4 +1,4 @@
-import type { SlackMessageEvent } from "./pointer-types.js";
+import type { SlackMessageEvent } from "../pointer-types.js";
 
 /**
  * Where Pointer listens, and the small in-memory machinery that keeps a

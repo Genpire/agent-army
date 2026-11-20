@@ -13,7 +13,7 @@ import { Text } from "@astryxdesign/core/Text";
 import { VStack } from "@astryxdesign/core/VStack";
 import { ChatBubbleLeftRightIcon } from "@heroicons/react/24/outline";
 import { useEffect, useState } from "react";
-import type { buildManifest } from "../../../../src/slack.js";
+import type { buildManifest } from "../../../../src/slack/slack.js";
 import { CopyField } from "../../components/CopyField";
 import { SecretField } from "../../components/SecretField";
 import { api, errorMessage } from "../../lib/api";

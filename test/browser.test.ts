@@ -5,7 +5,7 @@ import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { BROWSER_TOOLS, browserAvailable, browserServer, collectScreenshots } from "../src/browser.js";
-import { uploadThreadFiles } from "../src/slack.js";
+import { uploadThreadFiles } from "../src/slack/slack.js";
 
 const tmp = (prefix: string) => mkdtemp(join(tmpdir(), prefix));
 

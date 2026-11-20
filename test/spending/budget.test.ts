@@ -20,7 +20,7 @@ import {
 import { type Budget, BudgetSchema, type Config, ConfigRepo } from "../../src/core/config.js";
 import { ConversationService } from "../../src/conversations.js";
 import { deriveKey } from "../../src/core/crypto.js";
-import { handleSlackEvent, resetDispatchStateForTests } from "../../src/dispatch.js";
+import { handleSlackEvent, resetDispatchStateForTests } from "../../src/slack/dispatch.js";
 import { MemoryRepo } from "../../src/memory.js";
 import type { PointerBrain, PointerContext, PointerReply, PointerRequest, SlackMessageEvent, StartRepoTaskResult } from "../../src/pointer-types.js";
 import { createApp } from "../../src/server.js";

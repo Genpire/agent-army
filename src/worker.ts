@@ -35,7 +35,7 @@ import { findRepoSetup, repoSetupContext, runSetupCommand, setupEnv } from "./re
 import { ScreenshotRepo } from "./screenshots.js";
 import { HISTORY_SCAN, routeRepoTask } from "./sizing.js";
 import { SkillLibrary, materializeSkills } from "./skills/skills.js";
-import { slackClient, slackErrorCode, toMrkdwn, truncate, uploadThreadFiles } from "./slack.js";
+import { slackClient, slackErrorCode, toMrkdwn, truncate, uploadThreadFiles } from "./slack/slack.js";
 import { createStore } from "./core/store.js";
 import { TimelineRecorder, checkItems, plainLine } from "./task-events.js";
 import { type Task, type TaskPhase, type TaskReport, TaskRepo, type ThreadState, decodeTaskPayload, isWebTask } from "./tasks.js";

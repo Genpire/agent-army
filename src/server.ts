@@ -22,9 +22,9 @@ import { hashPassword, randomToken, safeEqual, sessionKey, signSession, verifyPa
 import { repoAccessError } from "./code-host-access.js";
 import { GITHUB_REPO_RE, REPO_FORMAT_HINT, REPO_ID_MAX, isRepoId } from "./repo-id.js";
 import { CONVERSATION_ID_RE, ConversationService, MESSAGE_MAX_CHARS, type WebThreads } from "./conversations.js";
-import { handleSlackEvent, withBrainSlot } from "./dispatch.js";
+import { handleSlackEvent, withBrainSlot } from "./slack/dispatch.js";
 import { HrService, PROPOSAL_ID_RE, REVIEW_ID_RE } from "./team/hr.js";
-import { RecentSet } from "./listen.js";
+import { RecentSet } from "./slack/listen.js";
 import { MEMORY_MAX_FACTS, MemoryRepo } from "./memory.js";
 import { MondayClient, MondayError, checkMonday, statusColumns } from "./monday.js";
 import {
@@ -45,7 +45,7 @@ import { type Runner, createRunner } from "./runner.js";
 import { SCREENSHOT_NAME_RE, ScreenshotRepo, TASK_ID_RE, screenshotType } from "./screenshots.js";
 import { SCOUT_NEED_MAX_CHARS, findSkills } from "./skills/skill-scout.js";
 import { type FetchLike, SKILL_LIMITS, SkillLibrary, SkillsPluginCache, skillView } from "./skills/skills.js";
-import { buildManifest, manifestCreateUrl, slackClient, verifySlackSignature } from "./slack.js";
+import { buildManifest, manifestCreateUrl, slackClient, verifySlackSignature } from "./slack/slack.js";
 import { createStore } from "./core/store.js";
 import { readTimeline } from "./task-events.js";
 import { TaskRepo } from "./tasks.js";

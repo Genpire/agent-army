@@ -16,7 +16,7 @@ import type { Config } from "./core/config.js";
 import { GitLab } from "./gitlab.js";
 import { type CodeToolHost, codeHostReadTools } from "./pointer-tools.js";
 import { BITBUCKET_REPO_RE, GITLAB_REPO_RE, HOST_TERMS, parseRepo, repoHost, repoId } from "./repo-id.js";
-import { repoFromToken } from "./targeting.js";
+import { repoFromToken } from "./slack/targeting.js";
 
 export type OtherCodeHost = "gitlab" | "bitbucket";
 const OTHER_HOSTS: OtherCodeHost[] = ["gitlab", "bitbucket"];

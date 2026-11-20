@@ -16,7 +16,7 @@ import { z } from "zod";
 import { Bitbucket, bitbucketStatus } from "../bitbucket.js";
 import { BITBUCKET_EVENT_RE, BITBUCKET_WEBHOOK_EVENTS, handleBitbucketWebhook, verifyBitbucketSignature } from "../bitbucket-webhook.js";
 import { randomToken } from "../core/crypto.js";
-import { RecentSet } from "../listen.js";
+import { RecentSet } from "../slack/listen.js";
 import { repoId } from "../repo-id.js";
 import { configSecrets, makeRedactor } from "../worker.js";
 import type { IntegrationRouteDeps } from "./types.js";

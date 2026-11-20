@@ -2,11 +2,11 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AttachmentRepo } from "../src/attachments.js";
-import { type Config, ConfigRepo } from "../src/core/config.js";
-import { deriveKey } from "../src/core/crypto.js";
-import { handleSlackEvent, resetDispatchStateForTests } from "../src/dispatch.js";
-import { MemoryRepo } from "../src/memory.js";
+import { AttachmentRepo } from "../../src/attachments.js";
+import { type Config, ConfigRepo } from "../../src/core/config.js";
+import { deriveKey } from "../../src/core/crypto.js";
+import { handleSlackEvent, resetDispatchStateForTests } from "../../src/slack/dispatch.js";
+import { MemoryRepo } from "../../src/memory.js";
 import type {
   PointerContext,
   PointerReply,
@@ -14,9 +14,9 @@ import type {
   SlackDeps,
   SlackMessageEvent,
   StartRepoTaskResult,
-} from "../src/pointer-types.js";
-import { FsStore } from "../src/core/store.js";
-import { TaskRepo } from "../src/tasks.js";
+} from "../../src/pointer-types.js";
+import { FsStore } from "../../src/core/store.js";
+import { TaskRepo } from "../../src/tasks.js";
 
 interface Post {
   channel: string;

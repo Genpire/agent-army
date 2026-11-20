@@ -21,7 +21,7 @@ import {
   verifyJiraSignature,
   webhookJql,
 } from "../jira-automation.js";
-import { RecentSet } from "../listen.js";
+import { RecentSet } from "../slack/listen.js";
 import { REPO_FORMAT_HINT } from "../repo-id.js";
 import { rememberConsoleUrl } from "../ticket-sync.js";
 import { configSecrets, makeRedactor } from "../worker.js";

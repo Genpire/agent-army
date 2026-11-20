@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { providerProblem } from "./ai/ai-providers.js";
 import type { Spending } from "./spending/budget.js";
 import type { Config, ConfigRepo } from "./core/config.js";
-import { KeyedQueue } from "./listen.js";
+import { KeyedQueue } from "./slack/listen.js";
 import type {
   ActivityKind,
   ConversationMessage,

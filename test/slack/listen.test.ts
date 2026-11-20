@@ -9,8 +9,8 @@ import {
   replyThreadTs,
   shouldRespond,
   taskThreadTs,
-} from "../src/listen.js";
-import type { SlackMessageEvent } from "../src/pointer-types.js";
+} from "../../src/slack/listen.js";
+import type { SlackMessageEvent } from "../../src/pointer-types.js";
 
 const BOT = "UBOT";
 const opts = { botUserId: BOT, pointerChannels: ["CPTR"] };

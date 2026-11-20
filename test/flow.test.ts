@@ -17,7 +17,7 @@ import type { AgentSpec, Team } from "../src/team/team.js";
 // The real Slack layer would call Slack and Claude. Record what the server hands
 // it instead, and never settle, which proves /slack/events answers without waiting.
 const dispatched = vi.hoisted(() => [] as Array<{ event: SlackMessageEvent; deps: SlackDeps }>);
-vi.mock("../src/dispatch.js", () => ({
+vi.mock("../src/slack/dispatch.js", () => ({
   handleSlackEvent: (event: SlackMessageEvent, deps: SlackDeps) => {
     dispatched.push({ event, deps });
     return new Promise<void>(() => {});

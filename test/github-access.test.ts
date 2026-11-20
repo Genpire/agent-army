@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ConfigSchema } from "../src/core/config.js";
 import { connectionForRepo, describeAllowed, githubTokens, hasGitHub, matchesAllowList } from "../src/github-access.js";
-import { isRepoAllowed } from "../src/targeting.js";
+import { isRepoAllowed } from "../src/slack/targeting.js";
 
 const T1 = "github_pat_primary_000000000000";
 const T2 = "ghp_secondtoken0000000000000000";

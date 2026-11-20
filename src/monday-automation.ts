@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { type Config, type ConfigRepo, MONDAY_ID_RE, type MondayBoardAutomation } from "./core/config.js";
 import type { DirectTaskResult } from "./conversations.js";
-import { KeyedQueue } from "./listen.js";
+import { KeyedQueue } from "./slack/listen.js";
 import { type MondayBoard, MondayClient, type MondayItemDetails, statusColumns } from "./monday.js";
 import type { Store } from "./core/store.js";
 import { plainLine } from "./task-events.js";

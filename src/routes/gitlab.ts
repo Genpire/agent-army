@@ -10,7 +10,7 @@ import type { Config } from "../core/config.js";
 import { randomToken } from "../core/crypto.js";
 import { GITLAB_DEFAULT_URL, GitLab, gitlabStatus } from "../gitlab.js";
 import { GITLAB_EVENTS, handleGitlabDelivery, verifyGitlabToken } from "../gitlab-webhook.js";
-import { RecentSet } from "../listen.js";
+import { RecentSet } from "../slack/listen.js";
 import { repoId } from "../repo-id.js";
 import { configSecrets, makeRedactor } from "../worker.js";
 import type { IntegrationRouteDeps } from "./types.js";

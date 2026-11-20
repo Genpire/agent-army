@@ -1,7 +1,7 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import type { Config, ConfigRepo, JiraProjectAutomation } from "./core/config.js";
-import { KeyedQueue } from "./listen.js";
+import { KeyedQueue } from "./slack/listen.js";
 import { JIRA_ISSUE_KEY_RE, type JiraClient, type JiraIssueDetails, type JiraStatus, jiraClientFor, projectOfIssue, sameStatus } from "./jira.js";
 import { INSTRUCTION_MAX_CHARS, START_COOLDOWN_MS, type TicketAutomationDeps } from "./monday-automation.js";
 import type { Store } from "./core/store.js";

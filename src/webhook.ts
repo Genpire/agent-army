@@ -6,7 +6,7 @@ import { BOT_MARKER, WRITE_ASSOCIATIONS } from "./github.js";
 import { isRepoAllowedOnHost } from "./code-host-access.js";
 import { isJiraConnected } from "./jira.js";
 import { HOST_TERMS, repoHost, repoWebUrl } from "./repo-id.js";
-import { KeyedQueue } from "./listen.js";
+import { KeyedQueue } from "./slack/listen.js";
 import type { SlackDeps } from "./pointer-types.js";
 import type { WebThreads } from "./conversations.js";
 import { type PrThread, type TaskRepo, WEB_CHANNEL } from "./tasks.js";
