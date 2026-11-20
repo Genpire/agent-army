@@ -40,6 +40,10 @@ const config = (over: { anthropic?: boolean; slack?: boolean; github?: boolean; 
   ({
     team: { pointer: { name: "Pointer" } },
     anthropic: { connected: over.anthropic ?? true, key: "…abcd" },
+    ai: {
+      chat: { provider: "anthropic", name: "Claude", ready: over.anthropic ?? true },
+      task: { provider: "anthropic", name: "Claude", ready: over.anthropic ?? true },
+    },
     slack: { connected: over.slack ?? true, teamName: "Acme" },
     github: { connected: over.github ?? true, login: "acme-bot", extra: [] },
     gitlab: { connected: false },

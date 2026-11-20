@@ -49,7 +49,13 @@ function Part({ title, children, end }: { title: string; children: ReactNode; en
 /** Model and effort in words, for an agent or for Pointer. */
 function modelLines(person: OfficePerson, agent: AgentSpec | undefined, config: PublicConfig): { label: string; value: string }[] {
   const pointer = config.team.pointer;
-  const claude = config.anthropic.model ? modelLabel(config.anthropic.model) : "The Claude default";
+  // On another provider, an empty chat model runs on that provider's main model.
+  const claude =
+    config.ai.chatProvider !== "anthropic"
+      ? `${config.ai.chat.name}'s default`
+      : config.anthropic.model
+        ? modelLabel(config.anthropic.model)
+        : "The Claude default";
   if (person.kind === "lead") {
     return [
       { label: "Model", value: pointer.model ? modelLabel(pointer.model) : claude },

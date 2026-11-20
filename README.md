@@ -144,7 +144,7 @@ Workers run as child processes of the server (`RUNNER=local`). Slack needs to re
 ## Onboarding (in the web page)
 
 1. **Admin account**: paste the setup token, choose a password.
-2. **Claude** (Integrations): an Anthropic API key. Use a dedicated key with a spend limit.
+2. **AI model** (Integrations): an Anthropic API key, or Claude on a cloud or another provider (see [AI providers](#ai-providers)). Use a dedicated key with a spend limit.
 3. **Slack** (Integrations, optional if you only use the console): click *Create Slack app* (the manifest is pre-filled with this deployment's URL and Pointer's name), install it to your workspace, paste the Bot User OAuth Token and Signing Secret. Invite Pointer to the channels where you want it.
 4. **GitHub** (Integrations): a fine-grained personal access token, ideally on a dedicated bot account, limited to the repos the agents may touch, with *Contents: read/write*, *Pull requests: read/write*, *Metadata: read*, and for the [CI checks](#ci-checks) loop *Checks: read*, *Commit statuses: read* and *Actions: read*, and for [preview checks](#preview-checks) *Deployments: read*. Optionally restrict it to owners or exact repos. For repos outside your organisation, add more tokens under *Other GitHub connections* (see [GitHub connections](#github-connections)). Without GitHub, Pointer still chats; GitHub questions and repo tasks say GitHub is not connected. Optionally add the webhook for [pull request reviews](#pull-request-reviews) on the same pane.
 5. **GitLab** or **Bitbucket** (Integrations, optional, instead of or next to GitHub): see [GitLab and Bitbucket](#gitlab-and-bitbucket).
@@ -156,6 +156,42 @@ Workers run as child processes of the server (`RUNNER=local`). Slack needs to re
 Every credential is verified before it is saved, stored encrypted (AES-256-GCM with `MASTER_KEY`), and never sent back to the browser.
 
 **Forgot the admin password?** On the sign-in page, choose **Forgot your password?** and paste the setup token to set a new one. On Cloud Run the token is in Secret Manager: `gcloud secrets versions access latest --secret <NAME>-setup-token --project <PROJECT>` (`agent-army-setup-token` by default). Elsewhere it is the `SETUP_TOKEN` you set, or, when unset, the one printed in the server log at startup (`docker logs agent-army 2>&1 | grep setup`). A new password, from a reset or from **Settings → Admin password**, signs out every other session.
+
+## AI providers
+
+Pointer and the team run on the Claude Agent SDK, which can talk to Claude through Anthropic's API, through a cloud, or to another provider's Anthropic-compatible API. Set it up on **Integrations → AI model**: pick a provider, fill in what it needs, choose the model for each tier, then **Test and save**. Two switches choose what each provider runs:
+
+- **Use for chat**: Pointer's replies in Slack and the console, and the console's own calls (HR reviews, the Skills Scout).
+- **Use for repo tasks**: the team in the worker, including the size estimate of [model routing](#model-routing).
+
+Chat and repo tasks can run on different providers. Anthropic is the default for both. Every save tests the connection first: one `POST /v1/messages` with `max_tokens: 1` for an Anthropic-compatible endpoint, or one short Agent SDK turn for a cloud. Keys are stored encrypted with the rest of the config, shown only masked, and redacted from everything the platform posts and logs.
+
+**Best effort.** Anthropic [does not support](https://code.claude.com/docs/en/llm-gateway) non-Claude models behind Claude Code. DeepSeek, Qwen, Kimi, GLM, and anything non-Claude behind a custom endpoint, work in practice but are best effort: try a few tasks before relying on one. The Claude presets (Anthropic, Bedrock, Vertex AI, Google Cloud, Foundry) are supported by Claude Code itself.
+
+| Provider | What it needs | Web search | PDFs | Images | Effort | Thinking off |
+| --- | --- | --- | --- | --- | --- | --- |
+| Anthropic | API key | yes | yes | yes | all levels | yes |
+| Amazon Bedrock | region; a Bedrock API key, or an access key ID and secret (and session token) | **no** | yes | yes | all levels | yes |
+| Google Vertex AI | project ID, region (`global` by default); a service account key (`roles/aiplatform.user`), or the service's own Google credentials | yes | yes | yes | all levels | yes |
+| Google Cloud (Anthropic managed) | project ID, workspace ID (`wrkspc_…`), location; a service account key (`roles/claude.user`), or the service's own credentials | yes | yes | yes | all levels | yes |
+| Microsoft Foundry | resource name, API key; deployments named after the model ids | yes | yes | yes | all levels | yes |
+| DeepSeek | pay-as-you-go API key | yes | **no** | Flash only | low, high, max | yes |
+| Alibaba Qwen (Model Studio) | region, pay-as-you-go workspace ID (needed in the US, Germany and Japan), API key (`sk-…`; Coding Plan keys are refused) | yes | yes | yes | low, high, xhigh | yes |
+| Kimi (Moonshot) | platform (international or China), pay-as-you-go API key | **no** | **no** | yes | low, high, max | **no** (always thinks) |
+| Z.ai GLM | platform (international or China), Standard API key | **no** | **no** | Flash only | low, high, max | **no** (always thinks) |
+| Custom endpoint | `https://` base URL without `/v1`, token (as `Authorization: Bearer` or `x-api-key`), optional extra headers (`ANTHROPIC_CUSTOM_HEADERS`), models typed by hand, optional prices | off by default | depends | depends | all levels | depends |
+
+What the platform does for each provider:
+
+- **Its own environment only.** Each query's environment replaces the service's own: it holds this provider's credentials and nothing else. For every provider other than Anthropic it sets `ANTHROPIC_API_KEY=""`, `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST=1` (a repository's `.claude/settings.json` cannot redirect the endpoint or keys) and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, plus what the provider's own Claude Code guide asks for (context windows, timeouts, `CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS=1` for DeepSeek and GLM). A Google service account key is written to a private file (`0600`, in a fresh folder in the system temp folder, never in a checkout) for the length of the query and removed after it.
+- **Every model tier mapped.** `ANTHROPIC_MODEL` (the main tier), `ANTHROPIC_DEFAULT_OPUS_MODEL` (and `_FABLE_`), `_SONNET_`, `_HAIKU_` and `CLAUDE_CODE_SUBAGENT_MODEL`, from the preset's defaults or your choices. A Claude model set anywhere (the Team page, routing, Haiku for the size estimate) runs on the tier of the same size: `claude-sonnet-5-5` on Kimi runs Kimi's medium model. Other ids are sent as they are. On another provider, the model on the Anthropic card is not used: the main tier is.
+- **What it cannot do is turned off.** WebSearch is left out where the provider has no search (the Skills Scout then reads pages with WebFetch); an effort the provider does not take goes to the nearest one it does; a PDF or image shared in chat that the provider cannot read becomes a line saying so.
+- **Budgets mean something.** Claude Code prices Claude models itself. For the other presets the platform passes their prices (USD per million tokens) as `managedSettings.modelPricing`, so `Budget per task`, the per-message budget and the [caps](#caps) count real money. The prices were checked on each provider's pages on 2026-11-20; DeepSeek's are its peak rates (off-peak is half) and Qwen's are Singapore's. For a custom endpoint, give its input and output prices, or Claude's list prices (or a guess, for unknown models) apply.
+- **Coding-plan keys are not for this.** Alibaba's Coding and Token Plans, Z.ai's GLM Coding Plan and Kimi Code memberships are for people using coding tools themselves, not for a backend like this one: use pay-as-you-go keys.
+
+In repo tasks the task provider's credentials are also the agents' shell environment, as Anthropic's key always was: an agent, or code it runs, can read them (see [Security model](#security-model)). Use a dedicated key with a spend limit on every provider.
+
+Left out for now: MiniMax (only `tool_choice: auto`; caching, PDFs and structured output undocumented), Ollama (needs a GPU host; no caching, PDFs or `tool_choice`), and GPT or Gemini inside Claude Code (unsupported; the Codex and Gemini CLI integrations run them as team members instead).
 
 ## GitHub connections
 
@@ -464,7 +500,7 @@ When a cap reaches its alert level, and again when it is used up:
 
 ### Model routing
 
-On **Team → Model routing**, turn on **Route repo tasks by size**. Before each repo task, the worker asks Haiku 5.5 (`claude-haiku-5-5`) to call the request *small*, *medium* or *large*: one call without tools, one turn, a JSON answer, at most $0.05 (in practice a fraction of a cent, added to the task's cost). The task then runs with that size's model and effort:
+On **Team → Model routing**, turn on **Route repo tasks by size**. Before each repo task, the worker asks Haiku 5.5 (`claude-haiku-5-5`; on another [task provider](#ai-providers), its small tier) to call the request *small*, *medium* or *large*: one call without tools, one turn, a JSON answer, at most $0.05 (in practice a fraction of a cent, added to the task's cost). The task then runs with that size's model and effort:
 
 | Size | Meant for | Default model | Default effort |
 | --- | --- | --- | --- |
@@ -625,7 +661,7 @@ Until you do, @mentions still work, but DMs, Pointer channels and unmentioned th
 ## Security model
 
 - **Isolation:** each repo task runs in its own container (Cloud Run Job) or process (local), in a throwaway checkout that is deleted afterwards.
-- **Conversations are tool-restricted:** Pointer runs in the web service with only web search and fetch, its agents, and its own service-side tools (GitHub read, memory, project notes, monday.com when connected, start a repo task). It has no shell and cannot read or write files; anything not explicitly allowed is denied, no settings files are loaded, and each message gets a fresh temporary directory as its working directory and home (deleted afterwards) and a minimal environment whose only secret is the Anthropic key. The master key and the Slack, GitHub and monday.com tokens held by the service are out of its reach.
+- **Conversations are tool-restricted:** Pointer runs in the web service with only web search and fetch, its agents, and its own service-side tools (GitHub read, memory, project notes, monday.com when connected, start a repo task). It has no shell and cannot read or write files; anything not explicitly allowed is denied, no settings files are loaded, and each message gets a fresh temporary directory as its working directory and home (deleted afterwards) and a minimal environment whose only secrets are the chat provider's credentials (the Anthropic key by default; see [AI providers](#ai-providers)). The master key and the Slack, GitHub and monday.com tokens held by the service are out of its reach.
 - **Pull requests only:** the platform, not the agents, pushes the branch and opens the PR (a draft for unfinished work). Enable branch protection on your default branch so merging requires a human review.
 - **Least privilege:** each GitHub token should cover only the repos you want worked on. Tokens are used only by the service-side tools and the worker. The GitHub allow lists (owners or exact repos, per connection) apply to GitHub reads and repo tasks, and the Slack user allowlist is checked before any model call.
 - **GitHub webhook:** `POST /github/webhook` refuses any delivery whose HMAC-SHA256 signature does not match the shared secret, and starts work only for feedback from people with write access to the repository (`OWNER`, `MEMBER`, `COLLABORATOR`) on pull requests the team opened. Bots and the platform's own comments are ignored. The follow-up runs on the same repo, so it is bound by the same allow lists and limits as any task.
@@ -641,7 +677,7 @@ Known limits, stated plainly:
 - **Exfiltration through web fetch:** Pointer can read private data (private repos, monday.com items, memory, project notes) and fetch any URL. Injected content could try to make it send that data to an outside address. Subagents are read-only and the prompt treats fetched content as data, but there is no URL allowlist. Keep the GitHub tokens and monday.com token scoped to what Pointer needs.
 - **The repo-task container is not a boundary for platform secrets.** The worker process holds the master key and its service account can read the bucket and the secret; the agents' shell runs as the same user. The shell guard blocks the obvious paths (`/proc/*/environ`, the metadata server), but a determined agent following injected instructions could get around it. Repo tasks can be started by Pointer from conversation, so treat the content Pointer reads (web pages, issues, repos) as part of the trust boundary, and give this deployment its own GCP project for anything sensitive.
 - Memory is global (see above): do not use it for anything private.
-- The agents' shell in repo tasks does hold the Anthropic API key (the SDK needs it) and the repo's own variables from [Repo setup](#repo-setup), and runs code from the repo. An agent, or code it runs, can read and send those values anywhere: treat the repos you connect as trusted, keep the key dedicated and capped, and give repos development or test credentials only. The shell guard is a seatbelt, not a sandbox boundary.
+- The agents' shell in repo tasks does hold the task provider's credentials (the Anthropic API key by default, or another provider's key or Google key file: the SDK needs them) and the repo's own variables from [Repo setup](#repo-setup), and runs code from the repo. An agent, or code it runs, can read and send those values anywhere: treat the repos you connect as trusted, keep the key dedicated and capped, and give repos development or test credentials only. The shell guard is a seatbelt, not a sandbox boundary.
 - The browser is not behind the shell guard. It can open any URL the worker can reach, including the app the agents started and outside sites; by default the Playwright MCP server blocks `file://` pages and keeps file access to its own folder. Set `BROWSER=off` if you do not want it.
 - People from other organisations in Slack Connect channels are ignored unless their user ID is on the allowlist.
 - Agents have outbound network access (they need it to install dependencies and research).
@@ -680,6 +716,11 @@ Besides the admin API, the service takes `POST /slack/events` from Slack and `PO
 | `POST /api/reset-password` | `{ setupToken, password }` | Sets a new admin password with the setup token and signs in; every other session is signed out. `403` for a wrong token, `409` before setup. No session needed; limited to 10 attempts per address per 10 minutes, like sign-in. |
 | `POST /api/password` | `{ currentPassword, password }` | Signed in: changes the admin password (at least 10 characters); `403` when the current password is wrong. Other sessions are signed out; this one stays. |
 | `POST /api/anthropic` | `{ apiKey, model? }` | Verifies and saves the Claude key. |
+| `GET /api/ai/providers` | | `{ chatProvider, taskProvider, providers }`: every [AI provider](#ai-providers) preset (`id`, `name`, `kind`, `fields`, tier `defaults`, `models`, `capabilities`, `pricing`, `docsUrl`, `keyHelp`, `notes`, `bestEffort`), whether it is `configured` (or its `problem`), its `saved` connection (secrets masked, `settings`, `models`, `checkedAt`) and `usedFor: { chat, task }`. `config.ai` in `/api/state` has `chat` and `task` as `{ provider, name, ready }`. |
+| `POST /api/ai/providers/:id` | `{ secrets?, settings?, models? }` | Saves a provider's connection: keys must be the preset's fields (`secrets` for secret ones, `settings` for the others), `models` maps the tiers `main`, `opus`, `sonnet`, `haiku`, `subagent` to model ids. A secret `""` keeps the saved one and `null` removes it; a setting or model `""` goes back to the default. Tested with the provider first (unless `SKIP_VALIDATION=1`). Returns `{ ok, provider }`, as in the list. Anthropic's key and model go to the same place as `POST /api/anthropic`. |
+| `POST /api/ai/providers/:id/test` | `{ secrets?, settings?, models? }` (optional) | Tests the saved connection, or it with these changes, without saving them. Returns `{ ok, checkedAt }`. |
+| `POST /api/ai/providers/:id/delete` | | Forgets a connection. `409` while chat or repo tasks run on it. |
+| `POST /api/ai/active` | `{ chatProvider?, taskProvider? }` | Chooses the providers chat and repo tasks run on; each must be connected and complete. Returns `{ ok, chatProvider, taskProvider }`. |
 | `GET /api/slack/manifest` | `?name=` | `{ manifest, createUrl }` for this deployment. |
 | `POST /api/slack` | `{ botToken, signingSecret }` | Verifies and saves Slack. |
 | `POST /api/github` | `{ token, allowedOwners? }` | Verifies and saves the primary GitHub token. `allowedOwners` entries are owners (`your-org`) or exact repos (`owner/repo`), at most 50. Other connections are kept. |

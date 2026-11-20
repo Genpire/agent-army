@@ -164,7 +164,7 @@ export default function IntegrationsPage() {
             <Banner
               status="warning"
               title={`${capitalize(listText(missing.map((m) => m.label)))} still ${missing.length === 1 ? "needs" : "need"} connecting`}
-              description="Claude, Slack and one code host (GitHub, GitLab or Bitbucket) are needed before the team can work. Everything else is optional."
+              description="An AI model (Claude, or another provider), Slack and one code host (GitHub, GitLab or Bitbucket) are needed before the team can work. Everything else is optional."
               endContent={<Button label={`Connect ${missing[0]!.name}`} variant="primary" href={href("integrations", missing[0]!.id)} />}
               collapsible={false}
             />

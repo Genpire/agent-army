@@ -22,6 +22,7 @@ import { href } from "../../lib/router";
 import { useConfig } from "../../lib/state";
 import type { PublicConfig, Task } from "../../lib/types";
 import { isActive, planProgress, plainText, requestHeadline, taskDuration, taskStatus } from "../activity/model";
+import { aiReady, aiStatus } from "../integrations/catalog";
 import { TaskTable } from "../activity/TaskTable";
 import { LiveNote, StatTile, spendTiles } from "../activity/Usage";
 import { useTasks } from "../activity/usePolled";
@@ -38,16 +39,30 @@ interface Readiness {
   detail: string;
 }
 
-function readiness(c: PublicConfig): Readiness[] {
-  const githubConnected = c.github.connected || c.github.extra.length > 0;
-  const githubAs = [c.github.login, ...c.github.extra.map((x) => x.login)].filter(Boolean);
-  return [
-    {
+/** Claude with its key on Anthropic, as before; another provider by name, with what chat and tasks run on. */
+function aiReadiness(c: PublicConfig): Readiness {
+  const onAnthropic = c.ai.chat.provider === "anthropic" && c.ai.task.provider === "anthropic";
+  if (onAnthropic) {
+    return {
       id: "claude",
       label: "Claude",
       connected: c.anthropic.connected,
       detail: c.anthropic.connected ? `API key ${c.anthropic.key ?? ""}${c.anthropic.model ? ` · ${c.anthropic.model}` : ""}`.trim() : "The agents think with your Anthropic API key.",
-    },
+    };
+  }
+  return {
+    id: "claude",
+    label: "AI model",
+    connected: aiReady(c),
+    detail: aiReady(c) ? aiStatus(c) : `${aiStatus(c)}. The agents think with the provider set under Integrations.`,
+  };
+}
+
+function readiness(c: PublicConfig): Readiness[] {
+  const githubConnected = c.github.connected || c.github.extra.length > 0;
+  const githubAs = [c.github.login, ...c.github.extra.map((x) => x.login)].filter(Boolean);
+  return [
+    aiReadiness(c),
     {
       id: "slack",
       label: "Slack",

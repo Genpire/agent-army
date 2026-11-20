@@ -5,6 +5,7 @@ import { type Options, query } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import type { Spending } from "./budget.js";
 import type { Budget, Config } from "./config.js";
+import { type ProviderRuntime, defaultModel, providerRuntime } from "./ai-providers.js";
 import type { QueryFn } from "./pointer.js";
 import { modelName } from "./sizing.js";
 import type { Store } from "./store.js";
@@ -936,8 +937,9 @@ export class HrService {
 
   private async runReview(): Promise<ReviewResult> {
     const config = await this.deps.config();
-    const apiKey = config.anthropic.apiKey;
-    if (!apiKey) return { ok: false, status: 400, error: NOT_CONNECTED };
+    // The chat provider: HR's review is one of the console's own calls.
+    const provider = providerRuntime(config, "chat");
+    if (!provider.ok) return { ok: false, status: 400, error: config.ai.chatProvider === "anthropic" ? NOT_CONNECTED : provider.error };
     const allowed = (await this.deps.spending?.checkChat()) ?? { ok: true };
     if (!allowed.ok) return { ok: false, status: 409, error: allowed.error };
 
@@ -951,13 +953,19 @@ export class HrService {
     ]);
     const hr = team.agents.find((a) => a.id === HR_AGENT_ID);
     const instructions = hr?.instructions ?? defaultHrAgent().instructions;
-    const chatModel = team.pointer.model || config.anthropic.model || "";
+    const chatModel = team.pointer.model || defaultModel(config, provider.runtime);
     // The HR agent's own model and effort when the owner set them; else Pointer's chat settings.
     const model = hr?.model || chatModel;
     const evidence = buildEvidence({ tasks, team, chatModel, budget: config.budget, usage, skills, now, redact });
     const prompt = `<evidence>\n${evidenceText(evidence).replace(/<\/?evidence>/gi, "")}\n</evidence>\n\nReview the team and answer with the summary and your proposals.`;
 
-    const run = await this.ask({ apiKey, model, effort: hr?.effort || team.pointer.effort, system: hrSystemPrompt(instructions, team.pointer.name), prompt });
+    const run = await this.ask({
+      runtime: provider.runtime,
+      model,
+      effort: hr?.effort || team.pointer.effort,
+      system: hrSystemPrompt(instructions, team.pointer.name),
+      prompt,
+    });
     // Counted with chat (the web service's own Claude spend), so the monthly cap sees it.
     if (run.costUsd > 0) {
       await this.deps.usage
@@ -996,7 +1004,7 @@ export class HrService {
   }
 
   /** One call through the Agent SDK: no tools, a JSON-schema answer, a small budget, an isolated cwd and environment. Never throws. */
-  private async ask(o: { apiKey: string; model: string; effort: Effort; system: string; prompt: string }): Promise<{
+  private async ask(o: { runtime: ProviderRuntime; model: string; effort: Effort; system: string; prompt: string }): Promise<{
     answer?: RawAnswer;
     costUsd: number;
     problem: string;
@@ -1006,14 +1014,20 @@ export class HrService {
     let answer: RawAnswer | undefined;
     let problem = "no answer";
     let tmp: string | undefined;
+    let session: Awaited<ReturnType<ProviderRuntime["session"]>> | undefined;
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), this.deps.timeoutMs ?? HR_TIMEOUT_MS);
+    const { runtime } = o;
+    const model = runtime.model(o.model);
+    const effort = runtime.effort(o.effort);
     try {
       tmp = await mkdtemp(join(tmpdir(), "hr-"));
+      session = await runtime.session();
       const options: Options = {
-        ...(o.model ? { model: o.model } : {}),
+        ...(model ? { model } : {}),
         systemPrompt: o.system,
-        effort: o.effort,
+        ...(effort ? { effort } : {}),
+        ...(runtime.managedSettings ? { managedSettings: runtime.managedSettings } : {}),
         tools: [],
         allowedTools: [],
         permissionMode: "dontAsk",
@@ -1032,7 +1046,7 @@ export class HrService {
           PATH: process.env.PATH ?? "",
           HOME: tmp,
           LANG: "C.UTF-8",
-          ANTHROPIC_API_KEY: o.apiKey,
+          ...session.env,
           CLAUDE_AGENT_SDK_CLIENT_APP: "agent-army-hr/0.1.0",
         },
       };
@@ -1054,6 +1068,7 @@ export class HrService {
       problem = errorText(err);
     } finally {
       clearTimeout(timer);
+      await session?.dispose();
       if (tmp) await rm(tmp, { recursive: true, force: true }).catch(() => undefined);
     }
     if (abort.signal.aborted && !answer) problem = "it ran out of time";

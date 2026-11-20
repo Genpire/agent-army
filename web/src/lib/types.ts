@@ -91,6 +91,15 @@ export interface TaskEventsView {
 /** The order of a repo task's steps, for the stepper (checked against the server's list). */
 export const TASK_PHASE_ORDER = ["clone", "setup", "plan", "build", "verify", "publish", "checks"] as const satisfies readonly import("../../../src/tasks.js").TaskPhase[];
 
+// ---------- AI providers (GET /api/ai/providers) ----------
+
+export type { AiProviderView, AiProvidersView } from "../../../src/routes/ai.js";
+export type { ModelPrice, PresetCapabilities, PresetField, PresetKind, PresetModel } from "../../../src/ai-presets.js";
+export type { AiProviderId, ModelTier } from "../../../src/config.js";
+
+/** The model tiers a provider maps, in the order the page shows them (checked against the server's list). */
+export const MODEL_TIER_OPTIONS = ["main", "opus", "sonnet", "haiku", "subagent"] as const satisfies readonly import("../../../src/config.js").ModelTier[];
+
 /** The effort levels and access levels, in the order the page offers them (checked against the server's types). */
 export const EFFORT_OPTIONS = ["low", "medium", "high", "xhigh", "max"] as const satisfies readonly Effort[];
 export const ACCESS_OPTIONS = ["read", "run", "write"] as const satisfies readonly Access[];

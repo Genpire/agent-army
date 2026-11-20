@@ -10,7 +10,7 @@ import {
   query,
 } from "@anthropic-ai/claude-agent-sdk";
 import type { ContentBlockParam } from "@anthropic-ai/sdk/resources";
-import { providerRuntime } from "./ai-providers.js";
+import { defaultModel, fitContentBlocks, providerRuntime } from "./ai-providers.js";
 import { type AttachmentInfo, type AttachmentRepo, type ThreadRef, toContentBlocks } from "./attachments.js";
 import { type ChatIntegration, chatIntegrations, subagentIntegrationTools } from "./chat-integrations.js";
 import { PendingActions, confirmGate, conversationKey, gatedTools } from "./confirm-gate.js";
@@ -326,11 +326,12 @@ export function createPointerBrain(
       const promptReq: PointerRequest = files ? req : { ...req, attachments: undefined };
       const text = buildPointerPrompt(req);
       // With files: one streamed user turn (text first, then the files' content blocks); otherwise the plain string.
+      // A file the chat provider cannot read (a PDF on Kimi) is named instead of failing the reply.
       const prompt =
         files && req.attachments?.length
           ? singleUserTurn([
               { type: "text", text },
-              ...(await loadAttachmentBlocks(files, { channel: req.channel, threadTs: req.threadTs }, req.attachments, redact)),
+              ...fitContentBlocks(await loadAttachmentBlocks(files, { channel: req.channel, threadTs: req.threadTs }, req.attachments, redact), runtime),
             ])
           : text;
       const tools = createPointerToolServer({
@@ -376,13 +377,16 @@ export function createPointerBrain(
       const abort = new AbortController();
       const timer = setTimeout(() => abort.abort(), timeoutMs);
       let reply: PointerReply | undefined;
+      // The provider's environment, with its credential files (a Google key) written outside any checkout until the reply ends.
+      let session: Awaited<ReturnType<typeof runtime.session>> | undefined;
       try {
+        session = await runtime.session();
         const subagentTools = ["WebSearch", "WebFetch", ...tools.readOnlyToolNames, ...subagentIntegrationTools(connected)];
         // Integrations given to some agents only (apps assigned to agents): their read-only tools, per agent.
         const scopedTools = (agentId: string) =>
           connected.filter((i) => i.agentIds?.includes(agentId)).flatMap((i) => i.readOnlyToolNames);
         const gateTools = new Set([...subagentTools, ...connected.flatMap((i) => i.readOnlyToolNames)]);
-        const chatModel = team.pointer.model || config.anthropic.model;
+        const chatModel = team.pointer.model || defaultModel(config, runtime);
         const options: Options = {
           systemPrompt: buildPointerSystemPrompt({
             config,
@@ -437,7 +441,7 @@ export function createPointerBrain(
             PATH: process.env.PATH ?? "",
             HOME: tmp,
             LANG: "C.UTF-8",
-            ...runtime.env,
+            ...session.env,
             CLAUDE_AGENT_SDK_CLIENT_APP: "agent-army-pointer/0.2.0",
           },
           // The console shows the answer as it is written; Slack posts it once.
@@ -464,6 +468,7 @@ export function createPointerBrain(
         reply ??= { text: `Something went wrong: ${why}`, isError: true };
       } finally {
         clearTimeout(timer);
+        await session?.dispose();
         await rm(tmp, { recursive: true, force: true }).catch(() => {});
       }
 
