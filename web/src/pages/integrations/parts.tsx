@@ -1,7 +1,8 @@
 /**
  * Building blocks shared by the integration panes: the pane header, a titled
  * section, a status line, numbered steps, an inline form error and the save
- * hook every form uses.
+ * hook every form uses. The hub shows each pane in a drawer (PaneInDrawer),
+ * whose own header carries the title, logo and status.
  */
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
@@ -17,7 +18,7 @@ import { Text } from "@astryxdesign/core/Text";
 import { useToast } from "@astryxdesign/core/Toast";
 import { VStack } from "@astryxdesign/core/VStack";
 import { ArrowLeftIcon } from "@heroicons/react/24/outline";
-import { type ComponentType, type ReactNode, type SVGProps, useCallback, useState } from "react";
+import { type ComponentType, type ReactNode, type SVGProps, createContext, useCallback, useContext, useState } from "react";
 import { errorMessage } from "../../lib/api";
 import { useConfig } from "../../lib/state";
 import { useAction } from "../../lib/useAction";
@@ -49,7 +50,12 @@ export interface PaneHeaderProps {
   onBack?: () => void;
 }
 
+/** True inside the hub's drawer: its header already names the integration and its status, so a pane opens on what it enables. */
+export const PaneInDrawer = createContext(false);
+
 export function PaneHeader({ icon, title, tone, status, description, onBack }: PaneHeaderProps) {
+  const inDrawer = useContext(PaneInDrawer);
+  if (inDrawer) return <Text>{description}</Text>;
   return (
     <VStack gap={3}>
       {onBack && (

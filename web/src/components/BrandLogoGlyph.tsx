@@ -1,7 +1,8 @@
 /**
  * The logo itself, loaded lazily by BrandLogo with the logos (lib/logos.ts).
  * The SVG element is the logo's own artwork, which no Astryx icon carries;
- * Astryx's Icon sizes and colours it.
+ * Astryx's Icon sizes and colours it. A logo in several colours (Slack,
+ * monday.com) keeps its own colours: the brand reads from all of them at once.
  */
 import { Center } from "@astryxdesign/core/Center";
 import { Icon } from "@astryxdesign/core/Icon";
@@ -28,7 +29,7 @@ function glyphOf(icon: BrandIcon): ComponentType<SVGProps<SVGSVGElement>> {
   if (known) return known;
   const Glyph = (props: SVGProps<SVGSVGElement>) => (
     <svg viewBox="0 0 24 24" fill="currentColor" {...props}>
-      <path d={icon.path} />
+      {icon.parts ? icon.parts.map((part) => <path key={part.path} d={part.path} fill={`#${part.hex}`} />) : <path d={icon.path} />}
     </svg>
   );
   glyphs.set(icon.path, Glyph);
