@@ -47,6 +47,7 @@ const config = (over: { anthropic?: boolean; slack?: boolean; github?: boolean; 
     monday: { connected: false },
     jira: { connected: true, userName: "Dana" },
     miro: { connected: false },
+    engines: { codex: { connected: false, model: "" }, gemini: { connected: false, model: "" } },
     apps: over.apps ?? [],
   }) as unknown as PublicConfig;
 
