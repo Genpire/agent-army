@@ -9,7 +9,7 @@ import {
   waitForChecks,
 } from "../../src/tasks/ci.js";
 import type { Annotation, CheckInfo, StatusInfo } from "../../src/integrations/github/github.js";
-import { makeRedactor } from "../../src/worker.js";
+import { makeRedactor } from "../../src/tasks/worker.js";
 
 const check = (name: string, over: Partial<CheckInfo> = {}): CheckInfo => ({
   id: name.length * 1000 + name.charCodeAt(0),

@@ -24,7 +24,7 @@ import {
 import { RecentSet } from "../slack/listen.js";
 import { REPO_FORMAT_HINT } from "../integrations/code-hosts/repo-id.js";
 import { rememberConsoleUrl } from "../integrations/tickets/ticket-sync.js";
-import { configSecrets, makeRedactor } from "../worker.js";
+import { configSecrets, makeRedactor } from "../tasks/worker.js";
 import type { IntegrationRouteDeps } from "./types.js";
 
 const PROJECT_KEY = z.string().trim().toUpperCase().max(50).regex(JIRA_KEY_RE, "Project keys look like ACME: capital letters, digits or _, starting with a letter.");

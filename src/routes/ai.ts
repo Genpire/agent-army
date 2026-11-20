@@ -20,7 +20,7 @@ import {
   testConnection,
 } from "../ai/ai-providers.js";
 import { AI_PROVIDER_IDS, type AiProviderId, type Config, MODEL_TIERS, type ModelTier, mask } from "../core/config.js";
-import { configSecrets, makeRedactor } from "../worker.js";
+import { configSecrets, makeRedactor } from "../tasks/worker.js";
 import type { IntegrationRouteDeps } from "./types.js";
 
 /** One provider as the console sees it: the preset, and the saved connection without its secrets. */

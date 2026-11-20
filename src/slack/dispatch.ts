@@ -44,7 +44,7 @@ import {
   normalizeSlackText,
   parseCommand,
 } from "./targeting.js";
-import { configSecrets, makeRedactor } from "../worker.js";
+import { configSecrets, makeRedactor } from "../tasks/worker.js";
 import { describeTasks } from "../tasks/progress.js";
 import { type MonthUsage, usageLine, usd } from "../spending/usage.js";
 

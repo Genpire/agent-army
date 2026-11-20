@@ -12,7 +12,7 @@ import { ENGINES, engineAgentTemplate, engineAgents } from "../ai/engines.js";
 import { agentIdFor } from "../team/hr.js";
 import { type AgentSpec, TeamSchema } from "../team/team.js";
 import { checkGeminiKey, checkOpenAiKey } from "../core/validate.js";
-import { configSecrets, makeRedactor } from "../worker.js";
+import { configSecrets, makeRedactor } from "../tasks/worker.js";
 import type { IntegrationRouteDeps } from "./types.js";
 
 /** TeamSchema's limit. */

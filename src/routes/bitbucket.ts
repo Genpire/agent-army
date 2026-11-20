@@ -18,7 +18,7 @@ import { BITBUCKET_EVENT_RE, BITBUCKET_WEBHOOK_EVENTS, handleBitbucketWebhook, v
 import { randomToken } from "../core/crypto.js";
 import { RecentSet } from "../slack/listen.js";
 import { repoId } from "../integrations/code-hosts/repo-id.js";
-import { configSecrets, makeRedactor } from "../worker.js";
+import { configSecrets, makeRedactor } from "../tasks/worker.js";
 import type { IntegrationRouteDeps } from "./types.js";
 
 /** One path segment of a workspace id or repository slug; "." and ".." never. */

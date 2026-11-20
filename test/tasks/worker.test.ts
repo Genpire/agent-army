@@ -5,19 +5,19 @@ import { join, sep } from "node:path";
 import { promisify } from "node:util";
 import { strToU8, zipSync } from "fflate";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { REPORT_SCHEMA, type Report, type SharedFile, orchestratorPrompt, parseReport } from "../src/team/agents.js";
-import { type AttachmentInfo, AttachmentRepo } from "../src/chat/attachments.js";
-import type { CodeHost, HostViewer } from "../src/integrations/code-hosts/code-host.js";
-import { type Config, ConfigSchema } from "../src/core/config.js";
-import { deriveKey } from "../src/core/crypto.js";
-import { NOTES_MAX_CHARS, NotesRepo } from "../src/chat/notes.js";
-import { type CodeHostKind, repoPath } from "../src/integrations/code-hosts/repo-id.js";
-import { FsStore } from "../src/core/store.js";
-import { REPO_RULES, type AgentSpec, defaultTeam, rosterText } from "../src/team/team.js";
-import { type CheckInfo, GitHub, type PrRef, type StatusInfo } from "../src/integrations/github/github.js";
-import { BROWSER_SERVER, BROWSER_TOOLS, browserServer } from "../src/tasks/browser.js";
-import type { PlanItem } from "../src/tasks/progress.js";
-import type { Task, ThreadState } from "../src/tasks/tasks.js";
+import { REPORT_SCHEMA, type Report, type SharedFile, orchestratorPrompt, parseReport } from "../../src/team/agents.js";
+import { type AttachmentInfo, AttachmentRepo } from "../../src/chat/attachments.js";
+import type { CodeHost, HostViewer } from "../../src/integrations/code-hosts/code-host.js";
+import { type Config, ConfigSchema } from "../../src/core/config.js";
+import { deriveKey } from "../../src/core/crypto.js";
+import { NOTES_MAX_CHARS, NotesRepo } from "../../src/chat/notes.js";
+import { type CodeHostKind, repoPath } from "../../src/integrations/code-hosts/repo-id.js";
+import { FsStore } from "../../src/core/store.js";
+import { REPO_RULES, type AgentSpec, defaultTeam, rosterText } from "../../src/team/team.js";
+import { type CheckInfo, GitHub, type PrRef, type StatusInfo } from "../../src/integrations/github/github.js";
+import { BROWSER_SERVER, BROWSER_TOOLS, browserServer } from "../../src/tasks/browser.js";
+import type { PlanItem } from "../../src/tasks/progress.js";
+import type { Task, ThreadState } from "../../src/tasks/tasks.js";
 import {
   type ExecFile,
   FALLBACK_COMMIT_EMAIL,
@@ -62,7 +62,7 @@ import {
   threadStateAfter,
   usd,
   wipTitle,
-} from "../src/worker.js";
+} from "../../src/tasks/worker.js";
 
 const baseConfig = (): Config => ConfigSchema.parse({});
 

@@ -8,7 +8,7 @@ import type { Store } from "../../core/store.js";
 import { plainLine } from "../../tasks/task-events.js";
 import type { Task, TaskRepo, TaskTicket } from "../../tasks/tasks.js";
 import { type TicketClient, updateTicket } from "../tickets/ticket-sync.js";
-import { configSecrets, makeRedactor } from "../../worker.js";
+import { configSecrets, makeRedactor } from "../../tasks/worker.js";
 
 /**
  * monday.com tickets that start repo tasks. A board opts in with a repository

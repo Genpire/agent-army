@@ -16,7 +16,7 @@
  * the connection's token (members API) once the cheaper checks pass.
  */
 import { z } from "zod";
-import { configSecrets, makeRedactor } from "../../worker.js";
+import { configSecrets, makeRedactor } from "../../tasks/worker.js";
 import { safeEqual } from "../../core/crypto.js";
 import { BOT_MARKER, WRITE_ASSOCIATIONS } from "../github/github.js";
 import { GitLab, associationForAccess, isGitLabBot, mergeRequestWebUrl } from "./gitlab.js";

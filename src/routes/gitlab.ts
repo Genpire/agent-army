@@ -12,7 +12,7 @@ import { GITLAB_DEFAULT_URL, GitLab, gitlabStatus } from "../integrations/gitlab
 import { GITLAB_EVENTS, handleGitlabDelivery, verifyGitlabToken } from "../integrations/gitlab/gitlab-webhook.js";
 import { RecentSet } from "../slack/listen.js";
 import { repoId } from "../integrations/code-hosts/repo-id.js";
-import { configSecrets, makeRedactor } from "../worker.js";
+import { configSecrets, makeRedactor } from "../tasks/worker.js";
 import type { IntegrationRouteDeps } from "./types.js";
 
 /** https:// and a host, optionally a port and a path (GitLab under a relative URL). No query, fragment or "=" (git reads the address as a config key). */

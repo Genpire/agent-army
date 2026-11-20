@@ -8,7 +8,7 @@ import type { Store } from "../../core/store.js";
 import { plainLine } from "../../tasks/task-events.js";
 import type { Task, TaskTicket } from "../../tasks/tasks.js";
 import { updateTicket } from "../tickets/ticket-sync.js";
-import { configSecrets, makeRedactor } from "../../worker.js";
+import { configSecrets, makeRedactor } from "../../tasks/worker.js";
 
 /**
  * Jira issues that start repo tasks. A project opts in with a repository and

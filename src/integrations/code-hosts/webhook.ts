@@ -13,7 +13,7 @@ import { type PrThread, type TaskRepo, WEB_CHANNEL } from "../../tasks/tasks.js"
 import type { Store } from "../../core/store.js";
 import { startThreadTask } from "../../tasks/thread-task.js";
 import { type TicketClient, appendTicketEvent, ticketPrClosed } from "../tickets/ticket-sync.js";
-import { configSecrets, makeRedactor } from "../../worker.js";
+import { configSecrets, makeRedactor } from "../../tasks/worker.js";
 
 /**
  * GitHub webhook: a review or a comment addressed to Pointer on a pull request

@@ -10,7 +10,7 @@ import type { QueryFn } from "../chat/pointer.js";
 import { parseGitHubSkillUrl } from "./skills.js";
 import { type Team, enabledAgents } from "../team/team.js";
 import type { UsageRepo } from "../spending/usage.js";
-import { configSecrets, makeRedactor } from "../worker.js";
+import { configSecrets, makeRedactor } from "../tasks/worker.js";
 
 /**
  * The Skills Scout: one Agent SDK query in the web service that searches the

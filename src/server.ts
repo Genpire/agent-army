@@ -54,7 +54,7 @@ import { rememberConsoleUrl } from "./integrations/tickets/ticket-sync.js";
 import { checkAnthropic, checkGithub, checkSlack } from "./core/validate.js";
 import { UsageRepo } from "./spending/usage.js";
 import { handleGithubWebhook, parseGithubPayload, verifyGithubSignature } from "./integrations/code-hosts/webhook.js";
-import { configSecrets, makeRedactor } from "./worker.js";
+import { configSecrets, makeRedactor } from "./tasks/worker.js";
 import { aiRoutes } from "./routes/ai.js";
 import { appsRoutes } from "./routes/apps.js";
 import { bitbucketRoutes } from "./routes/bitbucket.js";

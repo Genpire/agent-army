@@ -18,7 +18,7 @@ import {
 } from "../../src/tasks/sizing.js";
 import type { Task } from "../../src/tasks/tasks.js";
 import { buildRepoAgents } from "../../src/team/team.js";
-import { teamQueryOptions } from "../../src/worker.js";
+import { teamQueryOptions } from "../../src/tasks/worker.js";
 
 const API_KEY = "sk-ant-secret-key-0123456789";
 

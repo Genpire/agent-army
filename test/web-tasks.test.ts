@@ -39,7 +39,7 @@ import {
   stoppedComment,
   taskPrompt,
   taskReport,
-} from "../src/worker.js";
+} from "../src/tasks/worker.js";
 
 // A 1×1 PNG (signature + IHDR is enough for the type check).
 const PNG = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489", "hex");

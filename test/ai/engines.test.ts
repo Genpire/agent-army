@@ -21,7 +21,7 @@ import {
 } from "../../src/ai/engines.js";
 import { createApp } from "../../src/server.js";
 import { type AgentSpec, buildRepoAgents, defaultTeam, repoAllowedTools } from "../../src/team/team.js";
-import { makeRedactor } from "../../src/worker.js";
+import { makeRedactor } from "../../src/tasks/worker.js";
 
 const CODEX_KEY = "sk-proj-engine-test-key-0123456789abcdef";
 const GEMINI_KEY = "AIzaEngineTestKey0123456789abcdefghijk";

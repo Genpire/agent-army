@@ -25,7 +25,7 @@ import {
 } from "../../../src/integrations/tickets/ticket-sync.js";
 import { textToAdf } from "../../../src/integrations/jira/jira.js";
 import { handleGithubWebhook, handlePrClosed, resetWebhookStateForTests } from "../../../src/integrations/code-hosts/webhook.js";
-import { configSecrets, makeRedactor } from "../../../src/worker.js";
+import { configSecrets, makeRedactor } from "../../../src/tasks/worker.js";
 
 const BOARD = "4012345678";
 const ITEM = "9001";

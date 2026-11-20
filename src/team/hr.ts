@@ -24,7 +24,7 @@ import {
   defaultTeam,
 } from "./team.js";
 import { type MonthUsage, type UsageRepo, repoSpend, usd } from "../spending/usage.js";
-import { configSecrets, makeRedactor } from "../worker.js";
+import { configSecrets, makeRedactor } from "../tasks/worker.js";
 
 /**
  * HR: someone who thinks about what the team needs. On request (the Team

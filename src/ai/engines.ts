@@ -26,7 +26,7 @@ import { type AgentDefinition, type McpServerConfig, createSdkMcpServer, tool } 
 import { z } from "zod";
 import { type Config, ENGINE_IDS, type EngineId } from "../core/config.js";
 import { type AgentSpec, type Team, enabledAgents } from "../team/team.js";
-import { gitRunner, makeRedactor } from "../worker.js";
+import { gitRunner, makeRedactor } from "../tasks/worker.js";
 
 /** What a repo task gets for its engine agents. */
 export interface RepoTaskEngines {

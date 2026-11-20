@@ -26,7 +26,7 @@ import {
   handlePrClosed,
   handleReviewDecision,
 } from "../code-hosts/webhook.js";
-import { configSecrets, makeRedactor } from "../../worker.js";
+import { configSecrets, makeRedactor } from "../../tasks/worker.js";
 
 /** The events the review webhook subscribes to (Bitbucket's trigger names: Comment created, Changes request created, Merged, Declined). */
 export const BITBUCKET_WEBHOOK_EVENTS = [

@@ -21,7 +21,7 @@ import type { QueryFn } from "../../src/chat/pointer.js";
 import { createApp } from "../../src/server.js";
 import { estimateTaskSize } from "../../src/tasks/sizing.js";
 import { buildRepoAgents } from "../../src/team/team.js";
-import { configSecrets, onboardingError, teamQueryOptions } from "../../src/worker.js";
+import { configSecrets, onboardingError, teamQueryOptions } from "../../src/tasks/worker.js";
 
 // ---------- Fixtures: one complete connection per provider, each with its own secrets ----------
 

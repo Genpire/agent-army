@@ -11,7 +11,7 @@ import {
   runSetupCommand,
   setupEnv,
 } from "../../src/tasks/repo-setup.js";
-import { makeRedactor } from "../../src/worker.js";
+import { makeRedactor } from "../../src/tasks/worker.js";
 
 const setupOf = (over: Partial<RepoSetup> = {}): RepoSetup => ({ setupCommand: "", startCommand: "", appUrl: "", env: {}, ...over });
 

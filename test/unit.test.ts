@@ -23,7 +23,7 @@ import { type Conversation, pendingMilestones, taskResultMarkdown } from "../src
 import { type Task, decodeTaskPayload, encodeTaskPayload, newTaskId } from "../src/tasks/tasks.js";
 import { GITHUB_REPO_RE, REPO_FORMAT_HINT, REPO_RE } from "../src/integrations/code-hosts/repo-id.js";
 import { helpText, isRepoAllowed, messageText, parseCommand, repoFromToken, resolveRepo } from "../src/slack/targeting.js";
-import { branchName, makeRedactor } from "../src/worker.js";
+import { branchName, makeRedactor } from "../src/tasks/worker.js";
 import {
   GITHUB_REPO_RE as WEB_GITHUB_REPO_RE,
   REPO_ERROR,

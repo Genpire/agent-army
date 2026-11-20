@@ -20,7 +20,7 @@ import { describeTimeline, plainLine, readTimeline } from "../tasks/task-events.
 import { type Task, type TaskRepo, type TaskTicket, type ThreadState, WEB_CHANNEL, newTaskId } from "../tasks/tasks.js";
 import { type ThreadTaskResult, resolveTaskRepo, startThreadTask } from "../tasks/thread-task.js";
 import type { UsageRepo } from "../spending/usage.js";
-import { configSecrets, makeRedactor } from "../worker.js";
+import { configSecrets, makeRedactor } from "../tasks/worker.js";
 
 /**
  * Conversations with Pointer from the admin console. Each is one JSON file

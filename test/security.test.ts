@@ -4,7 +4,7 @@ import { encodePath } from "../src/integrations/github/github.js";
 import { checkBashCommand } from "../src/tasks/guard.js";
 import { subagentReadOnlyGate } from "../src/chat/pointer.js";
 import { RESERVED_AGENT_IDS } from "../src/team/team.js";
-import { mergeConcurrentNotes } from "../src/worker.js";
+import { mergeConcurrentNotes } from "../src/tasks/worker.js";
 
 describe("security fixes from review", () => {
   it("refuses path traversal in GitHub file paths and repo names", () => {

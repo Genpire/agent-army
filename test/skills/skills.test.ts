@@ -30,7 +30,7 @@ import {
 } from "../../src/skills/skills.js";
 import { FsStore } from "../../src/core/store.js";
 import { SKILLS_PLUGIN, type TeamSkills, agentSkills, buildChatAgents, buildRepoAgents, defaultTeam, repoAllowedTools } from "../../src/team/team.js";
-import { prepareSkills, skillsNote, teamQueryOptions } from "../../src/worker.js";
+import { prepareSkills, skillsNote, teamQueryOptions } from "../../src/tasks/worker.js";
 
 const KEY = deriveKey("k");
 const tmp = (prefix: string) => mkdtemp(join(tmpdir(), prefix));
