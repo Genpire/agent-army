@@ -18,6 +18,8 @@ export const isNative = (row: IntegrationSummary): row is NativeSummary => isNat
 /** Where each built-in integration sits among the catalog's categories, so one filter covers both. */
 export const NATIVE_CATEGORY: Record<NativeId, AppCategory> = {
   claude: "AI & search",
+  codex: "AI & search",
+  gemini: "AI & search",
   slack: "Communication",
   github: "Developer tools",
   gitlab: "Developer tools",
@@ -29,7 +31,9 @@ export const NATIVE_CATEGORY: Record<NativeId, AppCategory> = {
 
 /** More words a search finds each one by, beyond its name, category and what it enables. */
 const NATIVE_KEYWORDS: Record<NativeId, string[]> = {
-  claude: ["anthropic", "model", "api key", "llm"],
+  claude: ["anthropic", "model", "api key", "llm", "provider", "bedrock", "vertex", "foundry", "deepseek", "qwen", "kimi", "glm", "z.ai"],
+  codex: ["openai", "gpt", "coding agent", "cli", "engine"],
+  gemini: ["google", "coding agent", "cli", "engine"],
   slack: ["chat", "messages", "bot", "channels"],
   github: ["git", "repos", "pull requests", "code host"],
   gitlab: ["git", "repos", "merge requests", "code host"],

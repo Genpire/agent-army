@@ -272,6 +272,45 @@ export const AppConnectionSchema = z.object({
 });
 export type AppConnection = z.infer<typeof AppConnectionSchema>;
 
+
+// ---------- AI providers and coding engines ----------
+
+/**
+ * Where the models Pointer and the team think with come from (see
+ * ai-providers.ts): Anthropic's API (config.anthropic), Claude on a cloud
+ * (Bedrock, Vertex, Google Cloud, Foundry), or another provider with an
+ * Anthropic-compatible API (DeepSeek, Qwen, Kimi, GLM) or any such endpoint.
+ */
+export const AI_PROVIDER_IDS = ["anthropic", "bedrock", "vertex", "google-cloud", "foundry", "deepseek", "qwen", "kimi", "zai", "custom"] as const;
+export type AiProviderId = (typeof AI_PROVIDER_IDS)[number];
+/** The model tiers a provider maps (Claude Code's opus, sonnet and haiku aliases, the main model and subagents' default). */
+export const MODEL_TIERS = ["main", "opus", "sonnet", "haiku", "subagent"] as const;
+export type ModelTier = (typeof MODEL_TIERS)[number];
+
+export const AiProviderConnectionSchema = z.object({
+  /** Secret values by the preset's field key (apiKey, bearerToken, credentialsJson…). Never sent to the browser. */
+  secrets: z.record(z.string().regex(/^[a-zA-Z][a-zA-Z0-9]{0,40}$/), z.string().max(20_000)).default({}),
+  /** Other values by the preset's field key (region, projectId, workspaceId, resource, baseUrl…). */
+  settings: z.record(z.string().regex(/^[a-zA-Z][a-zA-Z0-9]{0,40}$/), z.string().max(500)).default({}),
+  /** The model each tier runs on; a tier left out uses the preset's default. */
+  models: z.partialRecord(z.enum(MODEL_TIERS), z.string().trim().max(200)).default({}),
+  /** When the connection last answered a test call. */
+  checkedAt: z.string().optional(),
+});
+export type AiProviderConnection = z.infer<typeof AiProviderConnectionSchema>;
+
+/** A coding agent CLI the team can hand work to in repo tasks (see engines.ts). */
+export const ENGINE_IDS = ["codex", "gemini"] as const;
+export type EngineId = (typeof ENGINE_IDS)[number];
+export const EngineConnectionSchema = z.object({
+  /** OpenAI API key (Codex) or Gemini API key. */
+  apiKey: z.string().optional(),
+  /** The model the CLI runs; empty = the CLI's default. */
+  model: z.string().trim().max(100).default(""),
+  checkedAt: z.string().optional(),
+});
+export type EngineConnection = z.infer<typeof EngineConnectionSchema>;
+
 export const ConfigSchema = z.object({
   orgName: z.string().default(""),
   adminPasswordHash: z.string().optional(),
@@ -341,6 +380,18 @@ export const ConfigSchema = z.object({
   bitbucket: BitbucketConfigSchema,
   jira: JiraConfigSchema,
   miro: MiroConfigSchema,
+  /** The AI provider chat (Pointer) and repo tasks run on, and each provider's connection. Anthropic's key stays in `anthropic`. */
+  ai: z
+    .object({
+      chatProvider: z.enum(AI_PROVIDER_IDS).default("anthropic"),
+      taskProvider: z.enum(AI_PROVIDER_IDS).default("anthropic"),
+      providers: z.partialRecord(z.enum(AI_PROVIDER_IDS), AiProviderConnectionSchema).default({}),
+    })
+    .default({ chatProvider: "anthropic", taskProvider: "anthropic", providers: {} }),
+  /** Coding agent CLIs the team can hand work to in repo tasks. */
+  engines: z
+    .object({ codex: EngineConnectionSchema.default({ model: "" }), gemini: EngineConnectionSchema.default({ model: "" }) })
+    .default({ codex: { model: "" }, gemini: { model: "" } }),
   /** Apps connected through their MCP servers. */
   apps: z.array(AppConnectionSchema).max(MAX_APPS).default([]),
   /** Slack channel ID -> "owner/repo" default project for that channel. */
@@ -539,6 +590,25 @@ export function publicView(c: Config) {
       agentIds: a.agentIds,
       enabled: a.enabled,
     })),
+    /** Without secrets: which ones are set (masked), the settings and model choices. */
+    ai: {
+      chatProvider: c.ai.chatProvider,
+      taskProvider: c.ai.taskProvider,
+      providers: Object.fromEntries(
+        Object.entries(c.ai.providers).map(([id, p]) => [
+          id,
+          {
+            secrets: Object.fromEntries(Object.entries(p.secrets).map(([k, v]) => [k, mask(v)])),
+            settings: p.settings,
+            models: p.models,
+            checkedAt: p.checkedAt ?? null,
+          },
+        ]),
+      ),
+    },
+    engines: Object.fromEntries(
+      ENGINE_IDS.map((id) => [id, { connected: Boolean(c.engines[id].apiKey), key: mask(c.engines[id].apiKey), model: c.engines[id].model, checkedAt: c.engines[id].checkedAt ?? null }]),
+    ) as Record<EngineId, { connected: boolean; key: string | null; model: string; checkedAt: string | null }>,
     budget: c.budget,
     bindings: c.bindings,
     limits: c.limits,
@@ -594,6 +664,8 @@ export function integrationSecrets(c: Config): string[] {
     ...basic(c.jira.email, c.jira.token),
     c.miro.token,
     ...appSecrets,
+    ...Object.values(c.ai.providers).flatMap((p) => Object.values(p.secrets)),
+    ...ENGINE_IDS.map((id) => c.engines[id].apiKey),
   ].filter((x): x is string => typeof x === "string" && x.length > 0);
 }
 

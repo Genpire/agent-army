@@ -20,6 +20,8 @@ type PaneModule = { default: ComponentType<PaneProps> };
 
 const LOADERS: Record<NativeId, () => Promise<PaneModule>> = {
   claude: () => import("../ClaudePane").then((m) => ({ default: m.ClaudePane })),
+  codex: () => import("../EnginePane").then((m) => ({ default: m.CodexPane })),
+  gemini: () => import("../EnginePane").then((m) => ({ default: m.GeminiPane })),
   slack: () => import("../SlackPane").then((m) => ({ default: m.SlackPane })),
   github: () => import("../GitHubPane").then((m) => ({ default: m.GitHubPane })),
   gitlab: () => import("../GitLabPane").then((m) => ({ default: m.GitLabPane })),

@@ -19,6 +19,7 @@ import { Spending } from "./budget.js";
 import { type Screenshot, browserAvailable, browserServer, collectScreenshots } from "./browser.js";
 import { type CiOutcome, type WaitOptions, ciFailureDetails, ciFixPrompt, ciSummary, ciSummaryLine, storedCiSummary, waitForChecks } from "./ci.js";
 import { repoTaskApps } from "./apps.js";
+import { repoTaskEngines } from "./engines.js";
 import type { CodeHost } from "./code-host.js";
 import { allHostSecrets, codeHostFor } from "./code-host-factory.js";
 import { type Config, ConfigRepo, integrationSecrets, resolveMasterKey } from "./config.js";
@@ -61,7 +62,7 @@ export function teamQueryOptions(
   context: OrchestratorContext = {},
   attachmentsDir?: string,
   opts: RepoAgentOptions = {},
-): Required<Pick<Options, "systemPrompt" | "agents" | "allowedTools" | "effort">> & Pick<Options, "additionalDirectories" | "plugins" | "skills"> {
+): Required<Pick<Options, "systemPrompt" | "agents" | "allowedTools" | "effort">> & Pick<Options, "additionalDirectories" | "plugins" | "skills" | "mcpServers"> {
   const skills = skillQueryOptions(opts.skills);
   // All sit next to the checkout, not in it, so nothing in them is ever committed.
   const directories = [
@@ -74,8 +75,8 @@ export function teamQueryOptions(
     systemPrompt: {
       type: "preset",
       preset: "claude_code",
-      // The apps rule says which agent may use which app (apps.ts).
-      append: opts.apps?.promptRule ? `${orchestratorPrompt(config, context)}\n${opts.apps.promptRule}` : orchestratorPrompt(config, context),
+      // Which agent may use which app (apps.ts), and which work through a coding agent CLI (engines.ts).
+      append: [orchestratorPrompt(config, context), opts.apps?.promptRule, opts.engines?.promptRule].filter(Boolean).join("\n"),
     },
     // Each agent carries its own effort (its setting, or this one).
     effort: config.team.pointer.taskEffort,
@@ -84,6 +85,8 @@ export function teamQueryOptions(
     // enabled agent's tools (e.g. WebSearch for agents that only look).
     allowedTools: repoAllowedTools(config.team, opts),
     ...(directories.length ? { additionalDirectories: directories } : {}),
+    // The coding agent CLIs' in-process servers: the SDK hosts in-process servers only at the top level.
+    ...(opts.engines && Object.keys(opts.engines.servers).length ? { mcpServers: opts.engines.servers } : {}),
   };
 }
 
@@ -1216,6 +1219,12 @@ async function main(): Promise<void> {
     });
     if (apps) timeline.add({ kind: "note", text: `Apps for this task: ${Object.keys(apps.servers).length}` });
 
+    // Coding agent CLIs (Codex, Gemini) for agents whose engine is not Claude; one that cannot start is left out, never fails the task.
+    const engines = await repoTaskEngines(config, { repoDir, workRoot, redact, note: (text) => timeline.add({ kind: "note", text }) }).catch((err: unknown) => {
+      console.warn("[worker] engines not available:", redact(errorText(err)).slice(0, 300));
+      return undefined;
+    });
+
     // Reviews and comments on the pull (merge) request since the last run, by people with write access
     // (each host maps its own roles onto GitHub's associations, see CodeHost.prFeedback).
     // Feedback written from now on is new to the next run (see lastRunAt below).
@@ -1377,7 +1386,7 @@ async function main(): Promise<void> {
           options: {
             cwd: repoDir,
             abortController: opts.abort,
-            ...teamQueryOptions(runConfig, opts.context, attachmentsDir, { browser, skills, apps }),
+            ...teamQueryOptions(runConfig, opts.context, attachmentsDir, { browser, skills, apps, engines }),
             // Headless: nothing can prompt, so anything not in allowedTools is denied.
             permissionMode: "dontAsk",
             settingSources: ["project"], // loads the project's own CLAUDE.md

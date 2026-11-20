@@ -1,6 +1,8 @@
 import type { AgentDefinition, AgentMcpServerSpec } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
+import type { ProviderRuntime } from "./ai-providers.js";
 import type { RepoTaskApps } from "./apps.js";
+import type { RepoTaskEngines } from "./engines.js";
 import { BROWSER_SERVER, BROWSER_TOOLS, type BrowserServerConfig } from "./browser.js";
 
 /**
@@ -98,6 +100,12 @@ export const AgentSpecSchema = z.object({
   avatar: z.string().trim().max(64).default(""),
   /** Apps (config.apps ids) this agent may use through their MCP servers, in chat and repo tasks (see apps.ts). */
   apps: z.array(z.string().regex(/^app-[a-z0-9][a-z0-9-]{1,40}$/)).max(40).default([]),
+  /**
+   * Who does the agent's work in repo tasks: "claude" (the team's model, on
+   * the task provider) or a coding agent CLI it hands the work to (see
+   * engines.ts). Chat always runs on the chat provider.
+   */
+  engine: z.enum(["claude", "codex", "gemini"]).default("claude"),
 });
 export type AgentSpec = z.infer<typeof AgentSpecSchema>;
 
@@ -207,6 +215,7 @@ export function defaultTeam(): Team {
         skills: [],
         avatar: "",
         apps: [],
+        engine: "claude",
         instructions: `You are the Coder on a software team. You receive one scoped task from Pointer, the orchestrator.
 - Read the relevant code first. Match the surrounding style, naming and structure.
 - Make the smallest change that fully solves the task. No drive-by refactors.
@@ -227,6 +236,7 @@ export function defaultTeam(): Team {
         skills: [],
         avatar: "",
         apps: [],
+        engine: "claude",
         instructions: `You are the Reviewer. You did not write this change, and you are the last line of defence before a human sees it.
 - Inspect the work with \`git status\` and \`git diff\` (compare against the base branch you are given). Read the surrounding code, not just the diff.
 - Look for: incorrect logic, unhandled edge cases, security issues (injection, authz, secrets, unsafe input), data-loss risks, breaking API changes, missing tests, and violations of the project's conventions.
@@ -247,6 +257,7 @@ export function defaultTeam(): Team {
         skills: [],
         avatar: "",
         apps: [],
+        engine: "claude",
         instructions: `You are QA. Your job is to prove the change works, or to show exactly how it does not.
 - Discover how this project builds and tests (package scripts, Makefile, CI workflows) and run the relevant suites.
 - For a bug fix, reproduce the bug first where practical, then confirm the fix. For a feature, exercise the acceptance criteria.
@@ -267,6 +278,7 @@ export function defaultTeam(): Team {
         skills: [],
         avatar: "",
         apps: [],
+        engine: "claude",
         instructions: `You are the Researcher. You answer one research question thoroughly and honestly.
 - Search broadly first, then read the most authoritative sources (official docs, changelogs, source code, reputable analyses). Prefer recent sources and note dates.
 - Separate facts (with a source URL for each) from your judgement. Flag conflicting sources and anything you could not verify.
@@ -286,6 +298,7 @@ export function defaultTeam(): Team {
         skills: [],
         avatar: "",
         apps: [],
+        engine: "claude",
         instructions: `You are the Writer. You turn facts and intent into clear, well-structured text for a specific audience.
 - Ask yourself who reads it and what they must do or decide after reading; write for that. Lead with the point.
 - Use only the facts you were given or can verify; never invent numbers, names or quotes. Mark anything that needs confirming.
@@ -306,6 +319,7 @@ export function defaultTeam(): Team {
         skills: [],
         avatar: "",
         apps: [],
+        engine: "claude",
         instructions: `You are HR for a team of AI agents. You make the team fit the work it is actually asked to do.
 - Base every recommendation on evidence: the requests the team got, how they ended (done, blocked, failed, stopped), which agents did the work, how long it took and what it cost.
 - Recommend at most a few changes, each with the reason and the evidence: hire an agent for work nobody fits, sharpen an agent's description or instructions when Pointer picks it wrongly or it keeps failing, give an agent more or less access, retire an agent nobody uses, or add a skill.
@@ -326,6 +340,7 @@ export function defaultTeam(): Team {
         skills: [],
         avatar: "",
         apps: [],
+        engine: "claude",
         instructions: `You are the Skills Scout. You find Claude skills: folders with a SKILL.md (name, description, instructions) and optional scripts or reference files, which teach an agent a task.
 - Search where skills are published (Anthropic's skills repository on GitHub, other public repositories and skill directories) for the need you are given.
 - For each candidate give: its name, what it does, its source URL (the folder that holds SKILL.md), its licence, what files it contains, and whether it runs scripts.
@@ -364,6 +379,10 @@ export interface RepoAgentOptions {
   skills?: TeamSkills;
   /** Apps (MCP servers) assigned to agents for this run (see apps.ts). Absent = none. */
   apps?: RepoTaskApps;
+  /** Coding agent CLIs for agents whose engine is not "claude" (see engines.ts). Absent = none connected. */
+  engines?: RepoTaskEngines;
+  /** The task provider's model and effort mapping (see ai-providers.ts). Absent = Anthropic, as configured. */
+  provider?: Pick<ProviderRuntime, "model" | "effort">;
 }
 
 /** The Skill tool loads a library skill; allowed only when one is installed. */
@@ -394,19 +413,22 @@ export function buildRepoAgents(team: Team, opts: RepoAgentOptions = {}): Record
     enabledAgents(team).map((a) => {
       // Each agent starts its own servers (browser, apps), scoped to that agent.
       const servers: AgentMcpServerSpec[] = [...(usesBrowser(a, opts) ? [{ [BROWSER_SERVER]: opts.browser! }] : []), ...appServersFor(a, opts.apps)];
-      return [
-        a.id,
-        {
-          description: describeForSdk(a),
-          tools: [...repoToolsFor(a.access), ...(usesBrowser(a, opts) ? BROWSER_TOOLS : []), ...(opts.apps?.toolsFor(a.id) ?? [])],
-          prompt: `${a.instructions}\n${REPO_RULES}`,
-          ...(a.model ? { model: a.model } : {}),
-          effort: a.effort || team.pointer.taskEffort,
-          background: false,
-          ...(servers.length ? { mcpServers: servers } : {}),
-          ...skillsFor(a, opts.skills),
-        } satisfies AgentDefinition,
-      ];
+      // The task provider maps models and efforts (a Claude model id onto another provider's tier, an effort it does not take).
+      const model = opts.provider ? opts.provider.model(a.model) : a.model || undefined;
+      const effort = opts.provider ? opts.provider.effort(a.effort || team.pointer.taskEffort) : a.effort || team.pointer.taskEffort;
+      const base: AgentDefinition = {
+        description: describeForSdk(a),
+        tools: [...repoToolsFor(a.access), ...(usesBrowser(a, opts) ? BROWSER_TOOLS : []), ...(opts.apps?.toolsFor(a.id) ?? [])],
+        prompt: `${a.instructions}\n${REPO_RULES}`,
+        ...(model ? { model } : {}),
+        ...(effort ? { effort } : {}),
+        background: false,
+        ...(servers.length ? { mcpServers: servers } : {}),
+        ...skillsFor(a, opts.skills),
+      };
+      // An agent that works through a coding agent CLI (engines.ts); its own Claude definition when that engine is not connected.
+      const viaEngine = a.engine !== "claude" ? opts.engines?.agentDefinition(a, base) : undefined;
+      return [a.id, viaEngine ?? base];
     }),
   );
 }
@@ -421,6 +443,7 @@ export function repoAllowedTools(team: Team, opts: RepoAgentOptions = {}): strin
       ...(agents.some((a) => usesBrowser(a, opts)) ? BROWSER_TOOLS : []),
       ...(opts.skills?.skills.length ? [SKILL_TOOL] : []),
       ...(opts.apps?.allToolNames ?? []),
+      ...(opts.engines?.allToolNames ?? []),
     ]),
   ];
 }

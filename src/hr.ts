@@ -721,6 +721,7 @@ function checkProposal(raw: unknown, ctx: ProposalContext): Checked {
         skills: knownSkills(a.skills, ctx),
         avatar: "",
         apps: [],
+        engine: "claude",
       });
       if (!spec.success) return { ok: false, why: `the agent is not valid (${issueText(spec.error)})` };
       return { ok: true, proposal: { ...base, agent: spec.data } };

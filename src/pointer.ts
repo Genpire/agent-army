@@ -10,6 +10,7 @@ import {
   query,
 } from "@anthropic-ai/claude-agent-sdk";
 import type { ContentBlockParam } from "@anthropic-ai/sdk/resources";
+import { providerRuntime } from "./ai-providers.js";
 import { type AttachmentInfo, type AttachmentRepo, type ThreadRef, toContentBlocks } from "./attachments.js";
 import { type ChatIntegration, chatIntegrations, subagentIntegrationTools } from "./chat-integrations.js";
 import { PendingActions, confirmGate, conversationKey, gatedTools } from "./confirm-gate.js";
@@ -309,10 +310,10 @@ export function createPointerBrain(
   return {
     async reply(req, ctx) {
       const config = await deps.configRepo.load(true);
-      const apiKey = config.anthropic.apiKey;
-      if (!apiKey) {
-        return { text: "Claude is not connected. Ask the owner to add the Anthropic API key on the admin page.", isError: true };
-      }
+      // The chat provider (Anthropic, Claude on a cloud, or another provider): credentials, model mapping, what it cannot do.
+      const provider = providerRuntime(config, "chat");
+      if (!provider.ok) return { text: provider.error, isError: true };
+      const runtime = provider.runtime;
       const mondayToken = config.monday.token;
       // Every credential, every GitHub connection's token included.
       const redact = makeRedactor(configSecrets(config));
@@ -394,14 +395,15 @@ export function createPointerBrain(
             integrationRules: integrations.map((i) => i.promptRule).filter(Boolean),
           }),
           // Pointer's own chat model, else the model on the Claude card, else the SDK default.
-          ...(chatModel ? { model: chatModel } : {}),
-          effort: team.pointer.effort,
+          ...(runtime.model(chatModel) ? { model: runtime.model(chatModel) } : {}),
+          ...(runtime.effort(team.pointer.effort) ? { effort: runtime.effort(team.pointer.effort) } : {}),
+          ...(runtime.managedSettings ? { managedSettings: runtime.managedSettings } : {}),
           tools: [...builtins],
           // Headless: nothing can prompt, so anything not listed here is denied.
           allowedTools: [...builtins, ...tools.allToolNames, ...connected.flatMap((i) => i.allToolNames)],
           // The library's plugin (outside any repository) and its skills; Pointer loads them with the Skill tool.
           ...(skillOptions ?? {}),
-          disallowedTools: [...CHAT_BLOCKED_TOOLS],
+          disallowedTools: [...CHAT_BLOCKED_TOOLS, ...runtime.disallowedTools],
           permissionMode: "dontAsk",
           settingSources: [],
           strictMcpConfig: true,
@@ -435,7 +437,7 @@ export function createPointerBrain(
             PATH: process.env.PATH ?? "",
             HOME: tmp,
             LANG: "C.UTF-8",
-            ANTHROPIC_API_KEY: apiKey,
+            ...runtime.env,
             CLAUDE_AGENT_SDK_CLIENT_APP: "agent-army-pointer/0.2.0",
           },
           // The console shows the answer as it is written; Slack posts it once.

@@ -6,7 +6,7 @@
 import { plural } from "../../lib/format";
 import type { PublicConfig } from "../../lib/types";
 
-export const INTEGRATION_IDS = ["claude", "slack", "github", "gitlab", "bitbucket", "monday", "jira", "miro", "apps"] as const;
+export const INTEGRATION_IDS = ["claude", "codex", "gemini", "slack", "github", "gitlab", "bitbucket", "monday", "jira", "miro", "apps"] as const;
 export type IntegrationId = (typeof INTEGRATION_IDS)[number];
 
 export const isIntegrationId = (s: string | undefined): s is IntegrationId => (INTEGRATION_IDS as readonly string[]).includes(s ?? "");
@@ -15,7 +15,7 @@ export const isIntegrationId = (s: string | undefined): s is IntegrationId => (I
 export type StatusTone = "success" | "warning" | "neutral";
 
 /** What kind of integration each is, in order (the hub files them under the catalog's categories: hub/model.ts). */
-export const INTEGRATION_GROUPS = ["Essentials", "Code", "Work tracking", "Boards", "Apps"] as const;
+export const INTEGRATION_GROUPS = ["Essentials", "AI", "Code", "Work tracking", "Boards", "Apps"] as const;
 export type IntegrationGroup = (typeof INTEGRATION_GROUPS)[number];
 
 export interface IntegrationSummary {
@@ -60,6 +60,24 @@ export function summarize(config: PublicConfig): IntegrationSummary[] {
       required: true,
       connected: anthropic.connected,
       status: anthropic.connected ? `Connected${anthropic.key ? ` · key ${anthropic.key}` : ""}` : "Not connected",
+    },
+    {
+      id: "codex",
+      name: "Codex",
+      group: "AI",
+      enables: "OpenAI's coding agent as a team member: agents set to Codex hand their repo work to it.",
+      required: false,
+      connected: config.engines.codex.connected,
+      status: optional(config.engines.codex.connected, `Connected${config.engines.codex.model ? ` · ${config.engines.codex.model}` : ""}`),
+    },
+    {
+      id: "gemini",
+      name: "Gemini CLI",
+      group: "AI",
+      enables: "Google's coding agent as a team member: agents set to Gemini hand their repo work to it.",
+      required: false,
+      connected: config.engines.gemini.connected,
+      status: optional(config.engines.gemini.connected, `Connected${config.engines.gemini.model ? ` · ${config.engines.gemini.model}` : ""}`),
     },
     {
       id: "slack",

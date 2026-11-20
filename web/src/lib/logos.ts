@@ -41,6 +41,7 @@ import {
   siGitlab,
   siGmail,
   siGooglebigquery,
+  siGooglegemini,
   siGooglecalendar,
   siGoogledrive,
   siGrafana,
@@ -230,6 +231,7 @@ export const LOGOS: Readonly<Record<string, BrandIcon>> = {
   trello: siTrello,
   "weights-and-biases": siWeightsandbiases,
   xero: siXero,
+  gemini: siGooglegemini,
   // Native integrations (Slack and monday.com are drawn above: Simple Icons has neither)
   claude: siClaude,
   anthropic: siAnthropic,
