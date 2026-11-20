@@ -17,7 +17,7 @@ import {
   sizingPrompt,
 } from "../src/sizing.js";
 import type { Task } from "../src/tasks.js";
-import { buildRepoAgents } from "../src/team.js";
+import { buildRepoAgents } from "../src/team/team.js";
 import { teamQueryOptions } from "../src/worker.js";
 
 const API_KEY = "sk-ant-secret-key-0123456789";

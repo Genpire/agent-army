@@ -2,11 +2,11 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { RepoTaskApps } from "../src/apps.js";
-import { ConfigRepo, isChatReady, publicView } from "../src/core/config.js";
-import { deriveKey } from "../src/core/crypto.js";
-import { MEMORY_MAX_CHARS, MEMORY_MAX_FACTS, MemoryRepo } from "../src/memory.js";
-import { FsStore } from "../src/core/store.js";
+import type { RepoTaskApps } from "../../src/apps.js";
+import { ConfigRepo, isChatReady, publicView } from "../../src/core/config.js";
+import { deriveKey } from "../../src/core/crypto.js";
+import { MEMORY_MAX_CHARS, MEMORY_MAX_FACTS, MemoryRepo } from "../../src/memory.js";
+import { FsStore } from "../../src/core/store.js";
 import {
   CHAT_RULES,
   DEFAULT_EFFORT,
@@ -20,7 +20,7 @@ import {
   repoAllowedTools,
   repoToolsFor,
   rosterText,
-} from "../src/team.js";
+} from "../../src/team/team.js";
 
 const tmpStore = async () => new FsStore(await mkdtemp(join(tmpdir(), "army-team-")));
 

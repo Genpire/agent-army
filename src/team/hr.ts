@@ -3,13 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Options, query } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
-import type { Spending } from "./spending/budget.js";
-import type { Budget, Config } from "./core/config.js";
-import { type ProviderRuntime, defaultModel, providerRuntime } from "./ai/ai-providers.js";
-import type { QueryFn } from "./pointer.js";
-import { modelName } from "./sizing.js";
-import type { Store } from "./core/store.js";
-import { type Task, type TaskRepo, newTaskId } from "./tasks.js";
+import type { Spending } from "../spending/budget.js";
+import type { Budget, Config } from "../core/config.js";
+import { type ProviderRuntime, defaultModel, providerRuntime } from "../ai/ai-providers.js";
+import type { QueryFn } from "../pointer.js";
+import { modelName } from "../sizing.js";
+import type { Store } from "../core/store.js";
+import { type Task, type TaskRepo, newTaskId } from "../tasks.js";
 import {
   ACCESS_LEVELS,
   type Access,
@@ -23,8 +23,8 @@ import {
   agentLabel,
   defaultTeam,
 } from "./team.js";
-import { type MonthUsage, type UsageRepo, repoSpend, usd } from "./spending/usage.js";
-import { configSecrets, makeRedactor } from "./worker.js";
+import { type MonthUsage, type UsageRepo, repoSpend, usd } from "../spending/usage.js";
+import { configSecrets, makeRedactor } from "../worker.js";
 
 /**
  * HR: someone who thinks about what the team needs. On request (the Team

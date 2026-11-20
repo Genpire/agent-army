@@ -1,6 +1,6 @@
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { ActivityKind, PointerActivity } from "./pointer-types.js";
-import type { Team } from "./team.js";
+import type { Team } from "./team/team.js";
 
 /**
  * Turns Pointer's Agent SDK stream into live activity for the admin console:

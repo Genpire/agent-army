@@ -23,7 +23,7 @@ import { repoAccessError } from "./code-host-access.js";
 import { GITHUB_REPO_RE, REPO_FORMAT_HINT, REPO_ID_MAX, isRepoId } from "./repo-id.js";
 import { CONVERSATION_ID_RE, ConversationService, MESSAGE_MAX_CHARS, type WebThreads } from "./conversations.js";
 import { handleSlackEvent, withBrainSlot } from "./dispatch.js";
-import { HrService, PROPOSAL_ID_RE, REVIEW_ID_RE } from "./hr.js";
+import { HrService, PROPOSAL_ID_RE, REVIEW_ID_RE } from "./team/hr.js";
 import { RecentSet } from "./listen.js";
 import { MEMORY_MAX_FACTS, MemoryRepo } from "./memory.js";
 import { MondayClient, MondayError, checkMonday, statusColumns } from "./monday.js";
@@ -38,7 +38,7 @@ import {
   webhookIds,
 } from "./monday-automation.js";
 import { NOTES_MAX_CHARS, NotesRepo } from "./notes.js";
-import { loadOffice } from "./office.js";
+import { loadOffice } from "./team/office.js";
 import { type QueryFn, createPointerBrain } from "./pointer.js";
 import type { PointerBrain, SlackDeps, SlackMessageEvent } from "./pointer-types.js";
 import { type Runner, createRunner } from "./runner.js";
@@ -49,7 +49,7 @@ import { buildManifest, manifestCreateUrl, slackClient, verifySlackSignature } f
 import { createStore } from "./core/store.js";
 import { readTimeline } from "./task-events.js";
 import { TaskRepo } from "./tasks.js";
-import { SKILL_NAME_RE, TeamSchema } from "./team.js";
+import { SKILL_NAME_RE, TeamSchema } from "./team/team.js";
 import { rememberConsoleUrl } from "./ticket-sync.js";
 import { checkAnthropic, checkGithub, checkSlack } from "./core/validate.js";
 import { UsageRepo } from "./spending/usage.js";

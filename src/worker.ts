@@ -13,7 +13,7 @@ import {
   type SharedFile,
   orchestratorPrompt,
   parseReport,
-} from "./agents.js";
+} from "./team/agents.js";
 import { AttachmentRepo, type ThreadRef, classify, expandZip } from "./attachments.js";
 import { Spending } from "./spending/budget.js";
 import { type Screenshot, browserAvailable, browserServer, collectScreenshots } from "./browser.js";
@@ -39,7 +39,7 @@ import { slackClient, slackErrorCode, toMrkdwn, truncate, uploadThreadFiles } fr
 import { createStore } from "./core/store.js";
 import { TimelineRecorder, checkItems, plainLine } from "./task-events.js";
 import { type Task, type TaskPhase, type TaskReport, TaskRepo, type ThreadState, decodeTaskPayload, isWebTask } from "./tasks.js";
-import { type RepoAgentOptions, type Team, type TeamSkills, agentLabel, buildRepoAgents, repoAllowedTools, skillQueryOptions } from "./team.js";
+import { type RepoAgentOptions, type Team, type TeamSkills, agentLabel, buildRepoAgents, repoAllowedTools, skillQueryOptions } from "./team/team.js";
 import { ticketFinished, ticketPrOpened, ticketStarted, ticketStopped, ticketSyncDeps } from "./ticket-sync.js";
 import { UsageRepo } from "./spending/usage.js";
 

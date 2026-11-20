@@ -7,7 +7,7 @@ import { decrypt, encrypt } from "../core/crypto.js";
 import { encodePath } from "../github.js";
 import { connectionForRepo } from "../github-access.js";
 import type { Store } from "../core/store.js";
-import { SKILLS_PLUGIN, SKILL_NAME_RE, type Team, type TeamSkills } from "../team.js";
+import { SKILLS_PLUGIN, SKILL_NAME_RE, type Team, type TeamSkills } from "../team/team.js";
 
 /**
  * The team's skills library: Claude skills (a folder with a SKILL.md, whose

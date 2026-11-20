@@ -4,11 +4,11 @@
  * from src/hr.ts (type-only), so the page and the API cannot drift apart.
  */
 import type { TokenColor } from "@astryxdesign/core/Token";
-import type { ChangeField, DecisionResult, HrProposal, HrReview, ProposalKind, ProposalStatus } from "../../../../src/hr.js";
+import type { ChangeField, DecisionResult, HrProposal, HrReview, ProposalKind, ProposalStatus } from "../../../../src/team/hr.js";
 import { api } from "../../lib/api";
 import type { Access } from "../../lib/types";
 
-export type { AgentChanges, ChangeField, HrProposal, HrReview } from "../../../../src/hr.js";
+export type { AgentChanges, ChangeField, HrProposal, HrReview } from "../../../../src/team/hr.js";
 
 /** Mirrors HR_AGENT_ID in src/hr.ts: the HR agent of the default team. */
 export const HR_AGENT_ID = "hr";

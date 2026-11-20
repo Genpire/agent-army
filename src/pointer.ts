@@ -23,7 +23,7 @@ import type { NotesRepo } from "./notes.js";
 import { ActivityMapper } from "./pointer-activity.js";
 import { createPointerToolServer, githubToolOptions } from "./pointer-tools.js";
 import type { PointerBrain, PointerBrainDeps, PointerReply, PointerRequest } from "./pointer-types.js";
-import { SKILL_TOOL, type TeamSkills, buildChatAgents, pluginSkillName, rosterText, skillQueryOptions } from "./team.js";
+import { SKILL_TOOL, type TeamSkills, buildChatAgents, pluginSkillName, rosterText, skillQueryOptions } from "./team/team.js";
 import { configSecrets, makeRedactor } from "./worker.js";
 
 /**

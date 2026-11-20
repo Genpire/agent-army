@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Options, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { BudgetSchema, type Config, ConfigRepo } from "../src/core/config.js";
-import { deriveKey } from "../src/core/crypto.js";
+import { BudgetSchema, type Config, ConfigRepo } from "../../src/core/config.js";
+import { deriveKey } from "../../src/core/crypto.js";
 import {
   EVIDENCE_MAX_CHARS,
   HR_AGENT_ID,
@@ -28,13 +28,13 @@ import {
   scrubTokens,
   taskOutcome,
   validateProposals,
-} from "../src/hr.js";
-import type { QueryFn } from "../src/pointer.js";
-import { createApp } from "../src/server.js";
-import { FsStore } from "../src/core/store.js";
-import { type Task, TaskRepo, newTaskId } from "../src/tasks.js";
-import { type AgentSpec, type Team, defaultTeam } from "../src/team.js";
-import { UsageRepo } from "../src/spending/usage.js";
+} from "../../src/team/hr.js";
+import type { QueryFn } from "../../src/pointer.js";
+import { createApp } from "../../src/server.js";
+import { FsStore } from "../../src/core/store.js";
+import { type Task, TaskRepo, newTaskId } from "../../src/tasks.js";
+import { type AgentSpec, type Team, defaultTeam } from "../../src/team/team.js";
+import { UsageRepo } from "../../src/spending/usage.js";
 
 const API_KEY = "sk-ant-api03-secret-key-0123456789abcdef";
 const SLACK_TOKEN = "xoxb-1111-2222-secretslacktoken";

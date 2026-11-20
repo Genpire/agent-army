@@ -16,7 +16,7 @@ import {
   parseCandidates,
   scoutSystemPrompt,
 } from "../../src/skills/skill-scout.js";
-import { defaultTeam } from "../../src/team.js";
+import { defaultTeam } from "../../src/team/team.js";
 import { monthKey } from "../../src/spending/usage.js";
 
 const PDF = "https://github.com/anthropics/skills/tree/main/skills/pdf";

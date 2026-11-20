@@ -29,7 +29,7 @@ import { createApp } from "../src/server.js";
 import { FsStore } from "../src/core/store.js";
 import { TaskRepo, WEB_CHANNEL } from "../src/tasks.js";
 import { startThreadTask } from "../src/thread-task.js";
-import { defaultTeam } from "../src/team.js";
+import { defaultTeam } from "../src/team/team.js";
 
 const PUBLIC = { env: {} as NodeJS.ProcessEnv };
 const redact = (s: string) => s;

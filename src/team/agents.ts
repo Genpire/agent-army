@@ -1,5 +1,5 @@
-import type { Config } from "./core/config.js";
-import { type CodeHostKind, HOST_TERMS } from "./repo-id.js";
+import type { Config } from "../core/config.js";
+import { type CodeHostKind, HOST_TERMS } from "../repo-id.js";
 import { REPO_RULES, hasWriteAgent, rosterText } from "./team.js";
 
 /** A file the requester shared (Slack or monday.com), written outside the checkout for the team to read. */

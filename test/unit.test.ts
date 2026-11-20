@@ -3,7 +3,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { parseReport } from "../src/agents.js";
+import { parseReport } from "../src/team/agents.js";
 import { ConfigRepo, ConfigSchema, publicView } from "../src/core/config.js";
 import { decrypt, deriveKey, encrypt, hashPassword, signSession, verifyPassword, verifySession } from "../src/core/crypto.js";
 import { checkBashCommand } from "../src/guard.js";

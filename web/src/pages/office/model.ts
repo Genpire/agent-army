@@ -3,7 +3,7 @@
  * imports from the server, like lib/types.ts), state labels and the pure
  * helpers the scene, the list and the drawer share. No React here.
  */
-import type { OfficeMeeting, OfficePerson, OfficeState, OfficeTaskRef, OfficeView } from "../../../../src/office.js";
+import type { OfficeMeeting, OfficePerson, OfficeState, OfficeTaskRef, OfficeView } from "../../../../src/team/office.js";
 import { href } from "../../lib/router";
 import type { AgentSpec, Task, TaskPhase } from "../../lib/types";
 import { plainLabel } from "../chat/labels";

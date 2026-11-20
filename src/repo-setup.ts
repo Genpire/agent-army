@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import type { Readable } from "node:stream";
-import type { RepoSetupContext, SetupResult } from "./agents.js";
+import type { RepoSetupContext, SetupResult } from "./team/agents.js";
 import { type Config, RESERVED_ENV_KEYS, type RepoSetup } from "./core/config.js";
 
 /**

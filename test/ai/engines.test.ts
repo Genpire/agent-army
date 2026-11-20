@@ -20,7 +20,7 @@ import {
   runEngine,
 } from "../../src/ai/engines.js";
 import { createApp } from "../../src/server.js";
-import { type AgentSpec, buildRepoAgents, defaultTeam, repoAllowedTools } from "../../src/team.js";
+import { type AgentSpec, buildRepoAgents, defaultTeam, repoAllowedTools } from "../../src/team/team.js";
 import { makeRedactor } from "../../src/worker.js";
 
 const CODEX_KEY = "sk-proj-engine-test-key-0123456789abcdef";

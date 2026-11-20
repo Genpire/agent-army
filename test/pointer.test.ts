@@ -36,7 +36,7 @@ import {
 } from "../src/pointer-tools.js";
 import type { AddAttachment, PointerRequest, StartRepoTask } from "../src/pointer-types.js";
 import { FsStore } from "../src/core/store.js";
-import { defaultTeam } from "../src/team.js";
+import { defaultTeam } from "../src/team/team.js";
 
 // Spy on the options the tool server hands to the monday.com tools; the real tools still run.
 vi.mock("../src/monday.js", async (importOriginal) => {

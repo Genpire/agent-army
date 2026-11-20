@@ -3,7 +3,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { ConversationSummary } from "../src/conversations.js";
+import type { ConversationSummary } from "../../src/conversations.js";
 import {
   OFFICE_LEAD_ID,
   STALE_ANSWER_MS,
@@ -15,13 +15,13 @@ import {
   labelIndex,
   loadOffice,
   taskTitle,
-} from "../src/office.js";
-import type { ProgressSnapshot } from "../src/progress.js";
-import { createApp } from "../src/server.js";
-import type { Store } from "../src/core/store.js";
-import { type TaskEvent, type TaskTimeline, emptyTimeline, timelineKey } from "../src/task-events.js";
-import { type Task, WEB_CHANNEL, newTaskId } from "../src/tasks.js";
-import { type Team, agentLabel, defaultTeam } from "../src/team.js";
+} from "../../src/team/office.js";
+import type { ProgressSnapshot } from "../../src/progress.js";
+import { createApp } from "../../src/server.js";
+import type { Store } from "../../src/core/store.js";
+import { type TaskEvent, type TaskTimeline, emptyTimeline, timelineKey } from "../../src/task-events.js";
+import { type Task, WEB_CHANNEL, newTaskId } from "../../src/tasks.js";
+import { type Team, agentLabel, defaultTeam } from "../../src/team/team.js";
 
 const MIN = 60_000;
 const NOW = Date.parse("2026-11-19T15:00:00.000Z");

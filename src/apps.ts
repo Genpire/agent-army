@@ -25,7 +25,7 @@ import { AppSignInError, type FreshTokenDeps, freshAccessToken } from "./apps-oa
 import { type AppProxy, type ProxyScope, type ProxySource, appProxy, listAllTools, openUpstream } from "./apps-proxy.js";
 import type { ChatIntegration, ChatIntegrationContext } from "./chat-integrations.js";
 import type { AppConnection, AppTool, Config, ConfigRepo } from "./core/config.js";
-import { type AgentSpec, enabledAgents } from "./team.js";
+import { type AgentSpec, enabledAgents } from "./team/team.js";
 
 /** Listing an app's tools gives up after this. */
 export const APP_TOOL_TIMEOUT_MS = 15_000;

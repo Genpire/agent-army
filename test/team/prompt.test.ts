@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { type RepoSetupContext, orchestratorPrompt } from "../src/agents.js";
-import { type Config, ConfigSchema } from "../src/core/config.js";
-import { REPO_RULES } from "../src/team.js";
+import { type RepoSetupContext, orchestratorPrompt } from "../../src/team/agents.js";
+import { type Config, ConfigSchema } from "../../src/core/config.js";
+import { REPO_RULES } from "../../src/team/team.js";
 
 const baseConfig = (): Config => ConfigSchema.parse({});
 

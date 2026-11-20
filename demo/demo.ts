@@ -25,7 +25,7 @@ import { createApp } from "../src/server.js";
 import { FsStore } from "../src/core/store.js";
 import { TimelineRecorder } from "../src/task-events.js";
 import { type Task, TaskRepo, WEB_CHANNEL, newTaskId } from "../src/tasks.js";
-import { type Team, agentLabel, defaultTeam } from "../src/team.js";
+import { type Team, agentLabel, defaultTeam } from "../src/team/team.js";
 
 export const DEMO_PASSWORD = "agent-army-demo";
 

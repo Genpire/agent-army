@@ -12,7 +12,7 @@ import type { SlackDeps, SlackMessageEvent } from "../src/pointer-types.js";
 import { REPO_FORMAT_HINT } from "../src/repo-id.js";
 import { createApp } from "../src/server.js";
 import { FsStore } from "../src/core/store.js";
-import type { AgentSpec, Team } from "../src/team.js";
+import type { AgentSpec, Team } from "../src/team/team.js";
 
 // The real Slack layer would call Slack and Claude. Record what the server hands
 // it instead, and never settle, which proves /slack/events answers without waiting.

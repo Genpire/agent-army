@@ -4,7 +4,7 @@ import { isProviderReady } from "../ai/ai-providers.js";
 import { decrypt, deriveKey, encrypt, randomToken } from "./crypto.js";
 import type { Store } from "./store.js";
 import { REPO_RE } from "../repo-id.js";
-import { TeamSchema, defaultTeam } from "../team.js";
+import { TeamSchema, defaultTeam } from "../team/team.js";
 
 /** Any repository id (GitHub owner/repo, gitlab:group/project, bitbucket:workspace/repo); see repo-id.ts. */
 export { REPO_RE };

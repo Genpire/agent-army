@@ -29,7 +29,7 @@ import {
   skillView,
 } from "../../src/skills/skills.js";
 import { FsStore } from "../../src/core/store.js";
-import { SKILLS_PLUGIN, type TeamSkills, agentSkills, buildChatAgents, buildRepoAgents, defaultTeam, repoAllowedTools } from "../../src/team.js";
+import { SKILLS_PLUGIN, type TeamSkills, agentSkills, buildChatAgents, buildRepoAgents, defaultTeam, repoAllowedTools } from "../../src/team/team.js";
 import { prepareSkills, skillsNote, teamQueryOptions } from "../../src/worker.js";
 
 const KEY = deriveKey("k");

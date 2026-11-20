@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import type { Report } from "./agents.js";
+import type { Report } from "./team/agents.js";
 import type { CodeHost } from "./code-host.js";
 import type { DeploymentInfo, DeploymentStatusInfo, IssueComment } from "./github.js";
 import { type CodeHostKind, HOST_TERMS } from "./repo-id.js";

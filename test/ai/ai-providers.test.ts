@@ -20,7 +20,7 @@ import { AI_PROVIDER_IDS, type AiProviderId, type Config, ConfigSchema, isChatRe
 import type { QueryFn } from "../../src/pointer.js";
 import { createApp } from "../../src/server.js";
 import { estimateTaskSize } from "../../src/sizing.js";
-import { buildRepoAgents } from "../../src/team.js";
+import { buildRepoAgents } from "../../src/team/team.js";
 import { configSecrets, onboardingError, teamQueryOptions } from "../../src/worker.js";
 
 // ---------- Fixtures: one complete connection per provider, each with its own secrets ----------

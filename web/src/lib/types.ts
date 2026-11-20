@@ -9,7 +9,7 @@ import type { NotesRepo, ProjectNotes } from "../../../src/notes.js";
 import type { MondayBoardSummary } from "../../../src/monday.js";
 import type { ProgressSnapshot } from "../../../src/progress.js";
 import type { CiSummary, Task } from "../../../src/tasks.js";
-import type { Access, AgentSpec, Effort, PointerSpec, Team } from "../../../src/team.js";
+import type { Access, AgentSpec, Effort, PointerSpec, Team } from "../../../src/team/team.js";
 import type { MonthUsage } from "../../../src/spending/usage.js";
 
 export type { Access, AgentSpec, CiSummary, Effort, MemoryFact, MondayBoardSummary, MonthUsage, PointerSpec, ProgressSnapshot, ProjectNotes, Task, Team };
