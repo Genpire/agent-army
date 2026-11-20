@@ -114,6 +114,40 @@ export function authLabel(kind: AppAuthKind, appName: string): string {
 /** A catalog app that signs in with one click: OAuth, no client to register, no address to fill in. */
 export const signsInDirectly = (app: CatalogApp) => app.auth === "oauth" && !app.clientRegistration && !app.url.includes("{");
 
+/** What adding an app and going to its sign-in needs: the API, and how the browser opens the vendor's page (tests pass fakes). */
+export interface SignInDeps {
+  post: (path: string, body: unknown) => Promise<AddAppResult>;
+  open: (url: string) => void;
+}
+
+const browserSignIn: SignInDeps = {
+  post: (path, body) => api.post<AddAppResult>(path, body),
+  open: (url) => window.location.assign(url),
+};
+
+/**
+ * One click for a catalog app that only needs a sign-in: adds the connection
+ * from its catalog entry and opens the vendor's sign-in page. The vendor sends
+ * the browser back to `#/integrations/apps/<app id>?signin=…`.
+ */
+export async function addAndSignIn(
+  preset: Pick<CatalogApp, "id" | "name" | "url" | "transport">,
+  { access = "read", agentIds = [] }: { access?: AppView["access"]; agentIds?: string[] } = {},
+  deps: SignInDeps = browserSignIn,
+): Promise<AddAppResult> {
+  const result = await deps.post("/api/apps", {
+    presetId: preset.id,
+    name: preset.name,
+    url: preset.url,
+    transport: preset.transport,
+    auth: { type: "oauth" },
+    access,
+    agentIds,
+  });
+  if (result.signInUrl) deps.open(result.signInUrl);
+  return result;
+}
+
 const PLACEHOLDER_RE = /\{([A-Za-z0-9_]+)\}/g;
 
 /** The parts of a per-account address to ask for: the catalog's fields, and any other {placeholder} by its name. */

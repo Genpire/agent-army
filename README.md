@@ -25,7 +25,7 @@ Pointer, a self-hosted assistant for Slack and the web, leads a team of Claude a
 - **HR and a skills library.** HR reviews how the team works and recommends hires, changes and skills; the Skills Scout finds Claude skills, you install them in the team's library and assign them to agents.
 - **Watch it work.** Every repo task shows its step (clone, setup, plan, build, verify, publish, checks), the plan as a checklist, what each agent did and for how long, the files and commands, and the result.
 - **It checks its own work.** Agents start your app and click through UI changes in a headless browser with screenshots, wait for CI and fix failing checks, open the pull request's real preview deployment (Vercel, Netlify…), and pick up review comments on the pull request.
-- **Works with your stack.** GitHub, GitLab or Bitbucket for code; Jira, Confluence and monday.com for tickets; Miro for boards; and about 140 more apps through their MCP servers (Linear, Notion, Sentry, Stripe, Vercel, Figma, Zapier…), most with a one-click sign-in.
+- **Works with your stack.** GitHub, GitLab or Bitbucket for code; Jira, Confluence and monday.com for tickets; Miro for boards; Genpire for designing real products; and about 140 more apps through their MCP servers (Linear, Notion, Sentry, Stripe, Vercel, Figma, Zapier…), most with a one-click sign-in.
 - **Works from your tickets.** Move a Jira issue or a monday.com ticket to "Ready for dev" and the team starts on it; the ticket follows along: In progress, In review with the pull request, Done when it is merged.
 - **Spending under control.** A monthly cap and caps per repository, alerts in Slack before you hit them, and model routing that sends small tasks to a cheaper model.
 - **Humans stay in charge.** Agents only ever open pull requests; they never push to your branches or merge.
@@ -148,7 +148,7 @@ Workers run as child processes of the server (`RUNNER=local`). Slack needs to re
 3. **Slack** (Integrations, optional if you only use the console): click *Create Slack app* (the manifest is pre-filled with this deployment's URL and Pointer's name), install it to your workspace, paste the Bot User OAuth Token and Signing Secret. Invite Pointer to the channels where you want it.
 4. **GitHub** (Integrations): a fine-grained personal access token, ideally on a dedicated bot account, limited to the repos the agents may touch, with *Contents: read/write*, *Pull requests: read/write*, *Metadata: read*, and for the [CI checks](#ci-checks) loop *Checks: read*, *Commit statuses: read* and *Actions: read*, and for [preview checks](#preview-checks) *Deployments: read*. Optionally restrict it to owners or exact repos. For repos outside your organisation, add more tokens under *Other GitHub connections* (see [GitHub connections](#github-connections)). Without GitHub, Pointer still chats; GitHub questions and repo tasks say GitHub is not connected. Optionally add the webhook for [pull request reviews](#pull-request-reviews) on the same pane.
 5. **GitLab** or **Bitbucket** (Integrations, optional, instead of or next to GitHub): see [GitLab and Bitbucket](#gitlab-and-bitbucket).
-6. **monday.com**, **Jira & Confluence**, **Miro** (Integrations, optional): so Pointer can open and update tickets and read and draw on boards. See [monday.com](#mondaycom), [Jira and Confluence](#jira-and-confluence) and [Miro](#miro).
+6. **monday.com**, **Jira & Confluence**, **Miro**, **Genpire** (Integrations, optional): so Pointer can open and update tickets, read and draw on boards, and design products. See [monday.com](#mondaycom), [Jira and Confluence](#jira-and-confluence), [Miro](#miro) and [Genpire](#genpire).
 7. **Apps** (Integrations, optional): connect Linear, Notion, Sentry, Stripe, Vercel, Figma, Zapier and about 130 more through their MCP servers. See [Apps](#apps).
 8. **Projects** and **Settings** (optional): channel → default repo and Pointer channels (Projects), who may talk to Pointer, budget and turn limits per task, how long to wait for CI checks and how many fix rounds to run (Settings). Per repo, **Projects → Repo setup** holds a setup command, how to start the app and environment variables (see [Repo setup](#repo-setup)).
 9. **Team** (optional): rename Pointer, give it extra instructions, edit or add agents.
@@ -251,6 +251,7 @@ Pointer reacts with :eyes: while it works, then :white_check_mark: or :x:. Messa
 | `what's open on gitlab:acme/web?` | Lists merge requests and issues on GitLab (likewise `bitbucket:…`) |
 | `which Jira bugs in WEB are still open for the release?` | Searches Jira with JQL and reads the issues |
 | `draw our deploy pipeline on the Architecture board` | Draws a diagram on Miro |
+| `in Genpire, design a canvas tote bag with our brand style` | Designs the product in Genpire and links to it (Genpire connected) |
 | `remind me on Slack to check customer credits` | Sends you a DM from Pointer (see [Slack tools](#slack-tools)) |
 | `tell Dana on Slack that the deploy is done` | Finds Dana in the workspace, asks which Dana if several match, and sends her a DM with a link back |
 | `which Sentry errors spiked since yesterday?` | Uses a connected app (here Sentry) through its MCP server |
@@ -661,6 +662,14 @@ Optional. With Miro connected, Pointer can list and read boards (an outline by f
 
 **Connect it** on **Integrations → Miro**: in Miro's developer settings, create an app with the `boards:read` and `boards:write` scopes, install it to your team, and paste its access token. Pick a default board and, optionally, the boards Pointer may use (ids or board links).
 
+## Genpire
+
+Optional. [Genpire](https://www.genpire.com) is a product design studio. With it connected, Pointer and the team can read your Genpire products, brand styles, tech packs and usage, design and edit products in your brand style, make tech packs and print files, and prepare a factory quote request. They never send a quote: you send it in Genpire itself. What Genpire makes comes back as links to it in Genpire. Ask, for example, "in Genpire, design a canvas tote bag with our brand style" or "make a tech pack for the linen shirt".
+
+**Connect it** on **Integrations → Genpire** with one click: **Connect Genpire** opens Genpire's sign-in page, which shows "Pointer wants to use your Genpire account" and asks what Pointer may do, then brings you back to the pane. There you choose **Look only** or **Design too**, which agents may use it, and which of the tools Genpire lists may be used. The tools are always the ones Genpire's MCP server lists, so new Genpire tools show up with **List tools again**. Underneath, Genpire is an [app](#apps) connection: the same proxy, encrypted tokens and renewal.
+
+**Usage is billed by Genpire**, on the plan of the Genpire account that signed in: designing or editing a product uses that plan; looking things up does not. Pointer designs only when someone asks.
+
 ## Apps
 
 Connect apps through their own MCP servers: issue trackers, docs, monitoring, payments, deploys, design, data and more. **Integrations** lists about 140 apps whose servers were checked against the vendors' documentation (Linear, Notion, Sentry, Stripe, Vercel, Figma, Zapier, Datadog, PagerDuty, Airtable, ClickUp, Google Drive, Dropbox, PostHog…), searches the [MCP Registry](https://registry.modelcontextprotocol.io) for anything else, and takes any MCP server by its address as a custom app.
@@ -846,12 +855,12 @@ Besides the admin API, the service takes `POST /slack/events` from Slack and `PO
 | `POST /api/miro` | `{ token?, defaultBoardId?, allowedBoardIds? }` | Board ids or links; `""` clears the default. A new token is checked for `boards:read` and `boards:write`. Returns `{ ok, userName?, teamName? }`. |
 | `POST /api/miro/disconnect` | | Forgets the token; keeps the board settings. |
 | `GET /api/miro/boards` | `?query=` | `{ boards: [{ id, name, description?, viewLink?, team?, owner?, modifiedAt? }] }`; a pasted board link is looked up directly. |
-| `GET /api/apps/catalog` | | `{ apps, categories, redirectUrl }`: the app catalog and the OAuth redirect address to register where an app needs a hand-made client. |
+| `GET /api/apps/catalog` | | `{ apps, categories, redirectUrl }`: the app catalog (each entry with its address, sign-in, description, examples and, for some, `instructions` added to Pointer's when the app is connected) and the OAuth redirect address to register where an app needs a hand-made client. The console's Genpire integration connects the `genpire` entry. |
 | `GET /api/apps/registry` | `?search=` | `{ apps }`: remote servers from the MCP Registry matching the search (at least 3 characters), shaped like catalog entries, cached for an hour; `502` when the registry fails. |
 | `POST /api/apps` | `{ presetId?, name, url, transport?, auth, access?, agentIds? }` | Adds an app. `auth`: `{ type: "none" }`, `{ type: "bearer", token }`, `{ type: "headers", headers }` or `{ type: "oauth", clientId?, clientSecret? }`. Key apps are checked by listing their tools; OAuth apps return `signInUrl`. Returns `{ ok, app, signInUrl? }`, never a secret. |
 | `POST /api/apps/:id` | `{ name?, access?, disabledTools?, agentIds?, enabled?, auth? }` | Changes an app; an empty key or header value keeps the saved one. Returns `{ ok, app }`. |
 | `POST /api/apps/:id/check` / `POST /api/apps/:id/oauth/start` / `POST /api/apps/:id/delete` | | Lists the app's tools again (`{ ok, app }`) / starts the sign-in (`{ url }`) / removes the app and takes it off every agent (`{ ok }`). |
-| `GET /api/apps/oauth/callback` | `?state&code` (or `&error`) | Not an admin route: the vendor sends the browser here after sign-in. The single-use state (10 minutes) is checked; redirects to `/#/integrations/apps/<id>?signin=ok` or `?signin=error&reason=…`. |
+| `GET /api/apps/oauth/callback` | `?state&code` (or `&error`) | Not an admin route: the vendor sends the browser here after sign-in. The single-use state (10 minutes) is checked; redirects to `/#/integrations/apps/<id>?signin=ok` or `?signin=error&reason=…` (the console then opens the app, or for Genpire's connection the Genpire pane). |
 | `GET /api/apps/oauth/client-metadata.json` | | The OAuth client metadata document vendors read when the deployment signs in without registration. |
 | `POST /api/engines/:id` | `{ apiKey?, model?, allowUnsandboxed? }` | `:id` is `codex` or `gemini`. Checks a new key with OpenAI (`GET /v1/models`) or Google (the Gemini models list, key in `x-goog-api-key`) unless `SKIP_VALIDATION=1`, then saves it with the model (`""` = the CLI's default). An empty or missing key keeps the saved one, so the model or `allowUnsandboxed` can change alone. `allowUnsandboxed` (boolean, default `false`) lets the CLI run where it has no sandbox (see [Codex and Gemini CLI](#codex-and-gemini-cli)); absent = unchanged. Returns `{ ok }`, never the key. |
 | `POST /api/engines/:id/disconnect` | | Forgets the key and sets `allowUnsandboxed` back to `false`; keeps the model. Agents set to that engine work as Claude until it is connected again. |

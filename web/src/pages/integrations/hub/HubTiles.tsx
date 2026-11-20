@@ -5,7 +5,7 @@
 import { href } from "../../../lib/router";
 import { AppTile } from "../apps/AppTile";
 import { type AppSource, type CatalogApp, appTileStatus, signsInDirectly } from "../apps/apps";
-import { type ConnectedApp, NATIVE_CATEGORY, type NativeSummary, requiredNote } from "./model";
+import { type ConnectedApp, NATIVE_CATEGORY, type NativeSummary, tileNote } from "./model";
 
 /** Claude, Slack, GitHub…: "Manage" once connected, "Connect" before; either opens its drawer (#/integrations/<id>). */
 export function NativeTile({ row }: { row: NativeSummary }) {
@@ -24,7 +24,7 @@ export function NativeTile({ row }: { row: NativeSummary }) {
       logoId={row.id}
       caption={NATIVE_CATEGORY[row.id]}
       description={row.enables}
-      status={requiredNote(row)}
+      status={tileNote(row)}
       actionLabel="Connect"
       href={href("integrations", row.id)}
     />

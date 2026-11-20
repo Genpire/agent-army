@@ -225,6 +225,27 @@ async function seedConfig(): Promise<void> {
         agentIds: [],
         enabled: true,
       },
+      // Genpire, the built-in integration: an app connection from the "genpire" preset. Its tools here are made up;
+      // a real one lists whatever Genpire's MCP server offers.
+      {
+        id: "app-genpire",
+        name: "Genpire",
+        presetId: "genpire",
+        url: "https://mcp.genpire.com/mcp",
+        transport: "http",
+        auth: signedIn,
+        access: "write",
+        disabledTools: [],
+        tools: [
+          tool("list_products", "List the products in the account, newest first"),
+          tool("get_tech_pack", "Read a product's tech pack: materials, measurements, construction"),
+          tool("design_product", "Design a new product from a description, in a brand style", false),
+          tool("prepare_quote_request", "Prepare a factory quote request for a product (Genpire sends it only when you do)", false),
+        ],
+        checkedAt,
+        agentIds: [],
+        enabled: true,
+      },
     ];
     c.bindings = { C0ACMEWEB1: "acme/web", C0ACMEAPI1: "acme/api" };
     c.repoSetup = {

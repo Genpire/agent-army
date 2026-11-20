@@ -3,8 +3,10 @@
  * hub alone), `#/integrations/<id>` (a built-in integration's drawer),
  * `#/integrations/apps/<app id>` (a connected app's drawer). The OAuth
  * callback comes back with `?signin=ok|error&reason=…&check=failed` on the
- * last segment (src/routes/apps.ts).
+ * last segment (src/routes/apps.ts). An app a built-in integration shows
+ * (Genpire's) opens that integration instead (hubLanding).
  */
+import { builtInApps } from "../catalog";
 import { type NativeId, isNativeId } from "./model";
 
 export type HubTarget = { kind: "hub" } | { kind: "native"; id: NativeId } | { kind: "app"; appId: string };
@@ -36,4 +38,16 @@ export function parseHubRoute(rest: string[]): { target: HubTarget; signIn?: Sig
   const signin = flags.get("signin");
   if (!signin) return { target };
   return { target, signIn: { ok: signin === "ok", reason: flags.get("reason") ?? undefined, checkFailed: flags.get("check") === "failed" } };
+}
+
+/**
+ * What an address opens: the app connection a built-in integration shows
+ * opens that integration's pane (back from Genpire's sign-in at
+ * `#/integrations/apps/<id>?signin=ok` lands on `#/integrations/genpire`);
+ * anything else as it is.
+ */
+export function hubLanding(target: HubTarget, apps: readonly { id: string; presetId?: string | null }[]): HubTarget {
+  if (target.kind !== "app") return target;
+  const native = builtInApps(apps).get(target.appId);
+  return native ? { kind: "native", id: native } : target;
 }

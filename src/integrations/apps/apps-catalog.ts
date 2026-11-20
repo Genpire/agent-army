@@ -81,6 +81,8 @@ export interface CatalogApp {
   description: string;
   /** Requests someone might make, for the console and Pointer's instructions. */
   examples: string[];
+  /** How Pointer and the agents should use the app, added to their instructions after `description` while it is connected. */
+  instructions?: string;
   /** Caveats shown before connecting (a plan it needs, a limit on who may sign in). */
   notes?: string;
   /** Other addresses the vendor offers (a region, read-only). */
@@ -533,5 +535,11 @@ export const APP_CATALOG: CatalogApp[] = [...BASE_APPS, ...MORE_APPS].sort(
   (x, y) => x.category.localeCompare(y.category) || x.name.localeCompare(y.name),
 );
 
-/** A catalog entry by id. */
-export const catalogApp = (id: string | undefined): CatalogApp | undefined => (id ? APP_CATALOG.find((a) => a.id === id) : undefined);
+const BY_ID = new Map(APP_CATALOG.map((a) => [a.id, a]));
+
+/**
+ * A catalog entry by id: the presetId a connection keeps. Ids never change,
+ * since saved connections and the console's built-in integrations (Genpire is
+ * the "genpire" preset) find their entry by it.
+ */
+export const catalogApp = (id: string | undefined): CatalogApp | undefined => (id ? BY_ID.get(id) : undefined);

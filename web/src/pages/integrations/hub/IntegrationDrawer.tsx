@@ -29,6 +29,7 @@ const LOADERS: Record<NativeId, () => Promise<PaneModule>> = {
   monday: () => import("../MondayPane").then((m) => ({ default: m.MondayPane })),
   jira: () => import("../JiraPane").then((m) => ({ default: m.JiraPane })),
   miro: () => import("../MiroPane").then((m) => ({ default: m.MiroPane })),
+  genpire: () => import("../GenpirePane").then((m) => ({ default: m.GenpirePane })),
 };
 
 /** Panes whose code is here already: shown at once, without a Suspense frame. */

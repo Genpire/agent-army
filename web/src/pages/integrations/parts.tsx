@@ -1,6 +1,6 @@
 /**
  * Building blocks shared by the integration panes: the pane header, a titled
- * section, a status line, numbered steps, an inline form error and the save
+ * section, a status line, requests to try, numbered steps, an inline form error and the save
  * hook every form uses. The hub shows each pane in a drawer (PaneInDrawer),
  * whose own header carries the title, logo and status.
  */
@@ -100,6 +100,19 @@ export function PaneSection({ title, description, endContent, children }: PaneSe
       </VStack>
       {children}
     </VStack>
+  );
+}
+
+/** Requests to try, as a bulleted list under a section title. */
+export function Examples({ title, description, examples }: { title: string; description?: string; examples: string[] }) {
+  return (
+    <PaneSection title={title} description={description}>
+      <List listStyle="disc" density="compact">
+        {examples.map((example) => (
+          <ListItem key={example} label={<Text>“{example}”</Text>} align="first-line" />
+        ))}
+      </List>
+    </PaneSection>
   );
 }
 

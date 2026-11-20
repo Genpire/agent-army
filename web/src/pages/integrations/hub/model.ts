@@ -1,12 +1,13 @@
 /**
  * The integrations hub without React: the built-in integrations as tiles
  * (their category and the words a search finds them by), one search and
- * category filter over them, the connected apps and the app catalog, the
- * header's status line, and what is still required.
+ * category filter over them, the connected apps and the app catalog (without
+ * the ones a built-in integration shows: BUILT_IN_APP_PRESETS), the header's
+ * status line, and what is still required.
  */
 import type { PublicConfig } from "../../../lib/types";
 import { type AppCategory, type AppView, type CatalogApp, matchesQuery } from "../apps/apps";
-import { type IntegrationId, type IntegrationSummary, aiReady, hasCodeHost, isIntegrationId } from "../catalog";
+import { BUILT_IN_APP_PRESETS, type IntegrationId, type IntegrationSummary, aiReady, builtInApps, hasCodeHost, isIntegrationId } from "../catalog";
 
 /** The integrations built into the console: everything but the apps, which are tiles of their own. */
 export type NativeId = Exclude<IntegrationId, "apps">;
@@ -27,6 +28,7 @@ export const NATIVE_CATEGORY: Record<NativeId, AppCategory> = {
   monday: "Project management",
   jira: "Project management",
   miro: "Design",
+  genpire: "Design",
 };
 
 /** More words a search finds each one by, beyond its name, category and what it enables. */
@@ -63,6 +65,7 @@ const NATIVE_KEYWORDS: Record<NativeId, string[]> = {
   monday: ["monday", "tickets", "boards", "work tracking"],
   jira: ["issues", "tickets", "confluence", "wiki", "atlassian", "work tracking"],
   miro: ["whiteboard", "boards", "stickies", "diagrams"],
+  genpire: ["design", "products", "tech pack", "brand", "manufacturing", "quotes"],
 };
 
 /** The "all categories" choice of the category filter. */
@@ -93,10 +96,20 @@ export interface ConnectedApp {
   preset?: CatalogApp;
 }
 
-/** The connected apps the search and category match; a custom app has no category, so only "all" shows it. */
+/** The connected apps not shown by a built-in integration's tile (Genpire's is): the hub's apps, which its header counts. */
+export function hubApps(apps: AppView[]): AppView[] {
+  const builtIn = builtInApps(apps);
+  return apps.filter((a) => !builtIn.has(a.id));
+}
+
+/**
+ * The connected apps the search and category match, without the ones
+ * built-in integrations show; a custom app has no category, so only "all"
+ * shows it.
+ */
 export function filterConnectedApps(apps: AppView[], catalog: CatalogApp[] | undefined, { query, category }: HubFilter): ConnectedApp[] {
   const presets = new Map(catalog?.map((c) => [c.id, c]));
-  return apps
+  return hubApps(apps)
     .map((app) => ({ app, preset: app.presetId ? presets.get(app.presetId) : undefined }))
     .filter(
       ({ app, preset }) =>
@@ -105,10 +118,10 @@ export function filterConnectedApps(apps: AppView[], catalog: CatalogApp[] | und
     );
 }
 
-/** The catalog apps not connected yet that the search and category match. */
+/** The catalog apps not connected yet that the search and category match, without the ones built-in integrations connect (their tiles stand for them). */
 export function filterCatalog(catalog: CatalogApp[], connected: AppView[], { query, category }: HubFilter): CatalogApp[] {
   const added = new Set(connected.map((a) => a.presetId).filter(Boolean));
-  return catalog.filter((c) => !added.has(c.id) && inCategory(c.category, category) && matchesQuery(c, query));
+  return catalog.filter((c) => !added.has(c.id) && !BUILT_IN_APP_PRESETS.has(c.id) && inCategory(c.category, category) && matchesQuery(c, query));
 }
 
 /** Catalog apps under their categories, in the categories' order, leaving out empty ones. */
@@ -156,8 +169,13 @@ export function missingRequired(config: PublicConfig): MissingIntegration[] {
   return missing;
 }
 
-/** A built-in integration's line on its tile before it is connected: required ones say so, optional ones say nothing. */
-export function requiredNote(row: NativeSummary): { tone: "warning"; text: string } | undefined {
-  if (!row.required || row.connected) return undefined;
-  return { tone: "warning", text: row.group === "Code" ? "Required: one code host" : "Required" };
+/**
+ * A built-in integration's line on its tile before it is connected: required
+ * ones say so, one that needs attention says why ("Sign-in expired"), other
+ * optional ones say nothing.
+ */
+export function tileNote(row: NativeSummary): { tone: "warning"; text: string } | undefined {
+  if (row.connected) return undefined;
+  if (row.required) return { tone: "warning", text: row.group === "Code" ? "Required: one code host" : "Required" };
+  return row.tone === "warning" ? { tone: "warning", text: row.status } : undefined;
 }
