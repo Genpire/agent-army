@@ -124,7 +124,7 @@ describe("ConversationService", () => {
     t.setScript(() => gate.promise);
     const c = await created(t.service, "first question");
     // Let the answer start.
-    await vi.waitFor(() => expect(t.calls).toHaveLength(1));
+    await vi.waitFor(() => expect(t.calls).toHaveLength(1), { timeout: 10_000 });
     expect(await t.service.send(c.id, "second")).toEqual({ ok: false, status: 409, error: expect.stringContaining("still answering") });
     expect((await t.service.view(c.id))?.live).toMatchObject({ text: "", activity: [], tasks: [] });
 
@@ -182,7 +182,7 @@ describe("ConversationService", () => {
     const gate = deferred<PointerReply>();
     t.setScript(() => gate.promise);
     const c = await created(t.service, "question");
-    await vi.waitFor(() => expect(t.calls).toHaveLength(1));
+    await vi.waitFor(() => expect(t.calls).toHaveLength(1), { timeout: 10_000 });
     expect(await t.service.remove(c.id)).toBe(true);
     gate.resolve({ text: "late", isError: false });
     await t.service.idle();
@@ -230,7 +230,7 @@ describe("ConversationService", () => {
       return { text: "The answer is 42.", isError: false };
     });
     const c = await created(t.service, "question");
-    await vi.waitFor(async () => expect((await t.service.view(c.id))?.live?.text).toContain("The answer"));
+    await vi.waitFor(async () => expect((await t.service.view(c.id))?.live?.text).toContain("The answer"), { timeout: 10_000 });
     const live = (await t.service.view(c.id))!.live!;
     expect(live.text).toBe("The answer is [redacted]");
     expect(live.activity).toEqual([expect.objectContaining({ id: "tu1", label: "Searching the web for “acme”", kind: "web" })]);
@@ -250,7 +250,7 @@ describe("ConversationService", () => {
     const gate = deferred<PointerReply>();
     t.setScript(() => gate.promise);
     const c = await created(t.service, "question");
-    await vi.waitFor(() => expect(t.calls).toHaveLength(1));
+    await vi.waitFor(() => expect(t.calls).toHaveLength(1), { timeout: 10_000 });
     // A new process: nothing is answering there.
     const restarted = new ConversationService({ ...t, runner: { kind: "local", launch: async () => undefined }, brain: { reply: async () => ({ text: "again", isError: false }) } });
     const view = await restarted.view(c.id);

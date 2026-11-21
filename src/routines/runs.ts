@@ -101,9 +101,8 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export interface RoutineRunRepoOptions {
   /**
-   * How long a claim waits before reading it back. The store has no
-   * compare-and-swap: two instances writing within this window both read
-   * back one owner, and only that one runs.
+   * How long taking the lease waits before reading it back (the lease only
+   * decides which instance ticks; claiming a run is atomic, see claim()).
    */
   settleMs?: number;
 }
@@ -146,17 +145,12 @@ export class RoutineRunRepo {
   }
 
   /**
-   * Writes a new run unless one with its id exists, then reads it back after
-   * `settleMs`: true when this instance owns it. A scheduled run is claimed
-   * once, whichever instance gets there first.
+   * Creates a new run unless one with its id exists (Store.create is atomic,
+   * across instances too): true when this instance owns it. A scheduled run
+   * is claimed exactly once, whichever instance gets there first.
    */
   async claim(run: RoutineRun): Promise<boolean> {
-    const key = runKey(run.routineId, run.id);
-    if (await this.store.get(key)) return false;
-    await this.store.put(key, JSON.stringify(run));
-    if (this.settleMs > 0) await sleep(this.settleMs);
-    const back = parse<RoutineRun>(await this.store.get(key));
-    if (!back || back.owner !== run.owner || back.startedAt !== run.startedAt) return false;
+    if (!(await this.store.create(runKey(run.routineId, run.id), JSON.stringify(run)))) return false;
     await this.index(run);
     return true;
   }

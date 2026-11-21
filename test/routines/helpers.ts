@@ -110,6 +110,11 @@ export class MemoryStore implements Store {
   async put(key: string, value: Buffer | string) {
     this.data.set(key, Buffer.from(value));
   }
+  async create(key: string, value: Buffer | string) {
+    if (this.data.has(key)) return false;
+    this.data.set(key, Buffer.from(value));
+    return true;
+  }
   async list(prefix: string) {
     return [...this.data.keys()].filter((k) => k.startsWith(prefix));
   }

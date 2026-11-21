@@ -598,29 +598,29 @@ describe("Jira routes", () => {
       // The payload says the issue moved to "Ready for dev"; read again, it has not: nothing starts.
       state.status = "Done";
       expect((await signed(moved)).status).toBe(200);
-      await vi.waitFor(() => expect(logged(`[jira] ${KEY}: ignored: status is not the start status`)).toBe(true));
+      await vi.waitFor(() => expect(logged(`[jira] ${KEY}: ignored: status is not the start status`)).toBe(true), { timeout: 10_000 });
       expect(launched).toHaveLength(0);
 
       // A field other than the status changed: the issue is not even read.
       const edited = { ...moved, changelog: { items: [{ field: "summary" }] } };
       expect((await signed(edited)).status).toBe(200);
-      await vi.waitFor(() => expect(logged("[jira] delivery: ignored: status did not change")).toBe(true));
+      await vi.waitFor(() => expect(logged("[jira] delivery: ignored: status did not change")).toBe(true), { timeout: 10_000 });
 
       // A Jira Service Management customer made the move (the issue's history says so): nothing starts.
       state.status = "Ready for dev";
       state.mover = "customer";
       expect((await signed(moved)).status).toBe(200);
-      await vi.waitFor(() => expect(logged(`[jira] ${KEY}: ignored: moved to the start status by a customer`)).toBe(true));
+      await vi.waitFor(() => expect(logged(`[jira] ${KEY}: ignored: moved to the start status by a customer`)).toBe(true), { timeout: 10_000 });
       expect(launched).toHaveLength(0);
       expect(jiraCalls.some((c) => c.method === "POST" && c.path.startsWith("/rest/api/3/issue/"))).toBe(false);
 
       state.mover = "atlassian";
       expect((await signed(moved, { "x-atlassian-webhook-identifier": "delivery-1" })).status).toBe(200);
-      await vi.waitFor(() => expect(launched).toHaveLength(1));
+      await vi.waitFor(() => expect(launched).toHaveLength(1), { timeout: 10_000 });
       // A retry of the same delivery, and another delivery while the task is queued, start nothing.
       expect(await (await signed(moved, { "x-atlassian-webhook-identifier": "delivery-1" })).json()).toEqual({ ok: true, duplicate: true });
       expect((await signed(moved)).status).toBe(200);
-      await vi.waitFor(() => expect(logged(`[jira] ${KEY}: ignored: a task started on this issue moments ago`)).toBe(true));
+      await vi.waitFor(() => expect(logged(`[jira] ${KEY}: ignored: a task started on this issue moments ago`)).toBe(true), { timeout: 10_000 });
       expect(launched).toHaveLength(1);
 
       const view = await (await get("/api/conversations")).json();

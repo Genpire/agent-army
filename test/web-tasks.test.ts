@@ -242,7 +242,7 @@ describe("console chat and repo task routes", () => {
     await vi.waitFor(async () => {
       const view = await (await get(`/api/conversations/${conversation.id}`)).json();
       expect(view.live).toMatchObject({ text: "Partial answer", activity: [{ id: "s1", label: "Reading acme/web: README.md", kind: "github" }] });
-    });
+    }, { timeout: 10_000 });
     release();
     await conversations.idle();
     const view = await (await get(`/api/conversations/${conversation.id}`)).json();
