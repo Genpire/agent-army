@@ -14,6 +14,7 @@ import { VStack } from "@astryxdesign/core/VStack";
 import { ArrowRightStartOnRectangleIcon } from "@heroicons/react/24/outline";
 import { useState } from "react";
 import { PageFrame } from "../../components/PageFrame";
+import { TimezoneSelector, browserTimeZone } from "../../components/TimezoneSelector";
 import { api } from "../../lib/api";
 import { useConfig } from "../../lib/state";
 import type { Limits } from "../../lib/types";
@@ -48,6 +49,39 @@ function OrgNameSection({ saved }: { saved: string }) {
         onEnter={save}
       />
       <SaveRow label="Save" isDirty={orgName.trim() !== saved} isInvalid={tooLong} pending={pending} onSave={save} />
+    </SettingsSection>
+  );
+}
+
+// ---------- Timezone ----------
+
+function TimezoneSection({ saved, pointer }: { saved: string; pointer: string }) {
+  const { refresh } = useConfig();
+  const { run, pending } = useAction();
+  const [timezone, setTimezone] = useState(saved);
+  const browser = browserTimeZone();
+  const save = () =>
+    void run(
+      async () => {
+        await api.post("/api/settings", { timezone });
+        await refresh();
+      },
+      { success: `Timezone saved: ${timezone}.` },
+    );
+  return (
+    <SettingsSection
+      title="Timezone"
+      description={`Your organisation's timezone. New routines run on its clock unless they name another one: when you ask ${pointer} for "every morning at 8", it means 08:00 here.`}>
+      <TimezoneSelector
+        label="Timezone"
+        value={timezone}
+        onChange={setTimezone}
+        description={browser !== timezone ? `This browser is on ${browser}.` : undefined}
+      />
+      <HStack gap={3} vAlign="center" wrap="wrap">
+        <SaveRow label="Save" isDirty={timezone !== saved} pending={pending} onSave={save} />
+        {browser !== timezone && timezone === saved && <Button label={`Use ${browser}`} variant="ghost" onClick={() => setTimezone(browser)} />}
+      </HStack>
     </SettingsSection>
   );
 }
@@ -367,7 +401,7 @@ export default function SettingsPage() {
   const { config, state } = useConfig();
   const pointer = config.team.pointer.name;
   return (
-    <PageFrame title="Settings" description="Limits, spending, access, the admin password and this deployment.">
+    <PageFrame title="Settings" description="Limits, spending, access, the timezone, the admin password and this deployment.">
       <VStack gap={8}>
         <LimitsSection saved={config.limits} runner={state.runner} />
         <Divider />
@@ -376,6 +410,8 @@ export default function SettingsPage() {
         <AccessSection saved={config.slack.allowedUserIds} pointer={pointer} />
         <Divider />
         <OrgNameSection saved={config.orgName} />
+        <Divider />
+        <TimezoneSection saved={config.timezone} pointer={pointer} />
         <Divider />
         <DeploymentSection />
         <Divider />

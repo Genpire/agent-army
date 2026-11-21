@@ -26,6 +26,9 @@ import { FsStore } from "../src/core/store.js";
 import { TimelineRecorder } from "../src/tasks/task-events.js";
 import { type Task, TaskRepo, WEB_CHANNEL, newTaskId } from "../src/tasks/tasks.js";
 import { type Team, agentLabel, defaultTeam } from "../src/team/team.js";
+import type { Routine } from "../src/core/config.js";
+import { nextRuns, parseCron } from "../src/routines/cron.js";
+import { type RoutineRun, RoutineRunRepo, scheduledRunId } from "../src/routines/runs.js";
 
 export const DEMO_PASSWORD = "agent-army-demo";
 
@@ -787,9 +790,176 @@ async function simulate(taskId: string, pace = 1): Promise<void> {
   await tasks.save(task);
 }
 
+// ---------- Routines ----------
+
+const DEMO_TZ = "America/New_York";
+
+/** A canned digest, as a routine run would write it. */
+function digestReport(day: string, merged: number): string {
+  return [
+    `**${merged} pull requests merged, 3 waiting for review, 2 issues closed** across acme/web and acme/api (${day}).`,
+    "",
+    "## acme/web",
+    `- Merged [#${410 + merged}](https://github.com/acme/web/pull/${410 + merged}) *Dark mode toggle in the header* (Sara), [#${405 + merged}](https://github.com/acme/web/pull/${405 + merged}) *Fix the flaky checkout test* (Omar).`,
+    "- Waiting for review: [#418](https://github.com/acme/web/pull/418) *Search suggestions* (2 days, no reviewer yet).",
+    "- Closed issue [#97](https://github.com/acme/web/issues/97) *Prices flash before the currency loads*.",
+    "",
+    "## acme/api",
+    "- Merged [#212](https://github.com/acme/api/pull/212) *Rate limiting on /api/login*.",
+    "- Waiting for review: [#215](https://github.com/acme/api/pull/215) *Invoices export* and [#216](https://github.com/acme/api/pull/216) *Bump FastAPI*.",
+    "",
+    "## Needs attention today",
+    "- #418 has waited two days for a reviewer.",
+    "- The `e2e` check failed twice on main yesterday evening; the last run passed.",
+  ].join("\n");
+}
+
+function metricsReport(week: string): string {
+  return [
+    `**Signups up 12%, paid subscriptions up 4%** in the week to ${week}.`,
+    "",
+    "| Metric | This week | Last week | Change |",
+    "| --- | ---: | ---: | ---: |",
+    "| New signups | 1,284 | 1,146 | +12% |",
+    "| New paid subscriptions | 193 | 186 | +4% |",
+    "| Cancellations | 41 | 47 | −13% |",
+    "| Revenue | $48,920 | $46,310 | +6% |",
+    "",
+    "- Signups peaked on Wednesday after the newsletter went out.",
+    "- Cancellations are the lowest in six weeks.",
+    "- Annual plans are 31% of new subscriptions, up from 26%.",
+  ].join("\n");
+}
+
+const DEMO_ROUTINES: Routine[] = [
+  {
+    id: "rt-daily-github-digest",
+    name: "Daily GitHub digest",
+    instruction:
+      "Summarise what happened on GitHub in acme/web and acme/api in the window: pull requests merged and waiting for review, issues opened and closed, " +
+      "and failing checks on main. Link every pull request and issue, and end with what needs attention today.",
+    schedule: { cron: "0 8 * * *", timezone: DEMO_TZ },
+    deliver: { email: ["dana@acme.example"], slack: "", console: true },
+    budgetUsd: 1,
+    enabled: true,
+    createdBy: "Dana",
+    createdAt: "",
+  },
+  {
+    id: "rt-monday-metrics",
+    name: "Monday metrics",
+    instruction:
+      "From the company data, report new signups, new paid subscriptions, cancellations and revenue for the window and the week before, " +
+      "with the change in percent, in a small table, then three bullet points on what stands out.",
+    schedule: { cron: "30 8 * * 1", timezone: DEMO_TZ },
+    deliver: { email: [], slack: "C0ACMELEAD", console: true },
+    budgetUsd: 1.5,
+    enabled: true,
+    createdBy: "Admin (console)",
+    createdAt: "",
+  },
+];
+
+/** The past `count` scheduled times of a cron, oldest first. */
+function pastRuns(cron: string, count: number, now: number, lookbackDays: number): Date[] {
+  const parsed = parseCron(cron);
+  if (!parsed.ok) return [];
+  return nextRuns(parsed.spec, DEMO_TZ, new Date(now - lookbackDays * 24 * 60 * MIN), 400)
+    .filter((d) => d.getTime() <= now)
+    .slice(-count);
+}
+
+/** Two routines with a few past runs, their reports in a console conversation each. */
+async function seedRoutines(now: number): Promise<void> {
+  await configRepo.update((c) => {
+    c.timezone = DEMO_TZ;
+    c.routines = DEMO_ROUTINES.map((r, i) => ({ ...structuredClone(r), createdAt: iso(now - (9 + i * 11) * 24 * 60 * MIN) }));
+  });
+  const repo = new RoutineRunRepo(store, key, { settleMs: 0 });
+  const day = (d: Date) => d.toLocaleDateString("en-US", { timeZone: DEMO_TZ, weekday: "long", month: "short", day: "numeric" });
+
+  const seed = async (routine: Routine, runs: { at: Date; status: RoutineRun["status"]; report?: string; note?: string; costUsd?: number; delivered: RoutineRun["delivered"] }[]) => {
+    const messages: Conversation["messages"] = [];
+    for (const r of runs) {
+      const started = r.at.getTime() + 2_000;
+      const run: RoutineRun = {
+        id: scheduledRunId(r.at),
+        routineId: routine.id,
+        trigger: "schedule",
+        scheduledFor: r.at.toISOString(),
+        startedAt: iso(started),
+        finishedAt: iso(started + 95_000),
+        status: r.status,
+        delivered: r.delivered,
+        ...(r.report ? { report: r.report } : {}),
+        ...(r.note ? { note: r.note } : {}),
+        ...(r.costUsd !== undefined ? { costUsd: r.costUsd } : {}),
+      };
+      await repo.save(run);
+      if (r.report) {
+        messages.push({ id: `m-${randomBytes(5).toString("hex")}`, role: "pointer", text: `_Scheduled run · ${day(r.at)}, 08:00 (${DEMO_TZ})_\n\n${r.report}`, at: iso(started + 95_000), costUsd: r.costUsd });
+      }
+    }
+    const last = runs[runs.length - 1]!;
+    const conversation: Conversation = {
+      id: `c-${newTaskId(now - 3 * 24 * 60 * MIN)}`,
+      title: routine.name,
+      createdAt: messages[0]?.at ?? iso(now),
+      updatedAt: messages[messages.length - 1]?.at ?? iso(now),
+      pending: false,
+      messages,
+      taskIds: [],
+    };
+    await conversations.save(conversation, new Date(conversation.updatedAt));
+    const lastGood = [...runs].reverse().find((r) => r.status === "succeeded");
+    await repo.updateState(routine.id, {
+      since: routine.createdAt,
+      lastScheduledFor: last.at.toISOString(),
+      ...(lastGood ? { lastSuccessAt: iso(lastGood.at.getTime() + 2_000) } : {}),
+      conversationId: conversation.id,
+    });
+  };
+
+  const [digest, metrics] = (await configRepo.load(true)).routines;
+  const daily = pastRuns(digest!.schedule.cron, 3, now, 4);
+  await seed(
+    digest!,
+    daily.map((at, i) => ({
+      at,
+      status: "succeeded" as const,
+      report: digestReport(day(at), 2 + i),
+      costUsd: 0.18 + i * 0.03,
+      delivered: { email: { ok: true, detail: "Sent to dana@acme.example" }, slack: null, console: { ok: true } },
+    })),
+  );
+  const weekly = pastRuns(metrics!.schedule.cron, 2, now, 15);
+  await seed(metrics!, [
+    {
+      at: weekly[0]!,
+      status: "skipped",
+      note: "Missed: the service was not running at the scheduled time (3 hours ago). Runs more than an hour late are skipped; the next one runs on schedule.",
+      delivered: { email: null, slack: null, console: null },
+    },
+    {
+      at: weekly[1]!,
+      status: "succeeded",
+      report: metricsReport(day(weekly[1]!)),
+      costUsd: 0.41,
+      delivered: { email: null, slack: { ok: true, detail: "Posted to C0ACMELEAD" }, console: { ok: true } },
+    },
+  ]);
+}
+
 /** Pointer for the demo: streams a short answer, shows its steps, and starts a simulated task for change requests. */
 const demoBrain: PointerBrain = {
   async reply(req, ctx) {
+    // A routine run (Run now on the Routines page): a canned report, read-only like the real one.
+    if (req.surface === "routine") {
+      await sleep(4_000);
+      const today = new Date().toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" });
+      const text = /signups|metrics|subscriptions/i.test(req.text) ? metricsReport(today) : digestReport(today, 3);
+      return { text: `${text}\n\n_This is the demo: the report is canned._`, costUsd: 0.21, isError: false };
+    }
     const emit = ctx.onActivity ?? (() => undefined);
     const say = async (text: string) => {
       for (const part of text.match(/.{1,14}/gs) ?? []) {
@@ -936,14 +1106,17 @@ await seedSlackTasks(now);
 await seedFinishedWebTask(now);
 await seedMondayTask(now);
 await seedQuestion(now);
+await seedRoutines(now);
 const inProgress = await seedWorkInProgress(now);
 // The team task runs at a third of the usual pace (about five minutes), so the Office shows a meeting for a while.
 void simulate(inProgress.team, 3).catch((err: unknown) => console.error("[demo] simulated task failed:", err));
 void simulateResearch(inProgress.research).catch((err: unknown) => console.error("[demo] simulated research failed:", err));
 
 const port = Number(process.env.PORT ?? 8080);
-const { app } = await createApp(env, { brain: demoBrain, runner: simulatedRunner() });
+const { app, routines } = await createApp(env, { brain: demoBrain, runner: simulatedRunner() });
 app.listen(port, () => {
+  // The seeded routines run on schedule with the demo brain's canned reports.
+  routines.scheduler.start();
   console.log(`
 Agent Army demo is running: http://localhost:${port}
   Password: ${DEMO_PASSWORD}
