@@ -247,6 +247,24 @@ async function seedConfig(): Promise<void> {
         enabled: true,
       },
     ];
+    // Company data: one made-up API with a fake token (nothing is called in the demo).
+    c.dataSources = [
+      {
+        id: "ds-acme-api",
+        name: "Acme API",
+        description:
+          "Sign-ups, active users and subscriptions. /stats/signups?from=YYYY-MM-DD&to=YYYY-MM-DD gives daily sign-ups; /stats/subscriptions gives counts per plan; /users?created_after=YYYY-MM-DD lists new users (paged, 100 per page).",
+        kind: "http",
+        http: {
+          baseUrl: "https://api.acme.example/v1",
+          internal: false,
+          auth: { type: "bearer", token: "demo-acme-api-token-not-real-0000" },
+          allowedPaths: ["/stats", "/users"],
+        },
+        checkedAt,
+        enabled: true,
+      },
+    ];
     c.bindings = { C0ACMEWEB1: "acme/web", C0ACMEAPI1: "acme/api" };
     c.repoSetup = {
       "acme/web": {
