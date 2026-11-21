@@ -99,6 +99,10 @@ GitHub: review or /pointer comment on the team's PR ──webhook──► follo
 
 ## Deploy
 
+### One command: `npm create agent-army`
+
+Run `npm create agent-army@latest`: it checks which provider CLIs you are logged in to, asks once, and deploys the prebuilt image to Fly.io, Railway, Render, Cloud Run, your own server over SSH or local Docker ([details](packages/create-agent-army/README.md)).
+
 ### Google Cloud Run
 
 ```bash
