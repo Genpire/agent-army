@@ -841,10 +841,12 @@ All optional; see `.env.example`. Pointer's team, memory, project notes, monday.
 | Variable | Purpose |
 | --- | --- |
 | `MASTER_KEY` | Encrypts stored credentials and memory, signs admin sessions. Required when `REQUIRE_MASTER_KEY=1`. |
-| `SETUP_TOKEN` | One-time token to create the admin account. |
-| `PUBLIC_URL` | Public base URL (auto-detected behind most proxies). |
+| `SETUP_TOKEN` | One-time token to create the admin account. Unset or empty: one is generated and printed in the log. |
+| `PUBLIC_URL` | Public base URL, an http(s) address without a path. Unset: the platform's own address (`RENDER_EXTERNAL_URL`, `RAILWAY_PUBLIC_DOMAIN`, `FLY_APP_NAME`, `KOYEB_PUBLIC_DOMAIN`, Azure's `CONTAINER_APP_NAME`), else each request's (behind most proxies). |
 | `STORAGE` / `DATA_DIR` / `GCS_BUCKET` | `fs` or `gcs` storage for config, memory and task records. |
 | `RUNNER` / `WORKER_JOB` | `local` or `cloudrun` worker execution. |
+| `MAX_PARALLEL` | Local runner: the most repo tasks at the same time, 1 to 50, instead of what fits in the instance's memory (about 2 GB per task after 1.5 GB for the server: 4 GB runs 1, 8 GB runs 3). The Settings limit applies under it. |
+| `WORK_DIR` | Where repo tasks check out (default: the temp folder). Checkouts left by tasks killed in a restart are removed at the next start once older than `JOB_TIMEOUT_MIN` (else a day). |
 | `TASK_TIMEOUT_MIN` | Stops the team's first run in a repo task, checkout and setup command included (default 50). The work so far goes into a draft pull request. |
 | `JOB_TIMEOUT_MIN` | The worker's hard deadline in minutes: the team's run, waiting for CI, fix rounds and publishing must fit in it. Unset = no deadline. Set it to the job's timeout on Cloud Run (`deploy/gcp.sh` sets 180 and a 3-hour task timeout). |
 | `BROWSER` | `off` gives the agents no headless browser in repo tasks (no [browser checks](#browser-checks) or screenshots). |
@@ -858,7 +860,7 @@ Besides the admin API, the service takes `POST /slack/events` from Slack and `PO
 
 | Route | Body / query | Result |
 | --- | --- | --- |
-| `GET /api/state` | | Setup and sign-in state; when signed in, readiness, `eventsUrl`, `githubWebhookUrl` (the payload URL for GitHub) and the config without secrets (`config.github.extra` lists the other GitHub connections as `{ id, login, allowed, key }` with a masked key; `config.github.webhook.configured` says whether a webhook secret is saved; `config.repoSetup` maps `owner/repo` to `{ setupCommand, startCommand, appUrl, envKeys }`, variable names only; `config.monday` shows `connected`, `userName`, `accountName`, `defaultBoardId`, `allowedBoardIds`; `config.limits` includes `ciWaitMin` and `ciFixRounds`; `config.gitlab`, `config.bitbucket`, `config.jira`, `config.miro` and `config.apps` show who each is connected as, allow lists and webhook state, with masked keys and header names only; `config.engines` maps `codex` and `gemini` to `{ connected, key, model, checkedAt }` with the key masked). |
+| `GET /api/state` | | Setup and sign-in state; when signed in, readiness, `eventsUrl`, `githubWebhookUrl` (the payload URL for GitHub) and the config without secrets (`config.github.extra` lists the other GitHub connections as `{ id, login, allowed, key }` with a masked key; `config.github.webhook.configured` says whether a webhook secret is saved; `config.repoSetup` maps `owner/repo` to `{ setupCommand, startCommand, appUrl, envKeys }`, variable names only; `config.monday` shows `connected`, `userName`, `accountName`, `defaultBoardId`, `allowedBoardIds`; `config.limits` includes `ciWaitMin` and `ciFixRounds`; `config.gitlab`, `config.bitbucket`, `config.jira`, `config.miro` and `config.apps` show who each is connected as, allow lists and webhook state, with masked keys and header names only; `config.engines` maps `codex` and `gemini` to `{ connected, key, model, checkedAt }` with the key masked); `parallel` is `{ configured, effective, cap? }`: tasks at the same time, with the local runner's `cap` `{ max, reason: "memory" \| "env", memoryGiB? }`. |
 | `POST /api/setup` | `{ setupToken, password }` | Creates the admin account and signs in. |
 | `POST /api/login` / `POST /api/logout` | `{ password }` / none | Session cookie. |
 | `POST /api/reset-password` | `{ setupToken, password }` | Sets a new admin password with the setup token and signs in; every other session is signed out. `403` for a wrong token, `409` before setup. No session needed; limited to 10 attempts per address per 10 minutes, like sign-in. |
