@@ -1,7 +1,8 @@
 /**
  * The Email pane: how Pointer sends routines' reports, through an SMTP server
- * (with presets for Gmail, Microsoft 365, Amazon SES, Mailgun and Zoho) or
- * Resend; a test email; and what each service needs before it sends.
+ * (with presets for Gmail, Microsoft 365, Amazon SES, Mailgun, SendGrid and
+ * Zoho), Resend or SendGrid's API; a test email; and what each service needs
+ * before it sends.
  */
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
@@ -27,10 +28,17 @@ import type { IntegrationSummary } from "./catalog";
 import { type SmtpPresetId, SMTP_PRESETS, addressOf, portForTls, presetById, presetForHost } from "./email/presets";
 import { FormActions, FormError, PaneHeader, PaneSection, Steps, Strong, useSave } from "./parts";
 
-type Provider = "smtp" | "resend";
+type Provider = "smtp" | "resend" | "sendgrid";
+type SendgridRegion = "global" | "eu";
 
 const MAX_RECIPIENTS = 20;
 const splitAddresses = (s: string) => s.split(/[,;\s]+/).filter(Boolean);
+const asProvider = (v: string): Provider => (v === "resend" || v === "sendgrid" ? v : "smtp");
+
+const SENDGRID_REGIONS = [
+  { value: "global", label: "Global" },
+  { value: "eu", label: "EU (data residency)" },
+];
 
 export function EmailPane({ summary, onBack }: { summary: IntegrationSummary; onBack?: () => void }) {
   const { config } = useConfig();
@@ -44,14 +52,20 @@ export function EmailPane({ summary, onBack }: { summary: IntegrationSummary; on
         title={summary.name}
         tone={summary.tone}
         status={summary.status}
-        description={`Lets ${name}'s routines send their reports by email: through your own SMTP server (Gmail, Microsoft 365, Amazon SES, Mailgun, Zoho…) or through Resend. Reports are written in Markdown and arrive as a formatted email with a plain-text copy.`}
+        description={`Lets ${name}'s routines send their reports by email: through your own SMTP server (Gmail, Microsoft 365, Amazon SES, Mailgun, Zoho…), Resend or SendGrid. Reports are written in Markdown and arrive as a formatted email with a plain-text copy.`}
         onBack={onBack}
       />
 
       {e.configured && (
         <MetadataList>
           <MetadataListItem label="Sends with">
-            <Text>{e.provider === "smtp" ? `SMTP: ${e.smtp.host}:${e.smtp.port} (${e.smtp.secure ? "TLS" : "STARTTLS"})` : "Resend"}</Text>
+            <Text>
+              {e.provider === "smtp"
+                ? `SMTP: ${e.smtp.host}:${e.smtp.port} (${e.smtp.secure ? "TLS" : "STARTTLS"})`
+                : e.provider === "sendgrid"
+                  ? `SendGrid${e.sendgrid.region === "eu" ? " (EU)" : ""}`
+                  : "Resend"}
+            </Text>
           </MetadataListItem>
           <MetadataListItem label="From">
             <Text>{e.from}</Text>
@@ -77,8 +91,8 @@ export function EmailPane({ summary, onBack }: { summary: IntegrationSummary; on
           <ListItem
             label={
               <Text>
-                The From address must be one the service lets you send as: the account's own address with Gmail, Microsoft 365 or Zoho, or an address on a domain you
-                verified with Resend, Amazon SES or Mailgun. Otherwise the email is refused or lands in spam.
+                The From address must be one the service lets you send as: the account's own address with Gmail, Microsoft 365 or Zoho, an address on a domain you
+                verified with Resend, Amazon SES or Mailgun, or a verified sender or authenticated domain in SendGrid. Otherwise the email is refused or lands in spam.
               </Text>
             }
           />
@@ -96,7 +110,7 @@ function EmailSettings() {
   const { config } = useConfig();
   const e = config.email;
   const name = config.team.pointer.name;
-  const [provider, setProvider] = useState<Provider>(e.provider === "resend" ? "resend" : "smtp");
+  const [provider, setProvider] = useState<Provider>(asProvider(e.provider));
   const [from, setFrom] = useState(e.from);
   const [preset, setPreset] = useState<SmtpPresetId | undefined>(presetForHost(e.smtp.host));
   const [host, setHost] = useState(e.smtp.host);
@@ -105,12 +119,16 @@ function EmailSettings() {
   const [user, setUser] = useState(e.smtp.user);
   const [pass, setPass] = useState("");
   const [apiKey, setApiKey] = useState("");
+  const [sendgridKey, setSendgridKey] = useState("");
+  const [region, setRegion] = useState<SendgridRegion>(e.sendgrid.region);
   const { save, error, edit } = useSave();
 
   const current = presetById(preset ?? "custom");
   // The saved password is only kept for the server and user it was saved with (the server asks again otherwise).
   const savedPass = e.smtp.pass && host.trim().toLowerCase() === e.smtp.host && user.trim() === e.smtp.user ? e.smtp.pass : null;
   const passAgain = Boolean(e.smtp.pass) && !savedPass && user.trim() !== "";
+  // A saved SendGrid key is only kept while SendGrid stays the provider, in the region it was saved for.
+  const savedSendgridKey = e.provider === "sendgrid" && region === e.sendgrid.region ? e.sendgrid.key : null;
 
   const choosePreset = (id: string) => {
     const p = SMTP_PRESETS.find((x) => x.id === id);
@@ -121,42 +139,49 @@ function EmailSettings() {
       setPort(p.port);
       setSecure(p.secure);
     }
+    // SendGrid's fixed user name goes with its preset: another service starts with an empty one.
+    if (p.user) setUser(p.user);
+    else if (current.user && user === current.user) setUser("");
+  };
+
+  /** What is missing before the server is asked, if anything. */
+  const missing = (): string | undefined => {
+    if (!from.trim()) return "Enter the From address.";
+    if (provider === "smtp") {
+      if (!host.trim()) return "Enter the SMTP server's host.";
+      return user.trim() && !pass.trim() && !savedPass ? `Enter the ${current.passLabel.toLowerCase()}.` : undefined;
+    }
+    if (provider === "sendgrid") return !sendgridKey.trim() && !savedSendgridKey ? "Paste a SendGrid API key." : undefined;
+    return !apiKey.trim() && !e.resend.key ? "Paste a Resend API key." : undefined;
   };
 
   const submit = async () => {
     const f = from.trim();
-    const invalid = !f
-      ? "Enter the From address."
-      : provider === "smtp"
-        ? !host.trim()
-          ? "Enter the SMTP server's host."
-          : user.trim() && !pass.trim() && !savedPass
-            ? `Enter the ${current.passLabel.toLowerCase()}.`
-            : undefined
-        : !apiKey.trim() && !e.resend.key
-          ? "Paste a Resend API key."
-          : undefined;
     const body =
       provider === "smtp"
         ? { provider, from: f, smtp: { host: host.trim(), port, secure, user: user.trim(), ...(pass.trim() ? { pass } : {}) } }
-        : { provider, from: f, resend: apiKey.trim() ? { apiKey: apiKey.trim() } : {} };
+        : provider === "sendgrid"
+          ? { provider, from: f, sendgrid: { region, ...(sendgridKey.trim() ? { apiKey: sendgridKey.trim() } : {}) } }
+          : { provider, from: f, resend: apiKey.trim() ? { apiKey: apiKey.trim() } : {} };
     const ok = await save(() => api.post<{ detail?: string }>("/api/email", body), {
-      invalid,
+      invalid: missing(),
       success: (r) => `Email settings saved.${r.detail ? ` ${r.detail}` : ""}`,
     });
     if (ok) {
       setPass("");
       setApiKey("");
+      setSendgridKey("");
     }
   };
 
+  const sendsAs = provider === "smtp" ? "this account may send as" : provider === "sendgrid" ? "verified in SendGrid, or on a domain authenticated there" : "on a domain verified in Resend";
   const fromField = (
     <TextInput
       label="From"
       value={from}
       onChange={edit(setFrom)}
       placeholder={`${name} <reports@example.com>`}
-      description={`The sender people see, as an address or "Name <address>". It must be an address this ${provider === "smtp" ? "account" : "Resend domain"} may send as.`}
+      description={`The sender people see, as an address or "Name <address>". It must be an address ${sendsAs}.`}
       isRequired
     />
   );
@@ -164,10 +189,11 @@ function EmailSettings() {
   return (
     <PaneSection
       title={e.configured ? "Settings" : "Connect email"}
-      description={`Saving checks the settings first: an SMTP server is signed in to, a Resend key is tried with Resend.`}>
-      <SegmentedControl label="Send with" value={provider} onChange={(v) => setProvider(v === "resend" ? "resend" : "smtp")}>
+      description="Saving checks the settings first: an SMTP server is signed in to, a Resend or SendGrid key is tried with its service.">
+      <SegmentedControl label="Send with" value={provider} onChange={(v) => setProvider(asProvider(v))}>
         <SegmentedControlItem value="smtp" label="SMTP server" />
         <SegmentedControlItem value="resend" label="Resend" />
+        <SegmentedControlItem value="sendgrid" label="SendGrid" />
       </SegmentedControl>
 
       {provider === "smtp" ? (
@@ -227,7 +253,50 @@ function EmailSettings() {
               value={pass}
               onChange={edit(setPass)}
               saved={savedPass}
-              description={passAgain ? "Enter it again: the saved one is only used with the server and user it was saved for." : undefined}
+              description={[current.passHint, passAgain ? "Enter it again: the saved one is only used with the server and user it was saved for." : undefined].filter(Boolean).join(" ") || undefined}
+            />
+          </FormLayout>
+        </VStack>
+      ) : provider === "sendgrid" ? (
+        <VStack gap={4}>
+          <Steps
+            label="To send with SendGrid"
+            steps={[
+              <>
+                In{" "}
+                <Link href="https://app.sendgrid.com/settings/sender_auth" isExternalLink>
+                  SendGrid
+                </Link>
+                , open <Strong>Settings → Sender Authentication</Strong> and authenticate the domain to send from (add the DNS records it lists), or verify the single
+                address as a sender.
+              </>,
+              <>
+                Under <Strong>Settings → API Keys</Strong>, create an API key with the <Strong>Mail Send</Strong> permission (Restricted Access is enough). With read
+                access to Sender Authentication too, the From address is checked when you save.
+              </>,
+              <>
+                Paste the key below with that From address. It is checked with SendGrid, stored encrypted and never shown again. An EU regional subuser uses the EU
+                region, with a key made in that subuser.
+              </>,
+            ]}
+          />
+          <FormLayout>
+            <SecretField
+              label="SendGrid API key"
+              value={sendgridKey}
+              onChange={edit(setSendgridKey)}
+              saved={savedSendgridKey}
+              placeholder={savedSendgridKey ? undefined : "SG.…"}
+              description={e.sendgrid.key && !savedSendgridKey ? "Paste it again: a saved key is only kept while SendGrid stays the provider, in the same region." : undefined}
+              isRequired
+            />
+            {fromField}
+            <Selector
+              label="Region"
+              options={SENDGRID_REGIONS}
+              value={region}
+              onChange={edit((v: string) => setRegion(v === "eu" ? "eu" : "global"))}
+              description="EU sends through api.eu.sendgrid.com, for an EU regional subuser. Most accounts use Global."
             />
           </FormLayout>
         </VStack>
@@ -265,10 +334,11 @@ function EmailSettings() {
             confirmLabel="Click again to disconnect"
             size="md"
             onConfirm={async () => {
-              const ok = await save(() => api.post("/api/email/disconnect", {}), { success: "Email disconnected. The password and API key are forgotten." });
+              const ok = await save(() => api.post("/api/email/disconnect", {}), { success: "Email disconnected. The password and API keys are forgotten." });
               if (ok) {
                 setPass("");
                 setApiKey("");
+                setSendgridKey("");
               }
             }}
           />

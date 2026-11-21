@@ -1,5 +1,5 @@
 /**
- * Sending email (routines' reports): SMTP or Resend, from config.email.
+ * Sending email (routines' reports): SMTP, Resend or SendGrid, from config.email.
  *
  * sendEmail checks the message (at most 20 recipients, a one-line subject of
  * at most 200 characters, at most 100 000 characters of Markdown), takes a
@@ -8,10 +8,11 @@
  * never throws, and its errors never contain a secret.
  */
 import { Buffer } from "node:buffer";
-import type { Config, EmailConfig } from "../../core/config.js";
+import { type Config, type EmailConfig, emailConfigured } from "../../core/config.js";
 import { configSecrets, makeRedactor } from "../../tasks/worker.js";
 import { renderEmail } from "./render.js";
 import { sendResend, verifyResend } from "./resend.js";
+import { sendSendgrid, verifySendgrid } from "./sendgrid.js";
 import { type SmtpTransportFactory, sendSmtp, verifySmtp } from "./smtp.js";
 
 export interface EmailMessage {
@@ -26,8 +27,7 @@ export type EmailResult = { ok: true; id?: string } | { ok: false; error: string
 export const EMAIL_LIMITS = { maxRecipients: 20, maxSubjectChars: 200, maxMarkdownChars: 100_000, sendsPerMinute: 30 } as const;
 
 /** Whether email can be sent with this configuration. */
-export const emailReady = (config: Config): boolean =>
-  config.email.provider === "smtp" ? Boolean(config.email.smtp.host && config.email.from) : config.email.provider === "resend" ? Boolean(config.email.resend.apiKey && config.email.from) : false;
+export const emailReady = (config: Config): boolean => emailConfigured(config.email);
 
 // ---------- Addresses ----------
 
@@ -141,7 +141,7 @@ export function emailRedactor(config: Config, extra: (string | undefined)[] = []
 
 export async function sendEmail(config: Config, message: EmailMessage, deps: EmailDeps = {}): Promise<EmailResult> {
   const email = config.email;
-  if (!emailReady(config)) return { ok: false, error: "Email is not set up. Connect SMTP or Resend on Integrations → Email." };
+  if (!emailReady(config)) return { ok: false, error: "Email is not set up. Connect SMTP, Resend or SendGrid on Integrations → Email." };
   const from = parseFrom(email.from);
   if (!from) return { ok: false, error: "The From address in the email settings is not valid. Fix it on Integrations → Email." };
   const checked = checkMessage(message);
@@ -154,10 +154,13 @@ export async function sendEmail(config: Config, message: EmailMessage, deps: Ema
   const redact = emailRedactor(config);
   let result: EmailResult;
   try {
+    const mail = { to: checked.to, subject: checked.subject, html, text, headers: AUTOMATED_HEADERS };
     result =
       email.provider === "smtp"
-        ? await sendSmtp(email.smtp, { from: from.name ? { name: from.name, address: from.address } : from.address, to: checked.to, subject: checked.subject, text, html, headers: AUTOMATED_HEADERS }, deps.smtpTransport)
-        : await sendResend(email.resend.apiKey!, { from: formatFrom(from), to: checked.to, subject: checked.subject, html, text, headers: AUTOMATED_HEADERS }, deps.fetch);
+        ? await sendSmtp(email.smtp, { ...mail, from: from.name ? { name: from.name, address: from.address } : from.address }, deps.smtpTransport)
+        : email.provider === "sendgrid"
+          ? await sendSendgrid(email.sendgrid.apiKey!, email.sendgrid.region, { ...mail, from }, deps.fetch)
+          : await sendResend(email.resend.apiKey!, { ...mail, from: formatFrom(from) }, deps.fetch);
   } catch (err) {
     result = { ok: false, error: `Sending failed: ${err instanceof Error ? err.message : "unknown error"}` };
   }
@@ -166,8 +169,9 @@ export async function sendEmail(config: Config, message: EmailMessage, deps: Ema
 
 /**
  * Checks settings before they are saved: SMTP connects and signs in, Resend
- * lists the account's domains (and checks the From domain when it may). The
- * caller redacts the error.
+ * lists the account's domains (and checks the From domain when it may),
+ * SendGrid reads the key's scopes (and checks the From address when it may).
+ * The caller redacts the error.
  */
 export async function verifyEmailConfig(email: EmailConfig, deps: Omit<EmailDeps, "limiter"> = {}): Promise<{ ok: true; detail?: string } | { ok: false; error: string }> {
   const from = parseFrom(email.from);
@@ -175,10 +179,11 @@ export async function verifyEmailConfig(email: EmailConfig, deps: Omit<EmailDeps
   try {
     if (email.provider === "smtp") return await verifySmtp(email.smtp, deps.smtpTransport);
     if (email.provider === "resend") return await verifyResend(email.resend.apiKey ?? "", from.address, deps.fetch);
+    if (email.provider === "sendgrid") return await verifySendgrid(email.sendgrid.apiKey ?? "", email.sendgrid.region, from.address, deps.fetch);
   } catch (err) {
     return { ok: false, error: `The check failed: ${err instanceof Error ? err.message : "unknown error"}` };
   }
-  return { ok: false, error: "Choose SMTP or Resend." };
+  return { ok: false, error: "Choose SMTP, Resend or SendGrid." };
 }
 
 /** Escapes Markdown's special characters in a value written into a message. */
@@ -188,7 +193,8 @@ const literal = (s: string) => s.replace(/[\\`*_[\]<>|#~!]/g, (c) => `\\${c}`);
 export function testEmail(config: Config, to: string[]): EmailMessage {
   const name = config.team.pointer.name.trim() || "Pointer";
   const e = config.email;
-  const via = e.provider === "smtp" ? `SMTP (${e.smtp.host}:${e.smtp.port}, ${e.smtp.secure ? "TLS" : "STARTTLS"})` : "Resend";
+  const via =
+    e.provider === "smtp" ? `SMTP (${e.smtp.host}:${e.smtp.port}, ${e.smtp.secure ? "TLS" : "STARTTLS"})` : e.provider === "sendgrid" ? `SendGrid${e.sendgrid.region === "eu" ? " (EU)" : ""}` : "Resend";
   return {
     to,
     subject: `Test email from ${name}`,

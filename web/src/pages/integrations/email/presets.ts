@@ -1,9 +1,10 @@
 /**
- * SMTP services the Email pane can fill in: host, port and TLS, what to type
- * as the user and password, and what each one needs first.
+ * SMTP services the Email pane can fill in: host, port and TLS (and the user
+ * when it is always the same), what to type as the user and password, and
+ * what each one needs first.
  */
 
-export type SmtpPresetId = "gmail" | "microsoft" | "ses" | "mailgun" | "zoho" | "custom";
+export type SmtpPresetId = "gmail" | "microsoft" | "ses" | "mailgun" | "sendgrid" | "zoho" | "custom";
 
 export interface SmtpPreset {
   id: SmtpPresetId;
@@ -13,9 +14,13 @@ export interface SmtpPreset {
   port: number;
   /** TLS from the start (465); false is STARTTLS (587). */
   secure: boolean;
+  /** Filled in with the host when the service always signs in with the same user name. */
+  user?: string;
   userLabel: string;
   userPlaceholder: string;
   passLabel: string;
+  /** A line under the password field. */
+  passHint?: string;
   /** What the service needs, in a sentence or three. */
   tip: string;
   link?: { label: string; href: string };
@@ -70,6 +75,20 @@ export const SMTP_PRESETS: SmtpPreset[] = [
     tip: "Use the sending domain's SMTP login and password, from the domain's SMTP credentials in Mailgun, and send from that domain. For a domain in Mailgun's EU region, change the host to smtp.eu.mailgun.org.",
   },
   {
+    id: "sendgrid",
+    name: "SendGrid",
+    host: "smtp.sendgrid.net",
+    port: 587,
+    secure: false,
+    user: "apikey",
+    userLabel: "User name",
+    userPlaceholder: "apikey",
+    passLabel: "Password",
+    passHint: "The password is your API key.",
+    tip: 'The user name is the word apikey and the password is your API key: create one with the Mail Send permission under Settings → API Keys. Send from a sender verified, or a domain authenticated, under Settings → Sender Authentication. "SendGrid" under Send with sends through SendGrid\'s API instead, and checks the key when you save.',
+    link: { label: "SendGrid SMTP", href: "https://www.twilio.com/docs/sendgrid/for-developers/sending-email/integrating-with-the-smtp-api" },
+  },
+  {
     id: "zoho",
     name: "Zoho Mail",
     host: "smtp.zoho.com",
@@ -103,6 +122,7 @@ export function presetForHost(host: string): SmtpPresetId | undefined {
   if (h === "smtp.office365.com" || h === "smtp-mail.outlook.com") return "microsoft";
   if (/^email-smtp(-fips)?\.[a-z0-9-]+\.amazonaws\.com$/.test(h)) return "ses";
   if (h === "smtp.mailgun.org" || h === "smtp.eu.mailgun.org") return "mailgun";
+  if (h === "smtp.sendgrid.net") return "sendgrid";
   if (/^smtp(pro)?\.zoho\.(com|eu|in|com\.au|jp|com\.cn|sa|ca)$/.test(h)) return "zoho";
   return "custom";
 }

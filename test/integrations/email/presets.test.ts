@@ -8,12 +8,24 @@ describe("SMTP presets in the Email pane", () => {
       ["microsoft", "smtp.office365.com", 587, false],
       ["ses", "email-smtp.us-east-1.amazonaws.com", 587, false],
       ["mailgun", "smtp.mailgun.org", 587, false],
+      ["sendgrid", "smtp.sendgrid.net", 587, false],
       ["zoho", "smtp.zoho.com", 465, true],
       ["custom", "", 587, false],
     ]);
     // Each preset's host maps back to it.
     for (const p of SMTP_PRESETS.filter((x) => x.host)) expect(presetForHost(p.host)).toBe(p.id);
     expect(presetById("ses").passLabel).toBe("SMTP password");
+    // Only SendGrid always signs in with the same user name.
+    expect(SMTP_PRESETS.filter((p) => p.user).map((p) => p.id)).toEqual(["sendgrid"]);
+  });
+
+  it("fills in SendGrid's SMTP relay: STARTTLS on 587, the user apikey and the API key as the password", () => {
+    const sendgrid = presetById("sendgrid");
+    expect(sendgrid).toMatchObject({ name: "SendGrid", host: "smtp.sendgrid.net", port: 587, secure: false, user: "apikey", passHint: "The password is your API key." });
+    expect(sendgrid.tip).toMatch(/the password is your API key/);
+    expect(sendgrid.tip).toMatch(/Mail Send/);
+    expect(sendgrid.tip).toMatch(/Settings → Sender Authentication/);
+    expect(presetForHost("SMTP.SendGrid.net")).toBe("sendgrid");
   });
 
   it("recognises a saved host, including other regions", () => {

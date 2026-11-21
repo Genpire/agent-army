@@ -132,7 +132,7 @@ describe("readiness", () => {
 
   it("explains when email is not set up, without sending", async () => {
     const resend = fakeResend(() => Response.json({ id: "x" }));
-    expect(await sendEmail(config({}), message, { fetch: resend.fetch, limiter: roomy() })).toEqual({ ok: false, error: "Email is not set up. Connect SMTP or Resend on Integrations → Email." });
+    expect(await sendEmail(config({}), message, { fetch: resend.fetch, limiter: roomy() })).toEqual({ ok: false, error: "Email is not set up. Connect SMTP, Resend or SendGrid on Integrations → Email." });
     expect(resend.calls).toHaveLength(0);
   });
 });

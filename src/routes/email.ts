@@ -1,21 +1,23 @@
 /**
- * Email admin routes (/api/email/…): save the provider (SMTP or Resend) and
- * the From address, checked before saving unless SKIP_VALIDATION=1; send a
- * test email; disconnect. Secrets are never sent back: an empty password or
- * key keeps the saved one, except that an SMTP password is only kept for the
- * server and user it was saved with.
+ * Email admin routes (/api/email/…): save the provider (SMTP, Resend or
+ * SendGrid) and the From address, checked before saving unless
+ * SKIP_VALIDATION=1; send a test email; disconnect. Secrets are never sent
+ * back: an empty password or key keeps the saved one, except that an SMTP
+ * password is only kept for the server and user it was saved with, and a
+ * SendGrid key only while SendGrid stays the provider, in the same region.
  */
 import { Router } from "express";
 import { z } from "zod";
 import { type EmailConfig, publicView } from "../core/config.js";
 import { emailReady, emailRedactor, parseFrom, sendEmail, testEmail, verifyEmailConfig } from "../integrations/email/email.js";
 import { looksLikeResendKey } from "../integrations/email/resend.js";
+import { looksLikeSendgridKey } from "../integrations/email/sendgrid.js";
 import type { IntegrationRouteDeps } from "./types.js";
 
 const HOST_RE = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
 
 const SAVE = z.object({
-  provider: z.enum(["smtp", "resend"], { error: "Choose SMTP or Resend." }),
+  provider: z.enum(["smtp", "resend", "sendgrid"], { error: "Choose SMTP, Resend or SendGrid." }),
   from: z.string({ error: "Enter the From address." }).trim().max(200, "The From address is at most 200 characters."),
   smtp: z
     .object({
@@ -28,6 +30,13 @@ const SAVE = z.object({
     })
     .optional(),
   resend: z.object({ apiKey: z.string().max(500).optional() }).optional(),
+  sendgrid: z
+    .object({
+      apiKey: z.string().max(500).optional(),
+      /** "eu" for an EU regional subuser (api.eu.sendgrid.com); defaults to the saved region. */
+      region: z.enum(["global", "eu"], { error: 'The SendGrid region is "global" or "eu".' }).optional(),
+    })
+    .optional(),
 });
 
 /** The recipients are checked by sendEmail (addresses, at most 20); this only bounds the input. */
@@ -53,6 +62,8 @@ export function emailRoutes(deps: IntegrationRouteDeps): Router {
     const current = config.email;
     let next: EmailConfig;
     const typed: string[] = [];
+    // Another provider forgets the SendGrid key: it is not reused after a switch, so it is not kept.
+    const withoutKey = { region: current.sendgrid.region };
 
     if (input.provider === "smtp") {
       const s = input.smtp;
@@ -72,21 +83,31 @@ export function emailRoutes(deps: IntegrationRouteDeps): Router {
       if (user && !pass) {
         return fail(current.smtp.pass && !sameAccount ? "Enter the password again: the saved one is only used with the server and user it was saved for." : "Enter the SMTP password (for Gmail, an app password).");
       }
-      next = { ...current, provider: "smtp", from: input.from, smtp: { host, port, secure, user, ...(user && pass ? { pass } : {}) } };
+      next = { ...current, provider: "smtp", from: input.from, smtp: { host, port, secure, user, ...(user && pass ? { pass } : {}) }, sendgrid: withoutKey };
+    } else if (input.provider === "sendgrid") {
+      const region = input.sendgrid?.region ?? current.sendgrid.region;
+      const typedKey = input.sendgrid?.apiKey?.trim() ?? "";
+      if (typedKey && !looksLikeSendgridKey(typedKey)) return fail("That doesn't look like a SendGrid API key: it starts with SG.");
+      if (typedKey) typed.push(typedKey);
+      // A saved key is only reused while SendGrid stays the provider, and only with the host (region) it was checked with.
+      const keepSaved = current.provider === "sendgrid" && region === current.sendgrid.region;
+      const apiKey = typedKey || (keepSaved ? current.sendgrid.apiKey : undefined);
+      if (!apiKey) return fail(current.sendgrid.apiKey && !keepSaved ? "Paste the SendGrid API key again: the saved one is only used with the region it was saved for." : "Paste a SendGrid API key.");
+      next = { ...current, provider: "sendgrid", from: input.from, sendgrid: { apiKey, region } };
     } else {
       const typedKey = input.resend?.apiKey?.trim() ?? "";
       if (typedKey && !looksLikeResendKey(typedKey)) return fail("That doesn't look like a Resend API key: it starts with re_.");
       if (typedKey) typed.push(typedKey);
       const apiKey = typedKey || current.resend.apiKey;
       if (!apiKey) return fail("Paste a Resend API key.");
-      next = { ...current, provider: "resend", from: input.from, resend: { apiKey } };
+      next = { ...current, provider: "resend", from: input.from, resend: { apiKey }, sendgrid: withoutKey };
     }
 
     let detail: string | undefined;
     const verify = process.env.SKIP_VALIDATION !== "1";
     if (verify) {
       const check = await verifyEmailConfig(next);
-      if (!check.ok) return fail(emailRedactor({ ...config, email: next }, [...typed, current.smtp.pass, current.resend.apiKey])(check.error));
+      if (!check.ok) return fail(emailRedactor({ ...config, email: next }, [...typed, current.smtp.pass, current.resend.apiKey, current.sendgrid.apiKey])(check.error));
       detail = check.detail;
     }
     const updated = await configRepo.update((c) => {
@@ -107,11 +128,11 @@ export function emailRoutes(deps: IntegrationRouteDeps): Router {
     res.json({ ok: true, ...(result.id ? { id: result.id } : {}) });
   });
 
-  // Forgets the password and the API key; the provider's other settings stay for a later reconnect.
+  // Forgets the password and the API keys; the providers' other settings stay for a later reconnect.
   router.post("/api/email/disconnect", requireAdmin, async (_req, res) => {
     await configRepo.update((c) => {
       const { pass: _pass, ...smtp } = c.email.smtp;
-      c.email = { provider: "none", from: c.email.from, smtp, resend: {} };
+      c.email = { provider: "none", from: c.email.from, smtp, resend: {}, sendgrid: { region: c.email.sendgrid.region } };
     });
     res.json({ ok: true });
   });
