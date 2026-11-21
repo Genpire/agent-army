@@ -10,6 +10,8 @@
  * the room is warm in the light theme and calm in the dark one; monitors glow
  * and type only while their owner works, and every animation stops under
  * prefers-reduced-motion. Decorative: the page describes everyone in text.
+ * What moves with the office's life (people walking, a cup brewing, the
+ * foosball) is drawn by LifeArt.tsx with the same helpers and colours.
  */
 import { colorVars } from "@astryxdesign/core/theme/tokens.stylex";
 import * as stylex from "@stylexjs/stylex";
@@ -43,7 +45,7 @@ const SCREEN_THINK = `color-mix(in oklab, ${PURPLE} 38%, ${W})`;
 const SCREEN_OFF = `light-dark(color-mix(in oklab, ${K} 72%, ${GRAY}), color-mix(in oklab, ${K} 60%, ${GRAY}))`;
 const TERRACOTTA = `color-mix(in oklab, ${ORANGE} 62%, ${RED})`;
 
-const fill = stylex.create({
+export const fill = stylex.create({
   floor: { fill: FLOOR },
   floorLine: { stroke: FLOOR_LINE, strokeWidth: 1.5, fill: "none" },
   floorSideL: { fill: `light-dark(color-mix(in oklab, ${ORANGE} 36%, ${W}), color-mix(in oklab, ${ORANGE} 26%, ${K}))` },
@@ -119,10 +121,21 @@ const fill = stylex.create({
   s4: { fill: `color-mix(in oklab, ${PINK} 72%, ${W})` },
   s5: { fill: `color-mix(in oklab, ${GREEN} 72%, ${W})` },
   collar: { fill: W, fillOpacity: 0.85 },
+  // People on the move (LifeArt): trousers, shoes, arms.
+  trousers: { fill: `light-dark(color-mix(in oklab, ${K} 62%, ${BLUE}), color-mix(in oklab, ${K} 45%, ${BLUE}))` },
+  shoe: { fill: DARK },
+  // The foosball table's pitch, its lines and the ball.
+  pitch: { fill: `light-dark(color-mix(in oklab, ${GREEN} 62%, ${W}), color-mix(in oklab, ${GREEN} 48%, ${S}))` },
+  pitchLine: { stroke: W, strokeOpacity: 0.75, strokeWidth: 1, fill: "none" },
+  rod: { stroke: `light-dark(color-mix(in oklab, ${GRAY} 60%, ${W}), color-mix(in oklab, ${W} 55%, ${S}))`, strokeWidth: 1.4, strokeLinecap: "round" },
+  ball: { fill: W, stroke: `color-mix(in oklab, ${K} 40%, ${GRAY})`, strokeWidth: 0.6 },
+  // Coffee pouring and water drops.
+  coffee: { stroke: `color-mix(in oklab, ${ORANGE} 40%, ${K})`, strokeWidth: 1.6, strokeLinecap: "round" },
+  drop: { fill: `color-mix(in oklab, ${BLUE} 70%, ${W})` },
 });
 
 const BOOKS = [fill.b0, fill.b1, fill.b2, fill.b3, fill.b4, fill.b5, fill.b6, fill.b7];
-const SHIRTS = [fill.s0, fill.s1, fill.s2, fill.s3, fill.s4, fill.s5];
+export const SHIRTS = [fill.s0, fill.s1, fill.s2, fill.s3, fill.s4, fill.s5];
 
 // ---------- Motion (off under prefers-reduced-motion) ----------
 
@@ -135,11 +148,6 @@ const breathe = stylex.keyframes({
   "0%": { opacity: 0.18 },
   "50%": { opacity: 0.42 },
   "100%": { opacity: 0.18 },
-});
-const rise = stylex.keyframes({
-  "0%": { opacity: 0, transform: "translateY(4px)" },
-  "40%": { opacity: 0.8 },
-  "100%": { opacity: 0, transform: "translateY(-10px)" },
 });
 const blink = stylex.keyframes({
   "0%": { opacity: 0.25 },
@@ -163,13 +171,6 @@ const motion = stylex.create({
     animationTimingFunction: "ease-in-out",
     animationIterationCount: "infinite",
   },
-  steam: {
-    opacity: { default: 0, [REDUCE]: 0.5 },
-    animationName: { default: rise, [REDUCE]: "none" },
-    animationDuration: "3.2s",
-    animationTimingFunction: "ease-out",
-    animationIterationCount: "infinite",
-  },
   dot: {
     animationName: { default: blink, [REDUCE]: "none" },
     animationDuration: "1.2s",
@@ -178,33 +179,35 @@ const motion = stylex.create({
   delay1: { animationDelay: "0.4s" },
   delay2: { animationDelay: "0.8s" },
   delay3: { animationDelay: "1.2s" },
+  // A hidden tab holds every loop.
+  paused: { animationPlayState: "paused" },
 });
 
 // ---------- Drawing helpers ----------
 
-const r1 = (n: number) => Math.round(n * 10) / 10;
+export const r1 = (n: number) => Math.round(n * 10) / 10;
 const pts = (list: Pt[]) => list.map((p) => `${r1(p.x)},${r1(p.y)}`).join(" ");
 
 type Style = stylex.StyleXStyles;
-interface Material {
+export interface Material {
   top: Style;
   left: Style;
   right: Style;
 }
 
-const WOOD_M: Material = { top: fill.woodTop, left: fill.woodL, right: fill.woodR };
-const WHITE_M: Material = { top: fill.whiteTop, left: fill.whiteL, right: fill.whiteR };
-const DARK_M: Material = { top: fill.dark, left: fill.darkSide, right: fill.dark };
-const TEAL_M: Material = { top: fill.tealTop, left: fill.tealL, right: fill.tealR };
-const PURPLE_M: Material = { top: fill.purpleTop, left: fill.purpleL, right: fill.purpleR };
-const LEG_M: Material = { top: fill.leg, left: fill.leg, right: fill.leg };
+export const WOOD_M: Material = { top: fill.woodTop, left: fill.woodL, right: fill.woodR };
+export const WHITE_M: Material = { top: fill.whiteTop, left: fill.whiteL, right: fill.whiteR };
+export const DARK_M: Material = { top: fill.dark, left: fill.darkSide, right: fill.dark };
+export const TEAL_M: Material = { top: fill.tealTop, left: fill.tealL, right: fill.tealR };
+export const PURPLE_M: Material = { top: fill.purpleTop, left: fill.purpleL, right: fill.purpleR };
+export const LEG_M: Material = { top: fill.leg, left: fill.leg, right: fill.leg };
 
-function Poly({ points, s }: { points: Pt[]; s: Style | Style[] }) {
+export function Poly({ points, s }: { points: Pt[]; s: Style | Style[] }) {
   return <polygon points={pts(points)} {...stylex.props(s)} />;
 }
 
 /** A box from (x, y, z) to (x + w, y + d, z + h): its top and the two sides that face the viewer. */
-function Box({ x, y, z = 0, w, d, h, m }: { x: number; y: number; z?: number; w: number; d: number; h: number; m: Material }) {
+export function Box({ x, y, z = 0, w, d, h, m }: { x: number; y: number; z?: number; w: number; d: number; h: number; m: Material }) {
   const P = (px: number, py: number, pz: number) => project(px, py, pz);
   return (
     <g>
@@ -216,7 +219,7 @@ function Box({ x, y, z = 0, w, d, h, m }: { x: number; y: number; z?: number; w:
 }
 
 /** A world ellipse (centre, radii along x and y) at height z, as a polygon. */
-function ring(cx: number, cy: number, rx: number, ry: number, z: number, steps = 36): Pt[] {
+export function ring(cx: number, cy: number, rx: number, ry: number, z: number, steps = 36): Pt[] {
   return Array.from({ length: steps }, (_, i) => {
     const t = (2 * Math.PI * i) / steps;
     return project(cx + rx * Math.cos(t), cy + ry * Math.sin(t), z);
@@ -229,7 +232,7 @@ function onWall(wall: "right" | "left", from: number, to: number, z0: number, z1
   return [at(from, z0), at(to, z0), at(to, z1), at(from, z1)];
 }
 
-function Shadow({ cx, cy, r }: { cx: number; cy: number; r: number }) {
+export function Shadow({ cx, cy, r }: { cx: number; cy: number; r: number }) {
   return <Poly points={ring(cx, cy, r, r * 0.8, 0, 24)} s={fill.shadow} />;
 }
 
@@ -250,7 +253,7 @@ function Floor({ a, b }: { a: number; b: number }) {
   );
 }
 
-const lineProps = (p: Pt, q: Pt) => ({ x1: r1(p.x), y1: r1(p.y), x2: r1(q.x), y2: r1(q.y) });
+export const lineProps = (p: Pt, q: Pt) => ({ x1: r1(p.x), y1: r1(p.y), x2: r1(q.x), y2: r1(q.y) });
 
 function Windows({ wall, spans }: { wall: "right" | "left"; spans: [number, number][] }) {
   return (
@@ -386,7 +389,7 @@ function Chair({ x, y, m = TEAL_M }: { x: number; y: number; m?: Material }) {
 }
 
 /** A sitting person's shoulders, under the face drawn on top. */
-function Body({ at, hue }: { at: Pt; hue: number }) {
+export function Body({ at, hue }: { at: Pt; hue: number }) {
   const { x, y } = at;
   const d = `M ${r1(x - 19)} ${r1(y + 46)} C ${r1(x - 20)} ${r1(y + 22)} ${r1(x - 11)} ${r1(y + 16)} ${r1(x)} ${r1(y + 16)} C ${r1(x + 11)} ${r1(y + 16)} ${r1(x + 20)} ${r1(y + 22)} ${r1(x + 19)} ${r1(y + 46)} Z`;
   return (
@@ -400,7 +403,8 @@ function Body({ at, hue }: { at: Pt; hue: number }) {
 export type ScreenState = "off" | "on" | "think";
 
 /** A monitor whose screen faces the chair in front of the desk; it glows and types while its owner works. */
-function Monitor({ cx, y, z, screen, w = 34 }: { cx: number; y: number; z: number; screen: ScreenState; w?: number }) {
+function Monitor({ cx, y, z, screen, w = 34, isPaused }: { cx: number; y: number; z: number; screen: ScreenState; w?: number; isPaused?: boolean }) {
+  const held = isPaused && motion.paused;
   const x0 = cx - w / 2;
   const x1 = cx + w / 2;
   const sy = y + 4;
@@ -413,7 +417,7 @@ function Monitor({ cx, y, z, screen, w = 34 }: { cx: number; y: number; z: numbe
   ];
   return (
     <g>
-      {screen !== "off" && <Poly points={face(x0 - 6, x1 + 6, z - 4, z + 30)} s={[screen === "on" ? fill.glow : fill.glowThink, motion.glow]} />}
+      {screen !== "off" && <Poly points={face(x0 - 6, x1 + 6, z - 4, z + 30)} s={[screen === "on" ? fill.glow : fill.glowThink, motion.glow, held]} />}
       <Box x={cx - 3} y={y} z={z - 8} w={6} d={4} h={10} m={DARK_M} />
       <Box x={x0} y={y} z={z} w={w} d={4} h={24} m={DARK_M} />
       <Poly points={face(x0 + 2, x1 - 2, z + 2, z + 22)} s={screen === "on" ? fill.screenOn : screen === "think" ? fill.screenThink : fill.screenOff} />
@@ -421,18 +425,18 @@ function Monitor({ cx, y, z, screen, w = 34 }: { cx: number; y: number; z: numbe
         lines.map((l, i) => {
           const from = project(x0 + l.u, sy, z + l.z - 2);
           const to = project(x0 + l.u + (w - 10) * l.len, sy, z + l.z - 2);
-          return <line key={i} {...lineProps(from, to)} pathLength={1} {...stylex.props(l.s, motion.type, l.delay)} />;
+          return <line key={i} {...lineProps(from, to)} pathLength={1} {...stylex.props(l.s, motion.type, l.delay, held)} />;
         })}
       {screen === "think" &&
         [0, 1, 2].map((i) => {
           const p = project(cx - 8 + i * 8, sy, z + 12);
-          return <circle key={i} cx={r1(p.x)} cy={r1(p.y)} r={2.2} {...stylex.props(fill.thinkDot, motion.dot, i === 1 && motion.delay1, i === 2 && motion.delay2)} />;
+          return <circle key={i} cx={r1(p.x)} cy={r1(p.y)} r={2.2} {...stylex.props(fill.thinkDot, motion.dot, i === 1 && motion.delay1, i === 2 && motion.delay2, held)} />;
         })}
     </g>
   );
 }
 
-function DeskArt({ desk, screen, seated, hue, index }: { desk: Desk; screen: ScreenState; seated: boolean; hue: number; index: number }) {
+function DeskArt({ desk, screen, seated, hue, index, isPaused }: { desk: Desk; screen: ScreenState; seated: boolean; hue: number; index: number; isPaused?: boolean }) {
   const { x, y, w, d } = desk;
   const isLead = desk.kind === "lead";
   const z = DESK.h;
@@ -446,11 +450,11 @@ function DeskArt({ desk, screen, seated, hue, index }: { desk: Desk; screen: Scr
       <Box x={x} y={y} z={z - 4} w={w} d={d} h={4} m={isLead ? WOOD_M : WHITE_M} />
       {isLead ? (
         <>
-          <Monitor cx={cx - 22} y={y + 3} z={z + 8} screen={screen} w={32} />
-          <Monitor cx={cx + 20} y={y + 3} z={z + 8} screen={screen === "think" ? "on" : screen} w={32} />
+          <Monitor cx={cx - 22} y={y + 3} z={z + 8} screen={screen} w={32} isPaused={isPaused} />
+          <Monitor cx={cx + 20} y={y + 3} z={z + 8} screen={screen === "think" ? "on" : screen} w={32} isPaused={isPaused} />
         </>
       ) : (
-        <Monitor cx={cx} y={y + 3} z={z + 8} screen={screen} />
+        <Monitor cx={cx} y={y + 3} z={z + 8} screen={screen} isPaused={isPaused} />
       )}
       {/* Keyboard, a mug, sometimes a small plant or a lamp. */}
       <Box x={cx - 12} y={y + d - 14} z={z} w={24} d={7} h={1.5} m={DARK_M} />
@@ -500,7 +504,6 @@ function Bookshelf() {
 
 function Kitchen({ a }: { a: number }) {
   const x0 = a - 214;
-  const m = project(a - 160, 14, 66);
   return (
     <g>
       <Box x={x0 - 40} y={0} w={38} d={34} h={104} m={WHITE_M} />
@@ -508,17 +511,9 @@ function Kitchen({ a }: { a: number }) {
       <Box x={x0} y={0} w={194} d={30} h={34} m={TEAL_M} />
       <Box x={x0 - 2} y={-1} w={198} d={33} z={34} h={3} m={WHITE_M} />
       <Box x={x0 + 10} y={0} w={110} d={16} z={72} h={28} m={TEAL_M} />
-      {/* Sink, coffee machine with a mug and its steam, a fruit bowl. */}
+      {/* Sink, the coffee machine (its cup appears while someone brews: LifeArt), a fruit bowl. */}
       <Poly points={[project(x0 + 128, 6, 37.2), project(x0 + 164, 6, 37.2), project(x0 + 164, 24, 37.2), project(x0 + 128, 24, 37.2)]} s={fill.leg} />
       <Box x={a - 172} y={6} z={37} w={22} d={18} h={26} m={DARK_M} />
-      <Box x={a - 165} y={18} z={39} w={6} d={6} h={7} m={{ top: fill.white, left: fill.red, right: fill.red }} />
-      {[0, 1].map((i) => (
-        <path
-          key={i}
-          d={`M ${r1(m.x - 2 + i * 6)} ${r1(m.y + 6)} c -4 -6 4 -9 0 -15 c -4 -6 4 -9 0 -15`}
-          {...stylex.props(fill.steam, motion.steam, i === 1 && motion.delay2)}
-        />
-      ))}
       <Poly points={ring(x0 + 30, 16, 9, 9, 38, 16)} s={fill.woodR} />
       <circle cx={r1(project(x0 + 28, 14, 42).x)} cy={r1(project(x0 + 28, 14, 42).y)} r={3.5} {...stylex.props(fill.b6)} />
       <circle cx={r1(project(x0 + 33, 18, 42).x)} cy={r1(project(x0 + 33, 18, 42).y)} r={3.5} {...stylex.props(fill.b3)} />
@@ -526,7 +521,7 @@ function Kitchen({ a }: { a: number }) {
   );
 }
 
-function Table({ spot, isOn }: { spot: MeetingSpot; isOn: boolean }) {
+function Table({ spot, isOn, isPaused }: { spot: MeetingSpot; isOn: boolean; isPaused?: boolean }) {
   const { cx, cy, rx, ry } = spot;
   const h = spot.kind === "table" ? 30 : 32;
   return (
@@ -535,7 +530,7 @@ function Table({ spot, isOn }: { spot: MeetingSpot; isOn: boolean }) {
       <Box x={cx - 4} y={cy - 4} w={8} d={8} h={h - 3} m={LEG_M} />
       <Poly points={ring(cx, cy, rx, ry, h - 4)} s={fill.woodR} />
       <Poly points={ring(cx, cy, rx, ry, h)} s={fill.woodTop} />
-      {spot.kind === "table" && isOn && <Poly points={ring(cx, cy, rx * 0.45, ry * 0.4, h + 0.5)} s={[fill.glow, motion.glow]} />}
+      {spot.kind === "table" && isOn && <Poly points={ring(cx, cy, rx * 0.45, ry * 0.4, h + 0.5)} s={[fill.glow, motion.glow, isPaused && motion.paused]} />}
     </g>
   );
 }
@@ -547,6 +542,45 @@ function Rug({ cx, cy, rx, ry, s, edge }: { cx: number; cy: number; rx: number; 
     <g>
       <Poly points={corners} s={s} />
       {edge && <polygon points={pts(inner)} {...stylex.props(edge)} />}
+    </g>
+  );
+}
+
+/** The lounge's foosball table: a wooden cabinet on legs, a green pitch with goals, and four rods with little players (two per team). */
+function Foosball({ x, y, w, d }: { x: number; y: number; w: number; d: number }) {
+  const h = 26;
+  const cx = x + w / 2;
+  const top = (u: number, v: number, dz = 0) => project(u, v, h + dz);
+  const rods = [-21, -7, 7, 21];
+  return (
+    <g>
+      <Shadow cx={cx} cy={y + d / 2} r={w / 2 + 4} />
+      {[
+        [x + 2, y + 2],
+        [x + w - 6, y + 2],
+        [x + 2, y + d - 6],
+        [x + w - 6, y + d - 6],
+      ].map(([lx, ly]) => (
+        <Box key={`${lx}-${ly}`} x={lx!} y={ly!} w={4} d={4} h={h - 10} m={LEG_M} />
+      ))}
+      <Box x={x} y={y} z={h - 10} w={w} d={d} h={10} m={WOOD_M} />
+      <Poly points={[top(x + 3, y + 3, 0.2), top(x + w - 3, y + 3, 0.2), top(x + w - 3, y + d - 3, 0.2), top(x + 3, y + d - 3, 0.2)]} s={fill.pitch} />
+      <line {...lineProps(top(cx, y + 3, 0.4), top(cx, y + d - 3, 0.4))} {...stylex.props(fill.pitchLine)} />
+      <Poly points={ring(cx, y + d / 2, 5, 5, h + 0.4, 14)} s={fill.pitchLine} />
+      <Box x={x + 1} y={y + d / 2 - 5} z={h - 2} w={3} d={10} h={3} m={DARK_M} />
+      <Box x={x + w - 4} y={y + d / 2 - 5} z={h - 2} w={3} d={10} h={3} m={DARK_M} />
+      {rods.map((dx, i) => {
+        const team = i === 0 || i === 2 ? fill.b0 : fill.b1;
+        return (
+          <g key={dx}>
+            <line {...lineProps(top(cx + dx, y - 7, 5), top(cx + dx, y + d + 7, 5))} {...stylex.props(fill.rod)} />
+            {[0.3, 0.7].map((k) => (
+              <Box key={k} x={cx + dx - 1.5} y={y + d * k - 1.5} z={h} w={3} d={3} h={6} m={{ top: team, left: team, right: team }} />
+            ))}
+            <Poly points={ring(cx + dx, y + d + 8, 1.6, 1.6, h + 5, 8)} s={fill.dark} />
+          </g>
+        );
+      })}
     </g>
   );
 }
@@ -579,9 +613,13 @@ export interface OfficeArtProps {
   /** Dashed lines from a meeting card (pinned in a corner) to its table, in drawing units. */
   links: { from: Pt; to: Pt }[];
   now: Date;
+  /** People out of their seats (OfficeLife draws them): their chairs are empty. */
+  away?: ReadonlySet<string>;
+  /** The tab is hidden: the monitors' and the table's loops hold. */
+  isPaused?: boolean;
 }
 
-export function OfficeArt({ layout, screens, seated, activeSpots, workingAt, links, now }: OfficeArtProps) {
+export function OfficeArt({ layout, screens, seated, activeSpots, workingAt, links, now, away, isPaused }: OfficeArtProps) {
   const { a, b, view } = layout;
   const items: { depth: number; node: ReactNode }[] = [];
   const add = (depth: number, node: ReactNode) => items.push({ depth, node });
@@ -592,15 +630,16 @@ export function OfficeArt({ layout, screens, seated, activeSpots, workingAt, lin
         key={desk.key}
         desk={desk}
         screen={screens[desk.key] ?? "off"}
-        seated={Boolean(desk.personId && layout.placements.some((p) => p.personId === desk.personId && p.where === "desk"))}
+        seated={Boolean(desk.personId && !away?.has(desk.personId) && layout.placements.some((p) => p.personId === desk.personId && p.where === "desk"))}
         hue={desk.personId ? (seated[desk.personId] ?? i) : i}
         index={i}
+        isPaused={isPaused}
       />
     ));
   });
 
   layout.spots.forEach((spot, s) => {
-    add(spot.cx + spot.cy, <Table key={`t${s}`} spot={spot} isOn={activeSpots.has(s)} />);
+    add(spot.cx + spot.cy, <Table key={`t${s}`} spot={spot} isOn={activeSpots.has(s)} isPaused={isPaused} />);
     const atSpot = layout.placements.filter((p) => p.spot === s);
     // Empty chairs fill the rest of the table.
     seatsAround(spot, Math.max(atSpot.length, spot.chairs))
@@ -614,7 +653,7 @@ export function OfficeArt({ layout, screens, seated, activeSpots, workingAt, lin
       add(p.chair.x + p.chair.y, (
         <g key={`m${p.personId}`}>
           <Chair x={p.chair.x} y={p.chair.y} m={spot.kind === "table" ? TEAL_M : WOOD_M} />
-          <Body at={p.at} hue={seated[p.personId] ?? 0} />
+          {!away?.has(p.personId) && <Body at={p.at} hue={seated[p.personId] ?? 0} />}
         </g>
       ));
       add(spot.cx + spot.cy + 0.5, (
@@ -627,12 +666,11 @@ export function OfficeArt({ layout, screens, seated, activeSpots, workingAt, lin
     });
   });
 
-  // Plants and the lounge.
-  add(a - 24 + 150, <Plant key="pl1" x={a - 24} y={150} size={1.2} />);
-  add(26 + 180, <Plant key="pl2" x={26} y={180} />);
-  add(a - 26 + b - 26, <Plant key="pl3" x={a - 26} y={b - 26} size={1.3} />);
-  add(24 + b - 24, <Plant key="pl4" x={24} y={b - 24} size={1.1} />);
+  // Plants, the lounge and its foosball table.
+  layout.plants.forEach((p, i) => add(p.x + p.y, <Plant key={`pl${i}`} x={p.x} y={p.y} size={p.size} />));
   if (layout.hasLounge) add(30 + 270, <Sofa key="sofa" x={10} y={226} />);
+  const foos = layout.life.foosball;
+  add(foos.x + foos.y + foos.w / 2 + foos.d, <Foosball key="foosball" x={foos.x} y={foos.y} w={foos.w} d={foos.d} />);
 
   items.sort((p, q) => p.depth - q.depth);
 

@@ -3,8 +3,12 @@
  * the team (one desk per agent, in rows of three to five), the fixed corners
  * (meeting table, kitchen, skills library, HR corner, Pointer's desk at the
  * front) and where each person is right now (at their desk, or around the
- * meeting table or the kitchen table when they are in a meeting). Pure: the
- * art (OfficeArt) and the people on top of it (OfficeScene) both draw from it.
+ * meeting table or the kitchen table when they are in a meeting). It also
+ * holds what the office's life needs (life.ts, paths.ts): the spots free
+ * agents go to (coffee machine, kitchen table, sofa, foosball, library,
+ * windows, plants), the waypoints in the aisles and on the open floor that
+ * walks go through, and the furniture they walk round. Pure: the art
+ * (OfficeArt) and the people on top of it (OfficeScene) both draw from it.
  *
  * World units: x runs along the back-right wall, y along the back-left wall,
  * z up. The 2:1 projection puts (0, 0, 0), the back corner, at the origin.
@@ -18,17 +22,70 @@ export interface Pt {
 
 export const project = (x: number, y: number, z = 0): Pt => ({ x: x - y, y: (x + y) / 2 - z });
 
+/** A point on the floor, in world units. */
+export interface Floor {
+  x: number;
+  y: number;
+}
+
 export const WALL_H = 120;
 export const FLOOR_T = 14;
 export const DESK = { w: 64, d: 36, h: 30 };
 export const LEAD_DESK = { w: 100, d: 44, h: 30 };
 /** How high a sitting person's face is. */
 export const FACE_Z = 52;
+/** A standing person's face. */
+export const STAND_Z = 70;
+/** On a chair at a table (meeting or kitchen): a little lower than at a desk. */
+export const SEAT_Z = FACE_Z - 6;
+/** On the sofa, the lowest seat. */
+export const SOFA_Z = FACE_Z - 4;
+
+/**
+ * A place someone goes to when they leave their desk: where they stand or
+ * sit, the open floor they step in from (`door`), how high their face is
+ * there and which way they look (1: right on screen, -1: left).
+ */
+export interface LifeSpot {
+  at: Floor;
+  door: Floor;
+  z: number;
+  pose: "stand" | "sit";
+  look: 1 | -1;
+}
+
+/** Furniture people walk round, in world units, already widened by a person's half-width. */
+export type Obstacle = { kind: "box"; x0: number; y0: number; x1: number; y1: number } | { kind: "oval"; cx: number; cy: number; rx: number; ry: number };
+
+export interface Plant {
+  x: number;
+  y: number;
+  size: number;
+}
+
+/** The free agents' places: the coffee machine, the kitchen table, the sofa, the foosball table, the library, the windows and the plants. */
+export interface LifeSpots {
+  coffee: LifeSpot;
+  /** Where a fresh cup appears under the machine's spout (world, with its height). */
+  cup: { x: number; y: number; z: number };
+  /** Two seats at the kitchen table. */
+  cafe: LifeSpot[];
+  /** Two seats on the sofa (none without a lounge). */
+  sofa: LifeSpot[];
+  /** The foosball table's footprint and its two ends. */
+  foosball: { x: number; y: number; w: number; d: number; ends: [LifeSpot, LifeSpot] };
+  shelf: LifeSpot;
+  windows: LifeSpot[];
+  /** One spot beside each plant, in `plants` order. */
+  plants: LifeSpot[];
+}
 
 const COL_PITCH = 112;
 const ROW_PITCH = 146;
 const GRID_X = 262;
 const GRID_Y = 218;
+/** From a desk chair to the aisle behind it. */
+const AISLE = 28;
 
 export interface Desk {
   key: string;
@@ -42,6 +99,8 @@ export interface Desk {
   seat: Pt;
   /** The chair, in world units. */
   chair: { x: number; y: number };
+  /** The aisle in front of the chair, where its owner steps out to. */
+  door: Floor;
 }
 
 export interface MeetingSpot {
@@ -82,6 +141,72 @@ export interface SceneLayout {
   hr: Pt;
   /** The lounge (sofa) fits between the meeting table and the HR corner. */
   hasLounge: boolean;
+  plants: Plant[];
+  /** Where free agents go (OfficeLife), and what they walk round. */
+  life: LifeSpots;
+  /** Waypoints in the aisles and the open floor that walks go through (paths.ts links them). */
+  waypoints: Floor[];
+  obstacles: Obstacle[];
+}
+
+/** Half a person's width: how far a walk keeps from furniture. */
+const CLEAR = 8;
+
+const box = (x0: number, y0: number, x1: number, y1: number): Obstacle => ({ kind: "box", x0: x0 - CLEAR, y0: y0 - CLEAR, x1: x1 + CLEAR, y1: y1 + CLEAR });
+const chairBox = (c: Floor) => box(c.x - 11, c.y - 11, c.x + 11, c.y + 11);
+
+/** A step from a seat away from what it faces, onto the open floor. */
+function outward(seat: Floor, centre: Floor, by: number): Floor {
+  const dx = seat.x - centre.x;
+  const dy = seat.y - centre.y;
+  const len = Math.hypot(dx, dy) || 1;
+  return { x: seat.x + (dx / len) * by, y: seat.y + (dy / len) * by };
+}
+
+/** Which way a person at `from` looks on screen when facing `to`. */
+export const lookFrom = (from: Floor, to: Floor): 1 | -1 => (to.x - from.x - (to.y - from.y) >= 0 ? 1 : -1);
+
+/** A seat round a table, seen from the walkway. */
+function tableSeat(spot: MeetingSpot, chair: Floor, z: number): LifeSpot {
+  return { at: chair, door: outward(chair, { x: spot.cx, y: spot.cy }, 30), z, pose: "sit", look: lookFrom(chair, { x: spot.cx, y: spot.cy }) };
+}
+
+/** A meeting seat as a place to walk to. */
+export const meetingSeat = (spot: MeetingSpot, chair: Floor): LifeSpot => tableSeat(spot, chair, SEAT_Z);
+
+/** A desk chair as a place to walk to: its owner faces the monitor. */
+export const deskSeat = (desk: Desk): LifeSpot => ({ at: desk.chair, door: desk.door, z: FACE_Z, pose: "sit", look: 1 });
+
+const stand = (x: number, y: number, look: 1 | -1): LifeSpot => ({ at: { x, y }, door: { x, y }, z: STAND_Z, pose: "stand", look });
+
+function lifeSpots(a: number, b: number, spots: MeetingSpot[], plants: Plant[], hasLounge: boolean): LifeSpots {
+  const cafe = spots[1]!;
+  // Two kitchen-table chairs side by side as the viewer sees them (the front one and the right one), so neither hides the other.
+  const chairs = seatsAround(cafe, cafe.chairs).map((s) => s.chair);
+  const front = chairs.reduce((p, q) => (q.y > p.y ? q : p));
+  const right = chairs.filter((c) => c !== front).reduce((p, q) => (q.x - q.y > p.x - p.y ? q : p));
+  const cafeSeats = [front, right].map((c) => tableSeat(cafe, c, SEAT_Z));
+  const foos = { x: 150, y: 250, w: 60, d: 30 };
+  const fy = foos.y + foos.d / 2;
+  return {
+    coffee: stand(a - 161, 52, 1),
+    cup: { x: a - 162, y: 21, z: 37 },
+    cafe: cafeSeats,
+    sofa: hasLounge
+      ? [
+          { at: { x: 34, y: 242 }, door: { x: 58, y: 236 }, z: SOFA_Z, pose: "sit", look: 1 },
+          { at: { x: 34, y: 302 }, door: { x: 58, y: 308 }, z: SOFA_Z, pose: "sit", look: 1 },
+        ]
+      : [],
+    foosball: { ...foos, ends: [stand(foos.x - 18, fy, 1), stand(foos.x + foos.w + 18, fy, -1)] },
+    shelf: stand(38, 128, -1),
+    windows: [stand(229, 30, 1), ...(hasLounge ? [stand(30, 375, -1)] : [])],
+    plants: plants.map((p) => {
+      const isFront = p.y > b / 2;
+      const isEast = p.x > a / 2;
+      return stand(isEast ? p.x - 26 : p.x + 22, isFront ? p.y - 16 : p.y + 14, isEast ? 1 : -1);
+    }),
+  };
 }
 
 /** The HR corner's occupant: the agent with id "hr", else one whose role is HR. */
@@ -137,7 +262,8 @@ export function officeLayout(people: OfficePerson[], meetings: OfficeMeeting[]):
 
   const desk = (key: string, kind: Desk["kind"], x: number, y: number, size: { w: number; d: number }, personId?: string): Desk => {
     const chair = { x: x + size.w / 2, y: y + size.d + 16 };
-    return { key, kind, x, y, w: size.w, d: size.d, chair, seat: project(chair.x, chair.y, FACE_Z), ...(personId ? { personId } : {}) };
+    const door = { x: chair.x, y: chair.y + AISLE };
+    return { key, kind, x, y, w: size.w, d: size.d, chair, door, seat: project(chair.x, chair.y, FACE_Z), ...(personId ? { personId } : {}) };
   };
   // Pointer's desk first, so the people read in team order (Pointer, then the agents).
   const desks: Desk[] = [
@@ -173,6 +299,55 @@ export function officeLayout(people: OfficePerson[], meetings: OfficeMeeting[]):
     }
   }
 
+  const hasLounge = b - 170 - 230 >= 80;
+  const plants: Plant[] = [
+    { x: a - 24, y: 150, size: 1.2 },
+    { x: 26, y: 180, size: 1 },
+    { x: a - 26, y: b - 26, size: 1.3 },
+    { x: 24, y: b - 24, size: 1.1 },
+  ];
+  const life = lifeSpots(a, b, spots, plants, hasLounge);
+
+  // What a walk keeps clear of: desks and their chairs, both tables with their chairs, the kitchen, the shelf, the lounge, the foosball table and the plants.
+  const chairsAt = (s: number) => Math.max(placements.filter((p) => p.spot === s).length, spots[s]!.chairs);
+  const obstacles: Obstacle[] = [
+    ...desks.flatMap((d) => [box(d.x, d.y, d.x + d.w, d.y + d.d), chairBox(d.chair)]),
+    ...spots.flatMap((s, i) => [
+      { kind: "oval" as const, cx: s.cx, cy: s.cy, rx: s.rx + CLEAR, ry: s.ry + CLEAR },
+      ...seatsAround(s, chairsAt(i)).map((seat) => chairBox(seat.chair)),
+    ]),
+    box(a - 254, 0, a - 20, 34),
+    box(0, 30, 24, 158),
+    box(life.foosball.x, life.foosball.y, life.foosball.x + life.foosball.w, life.foosball.y + life.foosball.d),
+    ...(hasLounge ? [box(10, 226, 46, 318), box(64, 252, 94, 292)] : []),
+    ...plants.map((p) => box(p.x - 6 * p.size, p.y - 6 * p.size, p.x + 6 * p.size, p.y + 6 * p.size)),
+  ];
+
+  // Waypoints: the aisle behind the first row, the aisle in front of every row, the front aisle, a column down each side of the desks and a few on the open floor.
+  const westX = GRID_X - 24;
+  const eastX = gridX1 + 20;
+  const leadDesk = desks[0]!;
+  const rowYs = Array.from({ length: rows }, (_, r) => GRID_Y + r * ROW_PITCH + DESK.d + 16 + AISLE);
+  const colXs = Array.from({ length: cols }, (_, c) => GRID_X + c * COL_PITCH + DESK.w / 2);
+  const gapXs = Array.from({ length: cols - 1 }, (_, c) => GRID_X + c * COL_PITCH + DESK.w + (COL_PITCH - DESK.w) / 2);
+  const backY = GRID_Y - 26;
+  const frontY = leadDesk.door.y;
+  const waypoints: Floor[] = [
+    ...[backY, ...rowYs].flatMap((y) => [westX, ...colXs, ...gapXs, eastX].map((x) => ({ x, y }))),
+    { x: life.coffee.at.x, y: backY },
+    { x: westX, y: frontY },
+    { x: leadDesk.door.x, y: frontY },
+    { x: leadDesk.x + leadDesk.w + 24, y: frontY },
+    ...(desks.at(-1)!.kind === "hr" ? [{ x: westX, y: desks.at(-1)!.door.y }] : []),
+    // The open floor round the meeting table, by the lounge and between the table and the kitchen.
+    { x: 150, y: 232 },
+    { x: 60, y: 212 },
+    { x: 270, y: 120 },
+    { x: 290, y: 46 },
+    { x: 112, y: 330 },
+    { x: 200, y: 320 },
+  ];
+
   // The scene's box in screen units, with room for the walls above and name tags below.
   const left = -b - 18;
   const right = a + 18;
@@ -188,7 +363,11 @@ export function officeLayout(people: OfficePerson[], meetings: OfficeMeeting[]):
     placements,
     shelf: project(10, 96, 128),
     hr: project(92, b - 14, 0),
-    hasLounge: b - 170 - 230 >= 80,
+    hasLounge,
+    plants,
+    life,
+    waypoints,
+    obstacles,
   };
 }
 

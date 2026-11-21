@@ -25,6 +25,7 @@ import { OFFICE_EVERY_MS, type OfficePerson, type OfficeView, isBusy, officePath
 import { OfficeScene } from "./OfficeScene";
 import { PeopleList } from "./PeopleList";
 import { PersonDrawer } from "./PersonDrawer";
+import { useOfficeLife } from "./useOfficeLife";
 import { useWidth } from "./useWidth";
 
 /** Narrower than this, the office is a list of people (phones, narrow windows). */
@@ -64,7 +65,9 @@ function Counts({ view, isLive }: { view: OfficeView | undefined; isLive: boolea
  * Responsive contract:
  *   container ≥ 680px  the illustrated office (a List view is one click away)
  *   narrower           the same people as a list of cards
- * The office is re-read every 3 s while the tab is visible.
+ * The office is re-read every 3 s while the tab is visible. Free agents get
+ * up now and then (useOfficeLife, the same for everyone who looks): the
+ * picture shows them walking, the list says what they do.
  */
 export default function OfficePage() {
   const { config } = useConfig();
@@ -91,7 +94,10 @@ export default function OfficePage() {
   const close = useCallback(() => navigate("office"), []);
   const reload = office.reload;
 
-  const sceneWidth = view ? officeLayout(view.people, view.meetings).view.width : 0;
+  const layout = useMemo(() => (view ? officeLayout(view.people, view.meetings) : undefined), [view]);
+  const life = useOfficeLife(view, layout);
+  const isReducedMotion = useMediaQuery("(prefers-reduced-motion: reduce)");
+  const sceneWidth = layout?.view.width ?? 0;
   const needsScroll = width !== undefined && sceneWidth * MIN_SCALE > width;
   const hasAgents = Boolean(view?.people.some((p) => p.kind === "agent"));
 
@@ -109,18 +115,17 @@ export default function OfficePage() {
         <Spinner label="Opening the office" />
       </Center>
     );
-  } else if (showList) {
-    body = <PeopleList view={view} onOpen={open} />;
-  } else if (needsScroll) {
-    body = (
-      <ScrollableArea axis="inline" label="The office">
-        <VStack xstyle={styles.minWidth(Math.ceil(sceneWidth * MIN_SCALE))}>
-          <OfficeScene view={view} onOpen={open} now={new Date(office.loadedAt ?? Date.now())} />
-        </VStack>
-      </ScrollableArea>
-    );
+  } else if (showList || !layout) {
+    body = <PeopleList view={view} life={life} onOpen={open} />;
   } else {
-    body = <OfficeScene view={view} onOpen={open} now={new Date(office.loadedAt ?? Date.now())} />;
+    const scene = <OfficeScene view={view} layout={layout} life={life} isReducedMotion={isReducedMotion} onOpen={open} now={new Date(office.loadedAt ?? Date.now())} />;
+    body = needsScroll ? (
+      <ScrollableArea axis="inline" label="The office">
+        <VStack xstyle={styles.minWidth(Math.ceil(sceneWidth * MIN_SCALE))}>{scene}</VStack>
+      </ScrollableArea>
+    ) : (
+      scene
+    );
   }
 
   return (
