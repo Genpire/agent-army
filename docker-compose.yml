@@ -8,8 +8,11 @@ services:
       - "8080:8080"
     environment:
       MASTER_KEY: ${MASTER_KEY:?set MASTER_KEY in .env (openssl rand -base64 32)}
-      SETUP_TOKEN: ${SETUP_TOKEN:-}
-      PUBLIC_URL: ${PUBLIC_URL:-}
+      # Passed only when set (in .env or the shell); never as an empty default.
+      # Unset, a setup token is generated and printed in the log, and the public
+      # address is taken from each request.
+      SETUP_TOKEN:
+      PUBLIC_URL:
       RUNNER: local
       # Optional: see .env.example. Local workers have no hard job deadline, so JOB_TIMEOUT_MIN is not passed.
       TASK_TIMEOUT_MIN: ${TASK_TIMEOUT_MIN:-50}

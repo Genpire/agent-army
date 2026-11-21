@@ -1,0 +1,13 @@
+apiVersion: v2
+name: agent-army
+description: >-
+  EXPERIMENTAL, not yet tested on a real cluster. Pointer and its team of Claude
+  agents (Agent Army): one replica with a persistent volume; repo tasks run as
+  child processes in the same pod.
+type: application
+version: 0.1.0
+appVersion: "latest"
+home: https://github.com/Genpire/agent-army
+sources:
+  - https://github.com/Genpire/agent-army
+keywords: [slack, claude, agents, pull-requests]

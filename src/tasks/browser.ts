@@ -74,6 +74,13 @@ export function browserAvailable(env: NodeJS.ProcessEnv = process.env): boolean 
  * against the server's workspace root, its cwd with --ignore-roots, so
  * screenshots never land in the checkout the worker commits. Its
  * environment carries no secrets.
+ *
+ * Shared memory: PaaS containers have a small /dev/shm (Docker's 64 MB
+ * default, which most platforms cannot raise), where Chromium runs out of
+ * memory and crashes. Playwright already launches Chromium with
+ * --disable-dev-shm-usage (shared memory goes to /tmp instead), always, and
+ * none of these flags turns its defaults off, so nothing is added here; the
+ * browser-mcp test checks the real launch passes it.
  */
 export function browserServer(shotsDir: string, env: NodeJS.ProcessEnv = process.env): BrowserServerConfig {
   return {

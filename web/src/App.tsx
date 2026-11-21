@@ -12,6 +12,7 @@ import {
   BoltIcon,
   ChartBarSquareIcon,
   ChatBubbleLeftRightIcon,
+  ClockIcon,
   Cog6ToothIcon,
   CursorArrowRaysIcon,
   FolderIcon,
@@ -38,6 +39,7 @@ import MemoryPage from "./pages/memory";
 import OfficePage from "./pages/office";
 import OverviewPage from "./pages/overview";
 import ProjectsPage from "./pages/projects";
+import RoutinesPage from "./pages/routines";
 import SettingsPage from "./pages/settings";
 import SkillsPage from "./pages/skills";
 import TeamPage from "./pages/team";
@@ -50,6 +52,7 @@ const PAGE_COMPONENTS: Record<Page, ComponentType> = {
   team: TeamPage,
   integrations: IntegrationsPage,
   projects: ProjectsPage,
+  routines: RoutinesPage,
   activity: ActivityPage,
   memory: MemoryPage,
   settings: SettingsPage,
@@ -64,6 +67,7 @@ const NAV: { page: Page; label: string; icon: typeof Squares2X2Icon }[] = [
   { page: "integrations", label: "Integrations", icon: PuzzlePieceIcon },
   { page: "projects", label: "Projects", icon: FolderIcon },
   { page: "activity", label: "Activity", icon: ChartBarSquareIcon },
+  { page: "routines", label: "Routines", icon: ClockIcon },
   { page: "memory", label: "Memory", icon: LightBulbIcon },
 ];
 

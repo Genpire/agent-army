@@ -1,0 +1,19 @@
+Agent Army is starting: Pointer and its team.
+(This chart is experimental: please report what works and what doesn't.)
+
+{{- $url := include "agent-army.publicUrl" . }}
+{{- if $url }}
+
+  Open: {{ $url }}
+{{- else }}
+
+  No public address is set. Try it locally:
+    kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "agent-army.fullname" . }} 8080:{{ .Values.service.port }}
+  then open http://localhost:8080. Slack needs public HTTPS: enable the ingress (with TLS) or set publicUrl.
+{{- end }}
+
+  Setup token:
+    kubectl -n {{ .Release.Namespace }} get secret {{ include "agent-army.secretName" . }} -o jsonpath='{.data.SETUP_TOKEN}' | base64 -d; echo
+
+Open the address, create the admin account with the setup token, then connect Claude, Slack and GitHub.
+The Secret and the volume are kept on `helm uninstall` (they hold the key and the data).

@@ -9,38 +9,55 @@
 # worker job.
 #
 # Optional:
-#   MIN_INSTANCES=1   keep one web instance warm (no cold start on the first
-#                     Slack message after an idle period). Default 0 scales to
-#                     zero. The service has 2 GiB and CPU always allocated, so
-#                     1 costs roughly $55/month.
+#   IMAGE=ghcr.io/<owner>/agent-army:latest
+#                     deploy this image instead of building one with Cloud
+#                     Build (a public image, or one in Artifact Registry).
+#   PUBLIC_URL=https://army.example.com
+#                     the address Slack and GitHub use (a custom domain).
+#                     Default: the service's own run.app URL, set after the
+#                     first deploy.
+#   MIN_INSTANCES=1   web instances kept running. Keep the default 1: Pointer
+#                     answers after Slack has had its HTTP 200, and the
+#                     routines' clock ticks every minute. 0 scales to zero.
+#   SERVICE_CPU / SERVICE_MEMORY, JOB_CPU / JOB_MEMORY, JOB_TIMEOUT_MIN: below.
+#
+# Cost (us-central1, CPU always allocated): the web service at the default
+# 2 vCPU / 4 GiB, always on, is about $110/month (1 vCPU / 2 GiB: about $53).
+# Repo tasks run in the worker job, billed only while they run: about $0.58
+# per task-hour at 8 vCPU / 8 GiB. Claude usage is billed separately.
 set -euo pipefail
 
 PROJECT="${PROJECT:-$(gcloud config get-value project 2>/dev/null)}"
 REGION="${REGION:-us-central1}"
 NAME="${NAME:-agent-army}"
-MIN_INSTANCES="${MIN_INSTANCES:-0}"
+MIN_INSTANCES="${MIN_INSTANCES:-1}"
 # Sizes (Cloud Run allows up to 8 vCPU / 32 GiB; 8 vCPU needs at least 4 GiB).
-SERVICE_CPU="${SERVICE_CPU:-8}"
-SERVICE_MEMORY="${SERVICE_MEMORY:-8Gi}"
+# The web service runs Pointer's chat (the Agent SDK is a subprocess); repo
+# tasks run in the job, each in its own container.
+SERVICE_CPU="${SERVICE_CPU:-2}"
+SERVICE_MEMORY="${SERVICE_MEMORY:-4Gi}"
 JOB_CPU="${JOB_CPU:-8}"
 JOB_MEMORY="${JOB_MEMORY:-8Gi}"
 # Hard deadline of one task's worker. The team's own run stops at
 # TASK_TIMEOUT_MIN (50); waiting for the pull request's checks, fix rounds and
 # publishing happen after it, so the job gets more time. Cloud Run Jobs allow
-# up to 24 h.
+# up to 168 h (7 days).
 JOB_TIMEOUT_MIN="${JOB_TIMEOUT_MIN:-180}"
+IMAGE="${IMAGE:-}"
+PUBLIC_URL="${PUBLIC_URL:-}"
 [ -n "$PROJECT" ] || { echo "Set PROJECT=<gcp-project-id>"; exit 1; }
 
 BUCKET="${PROJECT}-${NAME}-data"
-IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/${NAME}/${NAME}:$(date +%Y%m%d-%H%M%S)"
 SERVER_SA="${NAME}-server@${PROJECT}.iam.gserviceaccount.com"
 WORKER_SA="${NAME}-worker@${PROJECT}.iam.gserviceaccount.com"
 JOB="${NAME}-worker"
 G="gcloud --project ${PROJECT} --quiet"
 
 echo "==> Enabling APIs"
-$G services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com \
-  secretmanager.googleapis.com storage.googleapis.com
+APIS="run.googleapis.com secretmanager.googleapis.com storage.googleapis.com"
+[ -n "$IMAGE" ] || APIS="${APIS} cloudbuild.googleapis.com artifactregistry.googleapis.com"
+# shellcheck disable=SC2086 # one API per word
+$G services enable $APIS
 
 echo "==> Storage bucket"
 $G storage buckets describe "gs://${BUCKET}" >/dev/null 2>&1 || \
@@ -70,12 +87,23 @@ done
 $G secrets add-iam-policy-binding "${NAME}-setup-token" \
    --member "serviceAccount:${SERVER_SA}" --role roles/secretmanager.secretAccessor >/dev/null
 
-echo "==> Building image"
-$G artifacts repositories describe "${NAME}" --location "${REGION}" >/dev/null 2>&1 || \
-  $G artifacts repositories create "${NAME}" --repository-format docker --location "${REGION}"
-$G builds submit --tag "${IMAGE}" .
+if [ -n "$IMAGE" ]; then
+  echo "==> Image: ${IMAGE} (not building)"
+else
+  echo "==> Building image"
+  IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/${NAME}/${NAME}:$(date +%Y%m%d-%H%M%S)"
+  $G artifacts repositories describe "${NAME}" --location "${REGION}" >/dev/null 2>&1 || \
+    $G artifacts repositories create "${NAME}" --repository-format docker --location "${REGION}"
+  $G builds submit --tag "${IMAGE}" .
+fi
 
-COMMON_ENV="STORAGE=gcs,GCS_BUCKET=${BUCKET},REQUIRE_MASTER_KEY=1"
+# The public address: PUBLIC_URL, else the service's own URL once it exists
+# (a re-run). A first deploy sets it right after the service is created.
+PUBLIC_URL_GIVEN="${PUBLIC_URL}"
+[ -n "$PUBLIC_URL" ] || \
+  PUBLIC_URL="$($G run services describe "${NAME}" --region "${REGION}" --format 'value(status.url)' 2>/dev/null || true)"
+
+COMMON_ENV="STORAGE=gcs,GCS_BUCKET=${BUCKET},REQUIRE_MASTER_KEY=1${PUBLIC_URL:+,PUBLIC_URL=${PUBLIC_URL}}"
 
 echo "==> Worker job (one isolated container per task)"
 $G run jobs deploy "${JOB}" --region "${REGION}" --image "${IMAGE}" \
@@ -91,8 +119,10 @@ $G run jobs add-iam-policy-binding "${JOB}" --region "${REGION}" \
 
 echo "==> Web service (admin page, Slack events, Pointer's chat)"
 # Pointer answers after Slack has had its 200, so the CPU must stay allocated
-# outside requests; the Agent SDK runs as a subprocess, hence 2 GiB. One instance
-# only: per-thread queues and event dedupe live in memory.
+# outside requests and an instance must stay up (MIN_INSTANCES=1); the Agent
+# SDK runs as a subprocess. One instance only: per-thread queues and event
+# dedupe live in memory. On SIGTERM the server lets requests in flight finish
+# within 8 s, inside the 10 s Cloud Run gives before SIGKILL.
 $G run deploy "${NAME}" --region "${REGION}" --image "${IMAGE}" \
   --service-account "${SERVER_SA}" \
   --allow-unauthenticated \
@@ -102,6 +132,13 @@ $G run deploy "${NAME}" --region "${REGION}" --image "${IMAGE}" \
   --concurrency 40 --timeout 300
 
 URL="$($G run services describe "${NAME}" --region "${REGION}" --format 'value(status.url)')"
+# First deploy without PUBLIC_URL: the service's URL becomes it, on the service
+# (webhook addresses) and the job (links in ticket updates).
+if [ -z "$PUBLIC_URL_GIVEN" ] && [ "$PUBLIC_URL" != "$URL" ]; then
+  echo "==> PUBLIC_URL=${URL}"
+  $G run services update "${NAME}" --region "${REGION}" --update-env-vars "PUBLIC_URL=${URL}" >/dev/null
+  $G run jobs update "${JOB}" --region "${REGION}" --update-env-vars "PUBLIC_URL=${URL}" >/dev/null
+fi
 TOKEN="$($G secrets versions access latest --secret "${NAME}-setup-token")"
 cat <<DONE
 

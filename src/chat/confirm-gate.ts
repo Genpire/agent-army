@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { HookCallback, SyncHookJSONOutput } from "@anthropic-ai/claude-agent-sdk";
 import type { ChatIntegration } from "./chat-integrations.js";
 import { APP_ID_RE } from "../core/config.js";
+import { ROUTINE_RUN_TOOL, ROUTINE_WRITE_TOOLS } from "../routines/tool-names.js";
 import { SLACK_SEND_TOOL, isSelfTarget } from "../slack/slack-tools.js";
 import type { PointerRequest } from "./pointer-types.js";
 
@@ -13,8 +14,9 @@ import type { PointerRequest } from "./pointer-types.js";
  * it may read a Jira issue, a web page or an app's records and then write.
  * What it read could ask for a memory fact or a project note (both reach
  * every later prompt, and notes every repo task there), for a change in a
- * connected app (a refund, an edit in a tracker), or for a Slack message that
- * carries what Pointer knows to someone else. So once a query has called
+ * connected app (a refund, an edit in a tracker), for a Slack message that
+ * carries what Pointer knows to someone else, or for a routine (work Pointer
+ * then does on its own, reporting to whoever it names). So once a query has called
  * a tool that returns outside content, those writes are denied and recorded
  * as pending. Pointer shows the user what it wants to do; when the user's
  * next message in the conversation is a short "yes", the same tool with the
@@ -49,6 +51,14 @@ export const PERSISTENT_WRITE_TOOLS = ["mcp__pointer__memory_save", "mcp__pointe
 export const OUTBOUND_TOOLS = [SLACK_SEND_TOOL];
 
 /**
+ * Routines (routines/): creating, changing and deleting one decides what
+ * Pointer does on its own from then on, and to whom it reports, so they are
+ * gated after outside content like app writes. Running one now is not: its
+ * recipients were set (and confirmed) when it was made.
+ */
+export const ROUTINE_GATED_TOOLS = ROUTINE_WRITE_TOOLS;
+
+/**
  * Tools whose output holds nothing from outside, so calling them never
  * taints a query; every other tool does, the Agent/Task tool included
  * (subagents read outside content and report it back), and so does Slack's
@@ -61,13 +71,16 @@ export const TRUSTED_TOOLS: ReadonlySet<string> = new Set([
   "mcp__pointer__memory_forget",
   ...PERSISTENT_WRITE_TOOLS,
   ...OUTBOUND_TOOLS,
+  ...ROUTINE_GATED_TOOLS,
+  ROUTINE_RUN_TOOL,
   "TodoWrite",
   "Skill",
 ]);
 
 /**
  * The tools that need a confirmation after outside content: memory, project
- * notes, every app tool that is not read-only, and sending Slack messages.
+ * notes, every app tool that is not read-only, sending Slack messages, and
+ * creating, changing or deleting routines.
  */
 export function gatedTools(integrations: ChatIntegration[]): Set<string> {
   const appWrites = integrations
@@ -76,8 +89,10 @@ export function gatedTools(integrations: ChatIntegration[]): Set<string> {
       const readOnly = new Set(i.readOnlyToolNames);
       return i.allToolNames.filter((t) => !readOnly.has(t));
     });
-  const outbound = integrations.flatMap((i) => i.allToolNames).filter((t) => OUTBOUND_TOOLS.includes(t));
-  return new Set([...PERSISTENT_WRITE_TOOLS, ...appWrites, ...outbound]);
+  const offered = integrations.flatMap((i) => i.allToolNames);
+  const outbound = offered.filter((t) => OUTBOUND_TOOLS.includes(t));
+  const routines = offered.filter((t) => ROUTINE_GATED_TOOLS.includes(t));
+  return new Set([...PERSISTENT_WRITE_TOOLS, ...appWrites, ...outbound, ...routines]);
 }
 
 /**

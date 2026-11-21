@@ -1,0 +1,75 @@
+# Agent Army Helm chart. EXPERIMENTAL: linted and rendered, not yet tested on a real cluster.
+#   helm install army ./deploy/helm/agent-army --namespace agent-army --create-namespace \
+#     --set ingress.enabled=true --set ingress.className=nginx --set ingress.host=army.example.com \
+#     --set 'ingress.annotations.cert-manager\.io/cluster-issuer=letsencrypt' \
+#     --set 'ingress.tls[0].secretName=army-tls' --set 'ingress.tls[0].hosts[0]=army.example.com'
+image:
+  repository: ghcr.io/genpire/agent-army
+  # Empty = the chart's appVersion (latest). Pin a version (1.2.3) or sha-<commit> tag in production.
+  tag: ""
+  pullPolicy: Always
+# A private image: a docker-registry Secret for ghcr.io (classic token with read:packages), e.g.
+#   kubectl create secret docker-registry ghcr --docker-server=ghcr.io --docker-username=USER --docker-password=TOKEN
+imagePullSecrets: []
+#  - name: ghcr
+
+# The public HTTPS address (Slack events, OAuth callbacks, webhooks).
+# Empty = https://<ingress.host> when the ingress is enabled; otherwise the request's host.
+publicUrl: ""
+
+# Keys. Empty = generated on first install and kept across upgrades (see templates/secret.yaml).
+# Set them, or use existingSecret, when rendering with `helm template` (Argo CD, Flux).
+masterKey: ""
+setupToken: ""
+# A Secret you manage, with the keys MASTER_KEY and SETUP_TOKEN.
+existingSecret: ""
+
+# More environment variables, e.g. TASK_TIMEOUT_MIN: "50", BROWSER: "off".
+env: {}
+
+persistence:
+  enabled: true
+  size: 20Gi
+  storageClass: ""
+  accessModes: [ReadWriteOnce]
+  # Use a PersistentVolumeClaim you created.
+  existingClaim: ""
+
+# Repo tasks run in this pod (RUNNER=local), up to Settings > Repo task limits > Tasks at the
+# same time (3 by default), each with Claude Code, a checkout, its dependencies and sometimes
+# Chromium: give it several GB.
+resources:
+  requests:
+    cpu: "2"
+    memory: 6Gi
+  limits:
+    memory: 12Gi
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  #  cert-manager.io/cluster-issuer: letsencrypt
+  host: ""
+  tls: []
+  #  - secretName: agent-army-tls
+  #    hosts: [army.example.com]
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  # The volume is made writable for the image's "node" user (uid 1000).
+  fsGroup: 1000
+  fsGroupChangePolicy: OnRootMismatch
+
+# A task can run for hours: give the server time to stop.
+terminationGracePeriodSeconds: 60
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

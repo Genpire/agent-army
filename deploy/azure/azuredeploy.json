@@ -1,0 +1,291 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.49.2.45890",
+      "templateHash": "11480643197770081049"
+    }
+  },
+  "parameters": {
+    "appName": {
+      "type": "string",
+      "defaultValue": "agent-army",
+      "minLength": 2,
+      "maxLength": 32,
+      "metadata": {
+        "description": "Name of the container app (part of its URL)."
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": {
+        "description": "Region for every resource."
+      }
+    },
+    "image": {
+      "type": "string",
+      "defaultValue": "ghcr.io/genpire/agent-army:latest",
+      "metadata": {
+        "description": "Container image (linux/amd64). A public image needs no credentials."
+      }
+    },
+    "registryUsername": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Private image only: registry user name, e.g. your GitHub user for ghcr.io. Leave empty for a public image."
+      }
+    },
+    "registryPassword": {
+      "type": "securestring",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Private image only: registry password, e.g. a GitHub token with read:packages."
+      }
+    },
+    "size": {
+      "type": "string",
+      "defaultValue": "4.0/8Gi",
+      "allowedValues": [
+        "2.0/4Gi",
+        "3.0/6Gi",
+        "4.0/8Gi"
+      ],
+      "metadata": {
+        "description": "vCPU and memory of the replica. Consumption allows up to 4 vCPU / 8Gi, memory = 2 x vCPU."
+      }
+    },
+    "masterKey": {
+      "type": "securestring",
+      "minLength": 32,
+      "metadata": {
+        "description": "Encrypts the stored config and signs admin sessions. Paste a long random value (openssl rand -hex 32) and keep it: every redeploy must pass the SAME value, or the stored data cannot be read."
+      }
+    },
+    "setupToken": {
+      "type": "securestring",
+      "defaultValue": "[newGuid()]",
+      "metadata": {
+        "description": "One-time token that creates the admin account. Generated if left as is (a new one on each deploy); read it in the container app > Settings > Secrets > setup-token."
+      }
+    }
+  },
+  "variables": {
+    "cpu": "[json(split(parameters('size'), '/')[0])]",
+    "memory": "[split(parameters('size'), '/')[1]]",
+    "usePrivateRegistry": "[not(empty(parameters('registryPassword')))]",
+    "registryServer": "[split(parameters('image'), '/')[0]]",
+    "suffix": "[uniqueString(resourceGroup().id, parameters('appName'))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces",
+      "apiVersion": "2023-09-01",
+      "name": "[format('{0}-logs-{1}', parameters('appName'), variables('suffix'))]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "sku": {
+          "name": "PerGB2018"
+        },
+        "retentionInDays": 30
+      }
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts",
+      "apiVersion": "2023-05-01",
+      "name": "[take(format('aa{0}', variables('suffix')), 24)]",
+      "location": "[parameters('location')]",
+      "kind": "StorageV2",
+      "sku": {
+        "name": "Standard_LRS"
+      },
+      "properties": {
+        "minimumTlsVersion": "TLS1_2",
+        "allowBlobPublicAccess": false,
+        "supportsHttpsTrafficOnly": true
+      }
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts/fileServices",
+      "apiVersion": "2023-05-01",
+      "name": "[format('{0}/{1}', take(format('aa{0}', variables('suffix')), 24), 'default')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Storage/storageAccounts', take(format('aa{0}', variables('suffix')), 24))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts/fileServices/shares",
+      "apiVersion": "2023-05-01",
+      "name": "[format('{0}/{1}/{2}', take(format('aa{0}', variables('suffix')), 24), 'default', 'agent-army-data')]",
+      "properties": {
+        "shareQuota": 100
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Storage/storageAccounts/fileServices', take(format('aa{0}', variables('suffix')), 24), 'default')]"
+      ]
+    },
+    {
+      "type": "Microsoft.App/managedEnvironments",
+      "apiVersion": "2024-03-01",
+      "name": "[format('{0}-env', parameters('appName'))]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "workloadProfiles": [
+          {
+            "name": "Consumption",
+            "workloadProfileType": "Consumption"
+          }
+        ],
+        "appLogsConfiguration": {
+          "destination": "log-analytics",
+          "logAnalyticsConfiguration": {
+            "customerId": "[reference(resourceId('Microsoft.OperationalInsights/workspaces', format('{0}-logs-{1}', parameters('appName'), variables('suffix'))), '2023-09-01').customerId]",
+            "sharedKey": "[listKeys(resourceId('Microsoft.OperationalInsights/workspaces', format('{0}-logs-{1}', parameters('appName'), variables('suffix'))), '2023-09-01').primarySharedKey]"
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces', format('{0}-logs-{1}', parameters('appName'), variables('suffix')))]"
+      ]
+    },
+    {
+      "type": "Microsoft.App/managedEnvironments/storages",
+      "apiVersion": "2024-03-01",
+      "name": "[format('{0}/{1}', format('{0}-env', parameters('appName')), 'data')]",
+      "properties": {
+        "azureFile": {
+          "accountName": "[take(format('aa{0}', variables('suffix')), 24)]",
+          "accountKey": "[listKeys(resourceId('Microsoft.Storage/storageAccounts', take(format('aa{0}', variables('suffix')), 24)), '2023-05-01').keys[0].value]",
+          "shareName": "agent-army-data",
+          "accessMode": "ReadWrite"
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.App/managedEnvironments', format('{0}-env', parameters('appName')))]",
+        "[resourceId('Microsoft.Storage/storageAccounts/fileServices/shares', take(format('aa{0}', variables('suffix')), 24), 'default', 'agent-army-data')]",
+        "[resourceId('Microsoft.Storage/storageAccounts', take(format('aa{0}', variables('suffix')), 24))]"
+      ]
+    },
+    {
+      "type": "Microsoft.App/containerApps",
+      "apiVersion": "2024-03-01",
+      "name": "[parameters('appName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "environmentId": "[resourceId('Microsoft.App/managedEnvironments', format('{0}-env', parameters('appName')))]",
+        "workloadProfileName": "Consumption",
+        "configuration": {
+          "activeRevisionsMode": "Single",
+          "ingress": {
+            "external": true,
+            "targetPort": 8080,
+            "transport": "auto",
+            "allowInsecure": false
+          },
+          "secrets": "[concat(createArray(createObject('name', 'master-key', 'value', parameters('masterKey')), createObject('name', 'setup-token', 'value', parameters('setupToken'))), if(variables('usePrivateRegistry'), createArray(createObject('name', 'registry-password', 'value', parameters('registryPassword'))), createArray()))]",
+          "registries": "[if(variables('usePrivateRegistry'), createArray(createObject('server', variables('registryServer'), 'username', parameters('registryUsername'), 'passwordSecretRef', 'registry-password')), createArray())]"
+        },
+        "template": {
+          "containers": [
+            {
+              "name": "agent-army",
+              "image": "[parameters('image')]",
+              "resources": {
+                "cpu": "[variables('cpu')]",
+                "memory": "[variables('memory')]"
+              },
+              "env": [
+                {
+                  "name": "PORT",
+                  "value": "8080"
+                },
+                {
+                  "name": "STORAGE",
+                  "value": "fs"
+                },
+                {
+                  "name": "DATA_DIR",
+                  "value": "/data"
+                },
+                {
+                  "name": "RUNNER",
+                  "value": "local"
+                },
+                {
+                  "name": "REQUIRE_MASTER_KEY",
+                  "value": "1"
+                },
+                {
+                  "name": "PUBLIC_URL",
+                  "value": "[format('https://{0}.{1}', parameters('appName'), reference(resourceId('Microsoft.App/managedEnvironments', format('{0}-env', parameters('appName'))), '2024-03-01').defaultDomain)]"
+                },
+                {
+                  "name": "MASTER_KEY",
+                  "secretRef": "master-key"
+                },
+                {
+                  "name": "SETUP_TOKEN",
+                  "secretRef": "setup-token"
+                }
+              ],
+              "probes": [
+                {
+                  "type": "Startup",
+                  "httpGet": {
+                    "path": "/healthz",
+                    "port": 8080
+                  },
+                  "periodSeconds": 10,
+                  "failureThreshold": 30
+                },
+                {
+                  "type": "Liveness",
+                  "httpGet": {
+                    "path": "/healthz",
+                    "port": 8080
+                  },
+                  "periodSeconds": 30
+                }
+              ],
+              "volumeMounts": [
+                {
+                  "volumeName": "data",
+                  "mountPath": "/data"
+                }
+              ]
+            }
+          ],
+          "scale": {
+            "minReplicas": 1,
+            "maxReplicas": 1
+          },
+          "volumes": [
+            {
+              "name": "data",
+              "storageType": "AzureFile",
+              "storageName": "data",
+              "mountOptions": "uid=1000,gid=1000,dir_mode=0750,file_mode=0640,mfsymlinks,nobrl"
+            }
+          ]
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.App/managedEnvironments', format('{0}-env', parameters('appName')))]",
+        "[resourceId('Microsoft.App/managedEnvironments/storages', format('{0}-env', parameters('appName')), 'data')]"
+      ]
+    }
+  ],
+  "outputs": {
+    "url": {
+      "type": "string",
+      "value": "[format('https://{0}', reference(resourceId('Microsoft.App/containerApps', parameters('appName')), '2024-03-01').configuration.ingress.fqdn)]"
+    },
+    "setupTokenHint": {
+      "type": "string",
+      "value": "Container app > Settings > Secrets > setup-token"
+    }
+  }
+}

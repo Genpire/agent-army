@@ -8,6 +8,8 @@
  * Pointer's instructions.
  */
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
+import { dataSourcesChatIntegration } from "../integrations/data-sources/data-sources.js";
+import { routinesChatIntegration } from "../routines/routines.js";
 import { appChatIntegrations } from "../integrations/apps/apps.js";
 import { codeHostChatIntegrations } from "../integrations/code-hosts/code-host-tools.js";
 import type { Config, ConfigRepo } from "../core/config.js";
@@ -66,6 +68,8 @@ export async function chatIntegrations(config: Config, ctx: ChatIntegrationConte
   await add("Miro", () => miroChatIntegration(config, ctx));
   await add("Slack", () => slackChatIntegration(config, ctx));
   await add("apps", () => appChatIntegrations(config, ctx));
+  await add("company data", () => dataSourcesChatIntegration(config, ctx));
+  await add("routines", () => routinesChatIntegration(config, ctx));
   return out;
 }
 

@@ -79,8 +79,14 @@ export interface PointerRequest {
    * contents from PointerBrainDeps.attachments; repo tasks get them too.
    */
   attachments?: AttachmentInfo[];
-  /** Where the conversation happens: Slack (default) or the admin console's chat (channel "web"). */
-  surface?: "slack" | "web";
+  /**
+   * Where the conversation happens: Slack (default), the admin console's chat
+   * (channel "web"), or a routine run on a schedule (routines/runner.ts):
+   * nobody reading along, read-only tools only, the answer is the report.
+   */
+  surface?: "slack" | "web" | "routine";
+  /** This request's own spending cap instead of Pointer's per-message budget (a routine's budgetUsd). */
+  budgetUsd?: number;
 }
 
 /** What a step Pointer takes is about, so the console can show an icon. */

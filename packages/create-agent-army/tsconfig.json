@@ -1,0 +1,16 @@
+{
+  // Type-checks the JavaScript (JSDoc) sources; nothing is emitted. The package ships as is.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": ["bin", "src"]
+}
