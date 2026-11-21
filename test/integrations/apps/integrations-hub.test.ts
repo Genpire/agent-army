@@ -96,7 +96,7 @@ describe("integrations hub: search and categories", () => {
   const rows = summarize(config());
 
   it("finds built-in integrations by name, category and what they do, never the Apps row", () => {
-    expect(filterNatives(rows, all).map((r) => r.id)).toEqual(["claude", "codex", "gemini", "slack", "github", "gitlab", "bitbucket", "monday", "jira", "miro", "genpire", "email", "data"]);
+    expect(filterNatives(rows, all).map((r) => r.id)).toEqual(["claude", "codex", "gemini", "slack", "github", "gitlab", "bitbucket", "monday", "jira", "miro", "email", "data", "genpire"]);
     expect(filterNatives(rows, { query: "git", category: ALL_CATEGORIES }).map((r) => r.id)).toEqual(["github", "gitlab", "bitbucket"]);
     expect(filterNatives(rows, { query: "tickets", category: ALL_CATEGORIES }).map((r) => r.id)).toEqual(["monday", "jira"]);
     expect(filterNatives(rows, { query: "", category: "Developer tools" }).map((r) => r.id)).toEqual(["github", "gitlab", "bitbucket"]);
