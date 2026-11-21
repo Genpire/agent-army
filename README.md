@@ -670,6 +670,17 @@ Optional. [Genpire](https://www.genpire.com) is a product design studio. With it
 
 **Usage is billed by Genpire**, on the plan of the Genpire account that signed in: designing or editing a product uses that plan; looking things up does not. Pointer designs only when someone asks.
 
+## Email
+
+Optional. With email set up, Pointer's routines can send their reports by email: the Markdown report becomes a simple formatted email, with the organisation's name at the top and "Sent by Pointer" underneath, plus a plain-text copy. Everything in it is escaped: raw HTML shows as text, images are not loaded, and links are kept only for `http` and `https` addresses. An email goes to at most 20 recipients, with a one-line subject of up to 200 characters and up to 100 000 characters of Markdown, and the service sends at most 30 emails a minute.
+
+**Connect it** on **Integrations → Email**, with one of:
+
+- **An SMTP server.** Presets fill in the host, port and TLS for Gmail or Google Workspace, Outlook or Microsoft 365, Amazon SES, Mailgun and Zoho Mail; any other server works too. Port 465 uses TLS from the start; 587 uses STARTTLS, which is required whenever there is a password, so the password is never sent unencrypted. Gmail needs an [app password](https://myaccount.google.com/apppasswords) (with 2-Step Verification on), not the account's password. Amazon SES needs SMTP credentials made in the SES console (not AWS access keys), a verified From address or domain and, while in the SES sandbox, verified recipients. Microsoft 365 needs Authenticated SMTP turned on for the mailbox, and Microsoft is turning password sign-in for SMTP off by default.
+- **[Resend](https://resend.com).** An API key (sending access is enough; with full access the From domain is checked when you save) and a From address on a domain verified under **Domains**.
+
+Saving checks the settings first (an SMTP sign-in, or Resend's domain list) unless `SKIP_VALIDATION=1`. **Send a test email** sends a short report-style email with the saved settings. The password and API key are stored encrypted, never sent to the browser and redacted from every error. Leaving the field empty keeps the saved one, but an SMTP password is only kept for the host and user it was saved with, so it can never be sent to a new server. **Disconnect** forgets both.
+
 ## Apps
 
 Connect apps through their own MCP servers: issue trackers, docs, monitoring, payments, deploys, design, data and more. **Integrations** lists about 140 apps whose servers were checked against the vendors' documentation (Linear, Notion, Sentry, Stripe, Vercel, Figma, Zapier, Datadog, PagerDuty, Airtable, ClickUp, Google Drive, Dropbox, PostHog…), searches the [MCP Registry](https://registry.modelcontextprotocol.io) for anything else, and takes any MCP server by its address as a custom app.
@@ -855,6 +866,9 @@ Besides the admin API, the service takes `POST /slack/events` from Slack and `PO
 | `POST /api/miro` | `{ token?, defaultBoardId?, allowedBoardIds? }` | Board ids or links; `""` clears the default. A new token is checked for `boards:read` and `boards:write`. Returns `{ ok, userName?, teamName? }`. |
 | `POST /api/miro/disconnect` | | Forgets the token; keeps the board settings. |
 | `GET /api/miro/boards` | `?query=` | `{ boards: [{ id, name, description?, viewLink?, team?, owner?, modifiedAt? }] }`; a pasted board link is looked up directly. |
+| `POST /api/email` | `{ provider: "smtp" \| "resend", from, smtp?: { host, port?, secure?, user?, pass? }, resend?: { apiKey? } }` | Saves how email is sent. `from` is an address or `Name <address>`; `host` is a host name; `port` defaults to 587, or 465 with `secure` (TLS from the start; otherwise STARTTLS, required with a password). An empty `pass` keeps the saved password only for the same host and user; an empty `apiKey` keeps the saved key. Checked first (SMTP: connect and sign in; Resend: `GET /domains`, where a key that may list domains must have the From domain verified) unless `SKIP_VALIDATION=1`. Returns `{ ok, email, detail? }` (`email` as in `config.email`, never the password or key). |
+| `POST /api/email/test` | `{ to }`: an address, several separated by commas, or an array | Sends the test email with the saved settings (at most 20 recipients, within the limit of 30 emails a minute). Returns `{ ok, id? }`; `400` with the reason when it is not set up or the send fails. |
+| `POST /api/email/disconnect` | | Forgets the SMTP password and the Resend key and sets the provider to `none`; keeps the From address and the SMTP server and user. |
 | `GET /api/apps/catalog` | | `{ apps, categories, redirectUrl }`: the app catalog (each entry with its address, sign-in, description, examples and, for some, `instructions` added to Pointer's when the app is connected) and the OAuth redirect address to register where an app needs a hand-made client. The console's Genpire integration connects the `genpire` entry. |
 | `GET /api/apps/registry` | `?search=` | `{ apps }`: remote servers from the MCP Registry matching the search (at least 3 characters), shaped like catalog entries, cached for an hour; `502` when the registry fails. |
 | `POST /api/apps` | `{ presetId?, name, url, transport?, auth, access?, agentIds? }` | Adds an app. `auth`: `{ type: "none" }`, `{ type: "bearer", token }`, `{ type: "headers", headers }` or `{ type: "oauth", clientId?, clientSecret? }`. Key apps are checked by listing their tools; OAuth apps return `signInUrl`. Returns `{ ok, app, signInUrl? }`, never a secret. |
@@ -910,6 +924,7 @@ Layout: `src/` is grouped into modules, one folder per area, and `test/` mirrors
   - `github/`: the GitHub client and the GitHub connections with their allow lists; `gitlab/`, `bitbucket/`: the GitLab and Bitbucket clients and webhooks.
   - `jira/`: Jira and Confluence, and issues that start repo tasks; `monday/`: monday.com client, token check, Pointer's monday.com tools and tickets that start repo tasks; `tickets/`: ticket updates as a task goes (monday.com and Jira).
   - `miro/`: Miro client and tools.
+  - `email/`: sending email for routines (`email.ts`: `sendEmail`, its checks and rate limit; `smtp.ts`: SMTP through nodemailer; `resend.ts`: Resend's API; `render.ts`: Markdown to safe HTML and plain text).
   - `apps/`: apps through remote MCP servers (`apps.ts`; sign-in in `apps-oauth.ts`, the address guard in `apps-net.ts`, the loopback proxy Claude Code reaches them through in `apps-proxy.ts`, MCP Registry search in `apps-registry.ts`, the catalog in `apps-catalog*.ts`).
 - `src/routes/`: each integration's admin routes and webhook; `chat.ts`: the console chat's files, voice messages and transcription.
 - `web/`: the admin page, a React app on [Astryx](https://github.com/meta/astryx) (Meta's design system on StyleX), built into `public/` with `npm run build:web`. Pages in `web/src/pages/`, the API client and the server's types in `web/src/lib/`.
