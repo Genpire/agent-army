@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readdir, symlink, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -113,6 +113,48 @@ describe("browser-mcp launcher", () => {
     expect(result.stdout).toContain('"serverInfo"');
     expect(result.stdout).toContain("Playwright");
   }, 30_000);
+
+  // PaaS containers have a small /dev/shm (Docker's default is 64 MB and most
+  // platforms cannot change it), where Chromium runs out of shared memory and
+  // crashes. Playwright launches Chromium with --disable-dev-shm-usage by
+  // default (shared memory then goes to /tmp), and the MCP server keeps that
+  // default with the flags browserServer passes. This proves it on the real
+  // launch path, with a stand-in "Chromium" that writes down its arguments.
+  it("launches Chromium with --disable-dev-shm-usage, so a small /dev/shm is fine", async () => {
+    const dir = await tmp("army-chromium-args-");
+    const shots = join(dir, "screenshots");
+    await mkdir(shots);
+    const argsFile = join(dir, "args.txt");
+    const fakeChromium = join(dir, "chromium");
+    await writeFile(fakeChromium, `#!/bin/sh\nprintf '%s\\n' "$@" > '${argsFile}'\nexit 1\n`, { mode: 0o755 });
+    const flags = browserServer(shots).args!.slice(1);
+    const line = (message: object) => `${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`;
+    await new Promise<void>((resolve) => {
+      const child = spawn(process.execPath, ["--import", "tsx", launcher, ...flags, "--executable-path", fakeChromium], {
+        env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "/tmp", BROWSER_MCP_CWD: shots },
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      let stdout = "";
+      let navigated = false;
+      child.stdout.on("data", (d: Buffer) => {
+        stdout += d.toString();
+        if (!navigated && stdout.includes('"id":1')) {
+          navigated = true;
+          child.stdin.write(line({ method: "notifications/initialized" }));
+          child.stdin.write(line({ id: 2, method: "tools/call", params: { name: "browser_navigate", arguments: { url: "about:blank" } } }));
+        }
+        if (stdout.includes('"id":2')) child.kill();
+      });
+      child.on("close", () => resolve());
+      child.stdin.write(
+        line({ id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "0" } } }),
+      );
+    });
+    const args = (await readFile(argsFile, "utf8")).trim().split("\n");
+    expect(args).toContain("--disable-dev-shm-usage");
+    expect(args).toContain("--headless");
+    expect(args).toContain("--no-sandbox");
+  }, 60_000);
 });
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);

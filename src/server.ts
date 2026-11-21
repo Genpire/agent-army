@@ -41,12 +41,13 @@ import { NOTES_MAX_CHARS, NotesRepo } from "./chat/notes.js";
 import { loadOffice } from "./team/office.js";
 import { type QueryFn, createPointerBrain } from "./chat/pointer.js";
 import type { PointerBrain, SlackDeps, SlackMessageEvent } from "./chat/pointer-types.js";
-import { type Runner, createRunner } from "./tasks/runner.js";
+import { type Runner, createRunner, parallelCap, parallelCapNote, parallelLimit } from "./tasks/runner.js";
 import { SCREENSHOT_NAME_RE, ScreenshotRepo, TASK_ID_RE, screenshotType } from "./tasks/screenshots.js";
 import { SCOUT_NEED_MAX_CHARS, findSkills } from "./skills/skill-scout.js";
 import { type FetchLike, SKILL_LIMITS, SkillLibrary, SkillsPluginCache, skillView } from "./skills/skills.js";
 import { buildManifest, manifestCreateUrl, slackClient, verifySlackSignature } from "./slack/slack.js";
 import { createStore } from "./core/store.js";
+import { detectPublicUrl, publicUrlWarning } from "./core/public-url.js";
 import { readTimeline } from "./tasks/task-events.js";
 import { TaskRepo } from "./tasks/tasks.js";
 import { SKILL_NAME_RE, TeamSchema } from "./team/team.js";
@@ -56,6 +57,8 @@ import { UsageRepo } from "./spending/usage.js";
 import { handleGithubWebhook, parseGithubPayload, verifyGithubSignature } from "./integrations/code-hosts/webhook.js";
 import { configSecrets, makeRedactor } from "./tasks/worker.js";
 import { removeStaleCredentialFolders } from "./ai/ai-providers.js";
+import { drain, exitLikeSignal } from "./core/shutdown.js";
+import { WorkerPids, markInterruptedTasks, removeStaleWorkFolders, staleWorkFolderAgeMs, workFolderDirs } from "./tasks/restart.js";
 import { aiRoutes } from "./routes/ai.js";
 import { dataSourcesRoutes } from "./routes/data-sources.js";
 import { emailRoutes } from "./routes/email.js";
@@ -180,6 +183,8 @@ export interface AppOverrides {
   hrQuery?: QueryFn;
   /** The skills library's GitHub reads and the Skills Scout's query. */
   skills?: { fetch?: FetchLike; scoutQuery?: QueryFn };
+  /** This instance's memory in bytes, instead of the container's or machine's (the parallel-task cap). */
+  memoryBytes?: number;
 }
 
 /** A skill's assignment: every agent, or the listed agent ids. */
@@ -210,8 +215,10 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
   const skills = new SkillLibrary(store, masterKey, { configRepo, ...(overrides.skills?.fetch ? { fetch: overrides.skills.fetch } : {}) });
   const skillsPlugin = new SkillsPluginCache(skills);
 
+  // Tasks at the same time: the Settings value, capped for the local runner by MAX_PARALLEL or this instance's memory.
   let maxParallel = (await configRepo.load()).limits.maxParallel;
-  const runner = overrides.runner ?? createRunner(() => maxParallel, env);
+  const cap = parallelCap(env, overrides.memoryBytes);
+  const runner = overrides.runner ?? createRunner(() => parallelLimit(maxParallel, cap).effective, env);
   const brain = overrides.brain ?? createPointerBrain({ configRepo, memory, notes, attachments }, { skills: () => skillsPlugin.current() });
   const usage = new UsageRepo(store, tasks);
   const slackFactory = overrides.slack ?? slackClient;
@@ -247,9 +254,17 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
 
   // The setup token creates the admin account on first run and resets its
   // password later: only someone who can read the deployment's secrets (the
-  // deploy output, Secret Manager) or its log can use it.
-  const setupToken = env.SETUP_TOKEN ?? randomToken(18);
-  if (!env.SETUP_TOKEN) {
+  // deploy output, Secret Manager) or its log can use it. An empty or blank
+  // SETUP_TOKEN (Docker Compose passes "" for a variable left empty in .env) is
+  // no token: one is generated, so an empty token can never be the right one.
+  const configuredToken = env.SETUP_TOKEN?.trim();
+  const setupToken = configuredToken || randomToken(18);
+  /** The submitted setup token is the deployment's. An empty one never is, whatever the deployment's is. */
+  const isSetupToken = (given: string) => {
+    const token = given.trim();
+    return token.length > 0 && setupToken.length > 0 && safeEqual(token, setupToken);
+  };
+  if (!configuredToken) {
     const firstRun = !(await configRepo.load()).adminPasswordHash;
     console.log(
       firstRun
@@ -262,8 +277,26 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
   app.disable("x-powered-by");
   app.set("trust proxy", true);
 
-  const baseUrl = (req: Request) =>
-    (env.PUBLIC_URL ?? `${req.protocol}://${req.get("host")}`).replace(/\/+$/, "");
+  // Stopping (SIGTERM, see the end of this file): while the requests in flight finish, new ones are refused,
+  // so the platform sends them to the next instance, and the local runner starts no more workers.
+  let stopping = false;
+  app.use((_req, res, next) => {
+    if (!stopping) return next();
+    res.setHeader("Connection", "close");
+    res.setHeader("Retry-After", "10");
+    res.status(503).json({ error: "The server is restarting. Try again in a moment." });
+  });
+  const stopAcceptingWork = () => {
+    stopping = true;
+    runner.stop?.();
+  };
+
+  // PUBLIC_URL, else the platform's own address (Render, Railway, Fly.io…), else each request's (public-url.ts).
+  // An empty PUBLIC_URL is unset; one that is not an http(s) address without a path is ignored, with a warning.
+  const publicUrl = detectPublicUrl(env);
+  const publicUrlProblem = publicUrlWarning(env);
+  if (publicUrlProblem) console.warn(`[server] ${publicUrlProblem}`);
+  const baseUrl = (req: Request) => (publicUrl ?? `${req.protocol}://${req.get("host")}`).replace(/\/+$/, "");
 
   // Sessions are signed with a key tied to the current password, so a new password signs everyone out.
   const currentSessionKey = async () => sessionKey(masterKey, (await configRepo.load()).adminPasswordHash);
@@ -430,6 +463,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
             ready: isReady(config),
             config: publicView(config),
             runner: runner.kind,
+            parallel: parallelLimit(config.limits.maxParallel, runner.kind === "local" ? cap : undefined),
             storage: store.describe(),
             eventsUrl: `${baseUrl(req)}/slack/events`,
             githubWebhookUrl: `${baseUrl(req)}/github/webhook`,
@@ -444,7 +478,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
     if ((await configRepo.load(true)).adminPasswordHash) {
       return void res.status(409).json({ error: "Already set up. Sign in instead." });
     }
-    if (!safeEqual(input.setupToken.trim(), setupToken)) {
+    if (!isSetupToken(input.setupToken)) {
       return void res.status(403).json({ error: "Wrong setup token." });
     }
     await configRepo.update((c) => {
@@ -462,7 +496,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
     if (!(await configRepo.load(true)).adminPasswordHash) {
       return void res.status(409).json({ error: "There is no admin account yet. Set it up instead." });
     }
-    if (!safeEqual(input.setupToken.trim(), setupToken)) {
+    if (!isSetupToken(input.setupToken)) {
       return void res.status(403).json({ error: "Wrong setup token." });
     }
     await configRepo.update((c) => {
@@ -1332,7 +1366,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
     res.status(500).json({ error: "Something went wrong on the server." });
   });
 
-  return { app, runner, store, conversations, automation, routines };
+  return { app, runner, store, conversations, automation, routines, stopAcceptingWork };
 }
 
 /** The stored key of a repo's setup: repo names are compared without letter case. */
@@ -1360,24 +1394,32 @@ function agentIdAt(input: unknown, index: number): string | undefined {
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   void removeStaleCredentialFolders(); // Google key files left by processes that died (ai-providers.ts)
+  // Checkouts of workers killed with an earlier process (older than the job's deadline: no worker runs longer).
+  void removeStaleWorkFolders({ dirs: workFolderDirs(process.env), maxAgeMs: staleWorkFolderAgeMs(process.env) });
   const port = Number(process.env.PORT ?? 8080);
-  const { app, runner, store, routines } = await createApp();
+  const { app, runner, store, routines, stopAcceptingWork } = await createApp();
+  // The local runner's workers stopped with the earlier process: their tasks are marked failed before anything
+  // new starts. Cloud Run job tasks go on across a restart of this service.
+  if (runner.kind === "local") {
+    const workers = new WorkerPids();
+    await markInterruptedTasks({ tasks: new TaskRepo(store), store, runner: runner.kind, workers });
+    workers.sweep();
+  }
   const server = app.listen(port, () => {
     console.log(`[server] Agent Army listening on :${port} (runner=${runner.kind}, storage=${store.describe()})`);
+    const capNote = runner.kind === "local" ? parallelCapNote(parallelCap(process.env), process.env) : undefined;
+    if (capNote) console.log(capNote);
     // Routines' clock: a tick every minute; the lease keeps overlapping instances from both running them.
     routines.scheduler.start();
   });
-  // A redeploy stops this instance: give the routines' lease up (at most 3 s) so the new one takes over at once,
-  // then end as the signal would have (the listener is gone, so raising it again takes the default action).
+  // A redeploy stops this instance: stop taking work (new requests get 503, no more workers or routine ticks),
+  // let the requests in flight finish (at most SHUTDOWN_GRACE_MS), give the routines' lease up (at most 3 s) so
+  // the new instance takes over at once, then end as the signal would have (see exitLikeSignal).
   const shutdown = (signal: NodeJS.Signals) => {
-    const end = () => process.kill(process.pid, signal);
-    const timer = setTimeout(end, 3_000);
-    timer.unref();
-    void routines.scheduler.stop().finally(() => {
-      clearTimeout(timer);
-      server.close();
-      end();
-    });
+    console.log(`[server] ${signal}: finishing the requests in flight, then stopping`);
+    void drain({ server, stopAccepting: stopAcceptingWork, finish: [{ run: () => routines.scheduler.stop(), timeoutMs: 3_000 }] }).finally(() =>
+      exitLikeSignal(signal),
+    );
   };
   process.once("SIGTERM", shutdown);
   process.once("SIGINT", shutdown);

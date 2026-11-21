@@ -1,4 +1,4 @@
-# One image, two entrypoints: the server (default) and the per-task worker.
+# One image, two commands: the server (default) and the per-task worker (node dist/worker.js).
 FROM node:22-bookworm-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
@@ -54,8 +54,16 @@ RUN mkdir -p /etc/gemini-cli \
     && chmod 755 /etc/gemini-cli && chmod 644 /etc/gemini-cli/settings.json
 COPY package.json ./
 COPY --from=build /app/public ./public
+# Started as root (a platform whose volumes are root's, e.g. Railway with
+# RAILWAY_RUN_UID=0), the entrypoint gives DATA_DIR and WORK_DIR to node and
+# drops to node with setpriv (util-linux, in the base image); started as node,
+# it just runs the command. A command set by the platform (Cloud Run's worker
+# job: node dist/worker.js) replaces it.
+COPY deploy/docker-entrypoint.sh /usr/local/bin/agent-army-entrypoint
+RUN chmod 755 /usr/local/bin/agent-army-entrypoint
 ENV NODE_ENV=production PORT=8080 DATA_DIR=/data HOME=/home/node
 USER node
 VOLUME /data
 EXPOSE 8080
+ENTRYPOINT ["agent-army-entrypoint"]
 CMD ["node", "dist/server.js"]

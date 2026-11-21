@@ -8,11 +8,12 @@ import type { MemoryFact } from "../../../src/chat/memory.js";
 import type { NotesRepo, ProjectNotes } from "../../../src/chat/notes.js";
 import type { MondayBoardSummary } from "../../../src/integrations/monday/monday.js";
 import type { ProgressSnapshot } from "../../../src/tasks/progress.js";
+import type { ParallelLimit } from "../../../src/tasks/runner.js";
 import type { CiSummary, Task } from "../../../src/tasks/tasks.js";
 import type { Access, AgentSpec, Effort, PointerSpec, Team } from "../../../src/team/team.js";
 import type { MonthUsage } from "../../../src/spending/usage.js";
 
-export type { Access, AgentSpec, CiSummary, Effort, MemoryFact, MondayBoardSummary, MonthUsage, PointerSpec, ProgressSnapshot, ProjectNotes, Task, Team };
+export type { Access, AgentSpec, CiSummary, Effort, MemoryFact, MondayBoardSummary, MonthUsage, ParallelLimit, PointerSpec, ProgressSnapshot, ProjectNotes, Task, Team };
 
 /** The configuration as the browser sees it: secrets are never included, only whether they are set. */
 export type PublicConfig = ReturnType<typeof publicView>;
@@ -28,6 +29,8 @@ export interface AppState {
   ready?: boolean;
   config?: PublicConfig;
   runner?: "local" | "cloudrun";
+  /** Tasks at the same time: the setting, and the local runner's cap (MAX_PARALLEL or the instance's memory). */
+  parallel?: ParallelLimit;
   storage?: string;
   /** Where Slack sends events: the Request URL of the Slack app. */
   eventsUrl?: string;

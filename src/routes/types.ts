@@ -19,7 +19,7 @@ export interface IntegrationRouteDeps {
   requireAdmin: RequestHandler;
   /** Brute-force brake for unauthenticated routes that check a secret. */
   throttle: RequestHandler;
-  /** This deployment's public address (PUBLIC_URL, else the request's), without a trailing slash. */
+  /** This deployment's public address (PUBLIC_URL or the platform's, see core/public-url.ts, else the request's), without a trailing slash. */
   baseUrl: (req: Request) => string;
   /** Starts a repo task outside Slack, as the monday.com automation does (a console conversation per task). */
   startDirectTask: ConversationService["startDirectTask"];
