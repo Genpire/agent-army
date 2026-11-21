@@ -1,0 +1,5 @@
+# Agent Army behind Caddy: a Let's Encrypt certificate for the domain, renewed automatically.
+# SITE_ADDRESS (in .env) is the domain; ports 80 and 443 must be open to the internet.
+{$SITE_ADDRESS} {
+	reverse_proxy agent-army:8080
+}

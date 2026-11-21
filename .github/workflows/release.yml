@@ -1,11 +1,16 @@
 name: Release image
 
-# Publishes the ready-to-run image to the GitHub Container Registry on every
-# push to main: ghcr.io/<owner>/agent-army:latest and :sha-<commit>, for
-# amd64 and arm64 (each built on a native runner, then joined in one tag).
+# Publishes the ready-to-run image to the GitHub Container Registry, for amd64
+# and arm64 (each built on a native runner, then joined in one tag):
+#   a push to main      ghcr.io/<owner>/agent-army:latest and :sha-<commit>
+#   a tag vX.Y.Z        :X.Y.Z, :X.Y and :sha-<commit> (tag the package.json version)
+# A new package is private, even in a public repo: after the first run, open the
+# package on GitHub > Package settings > Change visibility > Public, so anyone
+# can pull it without logging in (README > Deploy anywhere).
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -13,8 +18,16 @@ permissions:
   packages: write
 
 concurrency:
-  group: release-image
+  group: release-image-${{ github.ref }}
   cancel-in-progress: true
+
+env:
+  # Shown on the package's page (labels on each image, annotations on the index).
+  IMAGE_DESCRIPTION: >-
+    Self-hosted Slack and web assistant with a team of Claude agents that turns
+    requests into pull requests. Deploy it anywhere:
+    https://github.com/${{ github.repository }}#deploy-anywhere
+  IMAGE_DOCS: https://github.com/${{ github.repository }}#deploy-anywhere
 
 jobs:
   build:
@@ -48,8 +61,12 @@ jobs:
           context: .
           platforms: ${{ matrix.platform }}
           labels: |
+            org.opencontainers.image.title=Agent Army
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.description=Self-hosted Slack and web assistant with a team of Claude agents that turns requests into pull requests.
+            org.opencontainers.image.url=https://github.com/${{ github.repository }}
+            org.opencontainers.image.documentation=${{ env.IMAGE_DOCS }}
+            org.opencontainers.image.description=${{ env.IMAGE_DESCRIPTION }}
+            org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.licenses=MIT
           outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=${{ matrix.suffix }}
@@ -67,7 +84,7 @@ jobs:
           retention-days: 1
 
   publish:
-    name: Publish latest
+    name: Publish the tags
     needs: build
     runs-on: ubuntu-24.04
     steps:
@@ -82,10 +99,27 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Join both platforms under latest and the commit
+      - name: Join both platforms under the commit, and latest or the version
         working-directory: /tmp/digests
         run: |
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
-          short="${GITHUB_SHA::7}"
-          docker buildx imagetools create -t "$image:latest" -t "$image:sha-$short" $(printf "$image@sha256:%s " *)
-          docker buildx imagetools inspect "$image:latest"
+          tags=(-t "$image:sha-${GITHUB_SHA::7}")
+          case "$GITHUB_REF" in
+            refs/heads/main)
+              tags+=(-t "$image:latest") ;;
+            refs/tags/v*)
+              version="${GITHUB_REF#refs/tags/v}"
+              tags+=(-t "$image:$version")
+              # 1.4.2 is also 1.4; a pre-release (1.5.0-rc.1) is only itself.
+              if [[ "$version" =~ ^([0-9]+\.[0-9]+)\.[0-9]+$ ]]; then tags+=(-t "$image:${BASH_REMATCH[1]}"); fi ;;
+          esac
+          digests=()
+          for digest in *; do digests+=("$image@sha256:$digest"); done
+          docker buildx imagetools create "${tags[@]}" \
+            --annotation "index:org.opencontainers.image.description=$IMAGE_DESCRIPTION" \
+            --annotation "index:org.opencontainers.image.documentation=$IMAGE_DOCS" \
+            --annotation "index:org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --annotation "index:org.opencontainers.image.revision=$GITHUB_SHA" \
+            --annotation "index:org.opencontainers.image.licenses=MIT" \
+            "${digests[@]}"
+          docker buildx imagetools inspect "$image:sha-${GITHUB_SHA::7}"

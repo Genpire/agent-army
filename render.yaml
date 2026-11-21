@@ -1,0 +1,57 @@
+# Agent Army on Render: one always-on web service with a persistent disk.
+# One click:  https://render.com/deploy?repo=https://github.com/Genpire/agent-army
+#             (in a fork, put your fork's URL after repo=)
+# Spec:       https://render.com/docs/blueprint-spec
+#
+# After the first deploy, open the service's URL and create the admin account
+# with the setup token: Render dashboard > agent-army > Environment > SETUP_TOKEN.
+services:
+  - type: web
+    name: agent-army
+    # Built from this repo's Dockerfile on Render, so a fork deploys its own code
+    # and no registry login is needed. Render also passes every variable below to
+    # the build as a Docker build arg; the Dockerfile uses only ENGINES.
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    # The server AND the repo tasks run in this one container (RUNNER=local), so
+    # RAM sets how many tasks can run at once:
+    #   2c-8g  $135/month  the default 3 tasks at the same time
+    #   2c-4g  $85/month   set Settings > Repo task limits > Tasks at the same time to 1
+    #   1c-2g  $25/month   chat only
+    # The free plan sleeps after 15 idle minutes and can't have a disk: it doesn't work here.
+    plan: 2c-8g
+    region: oregon
+    # One instance only: per-thread queues and Slack event dedupe live in memory,
+    # and a disk can be attached to one instance anyway.
+    numInstances: 1
+    healthCheckPath: /healthz
+    # A button deploy must not redeploy on every upstream commit (Render's advice),
+    # and a deploy stops the tasks that are running. Update with "Manual Deploy",
+    # or set "commit" in your own fork.
+    autoDeployTrigger: "off"
+    disk:
+      name: agent-army-data
+      mountPath: /data   # DATA_DIR: encrypted config, memory, task records
+      sizeGB: 10         # $0.25/GB/month; it can grow later, never shrink
+    envVars:
+      - key: PORT
+        value: "8080"    # the port the image's server listens on (Render's default is 10000)
+      - key: STORAGE
+        value: fs
+      - key: DATA_DIR
+        value: /data
+      - key: RUNNER
+        value: local     # tasks run as child processes of the server
+      - key: REQUIRE_MASTER_KEY
+        value: "1"       # refuse to start without MASTER_KEY
+      - key: MASTER_KEY
+        generateValue: true  # random 256-bit value, created once. Keep it: it decrypts /data
+      - key: SETUP_TOKEN
+        generateValue: true  # copy it from the service's Environment page to create the admin account
+      - key: BROWSER
+        value: "on"      # headless Chromium for browser checks ("off" to disable)
+      - key: ENGINES
+        value: "codex gemini"  # build arg: "codex", "gemini" or "" for a smaller image and a faster build
+      # PUBLIC_URL is left unset: the server takes it from RENDER_EXTERNAL_URL, which
+      # Render sets (https://<name>.onrender.com). Set PUBLIC_URL when you add a custom domain.
