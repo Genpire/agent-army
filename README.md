@@ -63,6 +63,10 @@ curl -fsSL https://raw.githubusercontent.com/Genpire/agent-army/main/deploy/inst
 
 **Vercel and Netlify cannot host Agent Army.** They run short-lived functions: no process stays on between requests, there is no disk to keep data on, and Chromium doesn't fit in a function. Agent Army is one always-on process that keeps its queues in memory, runs repo tasks for hours as child processes, drives a headless Chromium and writes its data to a disk. (The team still checks your own apps' Vercel and Netlify preview deployments; this is only about where Agent Army itself runs.)
 
+### One command: `npm create agent-army`
+
+Run `npm create agent-army@latest`: it checks which provider CLIs you are logged in to, asks once, and deploys the prebuilt image to Fly.io, Railway, Render, Cloud Run, your own server over SSH or local Docker. It generates the keys on your machine, waits until the app answers and prints its address and setup token ([details](packages/create-agent-army/README.md)).
+
 ### The first sign-in
 
 1. Open the deployment's address and create the admin account with the **setup token** (where to find it is below), then choose a password.

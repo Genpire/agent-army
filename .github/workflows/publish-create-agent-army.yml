@@ -1,0 +1,78 @@
+name: Publish create-agent-army
+
+# Publishes packages/create-agent-army to npm (`npm create agent-army`) with npm
+# provenance, when a tag create-agent-army-v<version> is pushed, for example:
+#
+#   git tag create-agent-army-v0.1.0 && git push origin create-agent-army-v0.1.0
+#
+# The tag must match "version" in packages/create-agent-army/package.json.
+#
+# INERT UNTIL THE OWNER ADDS AN NPM_TOKEN SECRET. Without it this workflow only
+# prints a notice and stops (successfully); nothing is published. To enable it:
+# create an npm automation (or granular, publish) token for the create-agent-army
+# package, then add it under Settings > Secrets and variables > Actions as
+# NPM_TOKEN, and push the tag again.
+on:
+  push:
+    tags: ["create-agent-army-v*"]
+
+permissions:
+  contents: read
+  id-token: write # npm provenance (signed by GitHub's OIDC token)
+
+concurrency:
+  group: publish-create-agent-army
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Is NPM_TOKEN set?
+        id: token
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NPM_TOKEN" ]; then
+            echo "::notice title=create-agent-army not published::The NPM_TOKEN secret is not set, so nothing was published. Add it under Settings > Secrets and variables > Actions, then push the tag again."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v5
+        if: steps.token.outputs.ready == 'true'
+
+      - uses: actions/setup-node@v5
+        if: steps.token.outputs.ready == 'true'
+        with:
+          node-version: 24
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - name: The tag matches the package version
+        if: steps.token.outputs.ready == 'true'
+        run: |
+          version="$(node -p "require('./packages/create-agent-army/package.json').version")"
+          if [ "$GITHUB_REF_NAME" != "create-agent-army-v$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match packages/create-agent-army/package.json version $version."
+            exit 1
+          fi
+
+      # The root install brings TypeScript and Vitest for the checks; the package itself has no dependencies.
+      - run: npm ci
+        if: steps.token.outputs.ready == 'true'
+
+      - name: Type-check and test
+        if: steps.token.outputs.ready == 'true'
+        run: |
+          npx tsc -p packages/create-agent-army/tsconfig.json
+          npx vitest run test/create-agent-army
+
+      - name: Publish
+        if: steps.token.outputs.ready == 'true'
+        working-directory: packages/create-agent-army
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

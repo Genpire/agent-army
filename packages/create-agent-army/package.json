@@ -1,0 +1,46 @@
+{
+  "name": "create-agent-army",
+  "version": "0.1.0",
+  "description": "Deploy Agent Army (Pointer and its team of Claude agents) with one command: npm create agent-army",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "create-agent-army": "bin/create-agent-army.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "homepage": "https://github.com/Genpire/agent-army/tree/main/packages/create-agent-army#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Genpire/agent-army.git",
+    "directory": "packages/create-agent-army"
+  },
+  "bugs": {
+    "url": "https://github.com/Genpire/agent-army/issues"
+  },
+  "keywords": [
+    "agent-army",
+    "create",
+    "deploy",
+    "installer",
+    "claude",
+    "slack",
+    "fly",
+    "railway",
+    "render",
+    "cloud-run",
+    "docker",
+    "self-hosted"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}
