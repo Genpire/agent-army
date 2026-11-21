@@ -411,10 +411,11 @@ export function runCli(o: {
       o.signal?.removeEventListener("abort", onAbort);
       if (pid) liveGroups.delete(pid);
       if (o.backstop) {
-        // `timeout` could not start the CLI, or its own deadline came first (124).
+        // `timeout` could not start the CLI, or its own deadline came first (124). A run stopped here (its budget,
+        // the task stopped) is not a timeout, whatever `timeout` exits with: the Rust coreutils exit 124 on SIGTERM too.
         const notStarted = timeoutStartFailure(code, stderr);
         if (notStarted) spawnError ??= notStarted;
-        if (code === 124) timedOut = true;
+        if (code === 124 && !aborted) timedOut = true;
       }
       resolve({ code, signal, timedOut, aborted, stderrTail: tailLines(stderr), ...(spawnError ? { spawnError } : {}) });
     });

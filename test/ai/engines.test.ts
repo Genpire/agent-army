@@ -121,6 +121,8 @@ if (behavior.timeoutExit === 127) {
   process.exit(127);
 }
 if (behavior.timeoutExit === 124) process.exit(124);
+// The Rust coreutils' \`timeout\`: signalled itself, it exits 124 as if its own deadline had come.
+if (behavior.timeoutOnTerm) process.on("SIGTERM", () => process.exit(behavior.timeoutOnTerm));
 const child = spawn(args[2], args.slice(3), { stdio: "inherit" });
 child.on("exit", (code) => process.exit(code ?? 1));
 `;
@@ -185,6 +187,8 @@ describe("coding agent CLIs in a repo task", () => {
     before?: unknown[];
     longLine?: number;
     timeoutExit?: number;
+    /** The fake `timeout` exits with this code when it gets SIGTERM. */
+    timeoutOnTerm?: number;
   }) => writeFile(join(root, "behavior.json"), JSON.stringify({ kind: "ok", sandbox: true, ...b }));
   const record = async (): Promise<Record_> => JSON.parse(await readFile(join(root, "record.json"), "utf8"));
   const deps = (extra: Partial<EngineDeps> = {}): EngineDeps => ({
@@ -462,6 +466,33 @@ describe("coding agent CLIs in a repo task", () => {
     expect(notes).toContain("Codex stopped: its agent's budget for this task is reached");
     const pid = Number(await readFile(join(root, "grandchild.pid"), "utf8"));
     expect(await until(() => !alive(pid), 2_000)).toBe(true);
+  });
+
+  it("says why it stopped a run under `timeout` itself, though `timeout` exits 124 when signalled (the Rust coreutils)", { timeout: 20_000 }, async () => {
+    await behave({ kind: "hang", timeoutOnTerm: 124, before: [{ type: "item.completed", item: { id: "1", type: "agent_message", text: "x".repeat(8_000) } }] });
+    const overBudget = await runEngine(codex(), {
+      task: "Work forever.",
+      mode: "write",
+      timeoutMin: 1,
+      deps: deps({ timeoutCommand: fakeTimeout }),
+      root: engineRoot,
+      gitHome,
+      spend: { update: (usage) => usage.input >= 2_000, end: () => undefined },
+    });
+    expect(overBudget.text).toContain("its agent's budget for this task was reached, so it was stopped");
+    expect(overBudget.text).not.toContain("timed out");
+
+    await rm(join(root, "grandchild.pid"), { force: true });
+    await behave({ kind: "hang", timeoutOnTerm: 124 });
+    const stop = new AbortController();
+    const stopped = runEngine(codex(), { task: "Work forever.", mode: "write", timeoutMin: 1, deps: deps({ timeoutCommand: fakeTimeout }), root: engineRoot, gitHome, signal: stop.signal });
+    expect(await until(() => existsSync(join(root, "grandchild.pid")), 10_000)).toBe(true);
+    stop.abort();
+    const result = await stopped;
+    expect(result.text).toContain("the task was stopped");
+    expect(result.text).not.toContain("timed out");
+    const pid = Number(await readFile(join(root, "grandchild.pid"), "utf8"));
+    expect(await until(() => !alive(pid), 5_000)).toBe(true);
   });
 
   it("reports the CLI's own token count when it gives one, and the model Gemini CLI says it runs", async () => {
