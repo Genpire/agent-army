@@ -1,0 +1,309 @@
+# EXPERIMENTAL, not yet tested on a real AWS account: cfn-lint is clean, but the
+# stack has never been created. Please report what works and what doesn't.
+#
+# Agent Army on Amazon ECS Express Mode (Fargate). Needs a public, prebuilt image
+# (or registry credentials below) and a VPC with two public subnets (the default
+# VPC works):
+#   aws cloudformation deploy --template-file deploy/aws/agent-army.yaml \
+#     --stack-name agent-army --capabilities CAPABILITY_IAM \
+#     --parameter-overrides VpcId=vpc-... SubnetA=subnet-... SubnetB=subnet-...
+# Or CloudFormation console > Create stack > Upload a template file.
+# The outputs give the URL and where to read the setup token. Deleting the stack
+# keeps the EFS file system and the master key (they hold the data): delete them
+# by hand when you no longer need it.
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  EXPERIMENTAL. Agent Army (Pointer and its team) on Amazon ECS Express Mode
+  (Fargate): one always-on task behind an HTTPS load balancer, data on an
+  encrypted EFS file system, MASTER_KEY and SETUP_TOKEN generated in Secrets
+  Manager. Repo tasks run as child processes of the server (RUNNER=local).
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Network (pick your default VPC and two of its subnets) }
+        Parameters: [VpcId, VpcCidr, SubnetA, SubnetB]
+      - Label: { default: Service }
+        Parameters: [ServiceName, Image, Cpu, Memory, Architecture, TaskTimeoutMin]
+      - Label: { default: Private image only (leave empty for a public image) }
+        Parameters: [RegistryUsername, RegistryToken]
+
+Parameters:
+  ServiceName:
+    Type: String
+    Default: agent-army
+    AllowedPattern: "^[a-z][a-z0-9-]{1,40}$"
+    Description: Name of the Express service and its secrets. Don't change it after the first deploy (a new name means a new master key).
+  Image:
+    Type: String
+    Default: ghcr.io/genpire/agent-army:latest
+    Description: Container image. A public image needs no credentials.
+  RegistryUsername:
+    Type: String
+    Default: ""
+    Description: Private image only, e.g. your GitHub user name for ghcr.io.
+  RegistryToken:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: Private image only, e.g. a GitHub token with the read:packages scope.
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: The VPC of the two subnets below (the default VPC works).
+  VpcCidr:
+    Type: String
+    Default: 172.31.0.0/16
+    Description: CIDR of that VPC (172.31.0.0/16 for a default VPC). EFS accepts NFS only from it.
+  SubnetA:
+    Type: AWS::EC2::Subnet::Id
+    Description: A public subnet of that VPC.
+  SubnetB:
+    Type: AWS::EC2::Subnet::Id
+    Description: A second public subnet, in another Availability Zone.
+  Cpu:
+    Type: String
+    Default: "2048"
+    AllowedValues: ["1024", "2048", "4096", "8192"]
+    Description: Task CPU units (2048 = 2 vCPU).
+  Memory:
+    Type: String
+    Default: "8192"
+    Description: Task memory in MiB, valid for the CPU (2 vCPU 4096-16384, 4 vCPU 8192-30720, 8 vCPU 16384-61440).
+  Architecture:
+    Type: String
+    Default: X86_64
+    AllowedValues: [X86_64, ARM64]
+    Description: ARM64 (Graviton) costs about 20% less; the published image is built for both.
+  TaskTimeoutMin:
+    Type: Number
+    Default: 50
+    Description: Stops the team's first run of a repo task after this many minutes.
+
+Conditions:
+  HasRegistryCreds: !Not [!Equals [!Ref RegistryToken, ""]]
+
+Resources:
+  # ---------- Secrets: generated once, kept across stack updates ----------
+  MasterKey:
+    Type: AWS::SecretsManager::Secret
+    # Kept with the file system: without it the retained data can't be read.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: !Sub "${ServiceName}/master-key"
+      Description: Encrypts Agent Army's stored config and signs admin sessions. Never change it.
+      GenerateSecretString:
+        PasswordLength: 48
+        ExcludePunctuation: true
+  SetupToken:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${ServiceName}/setup-token"
+      Description: One-time token that creates the admin account and resets its password.
+      GenerateSecretString:
+        PasswordLength: 24
+        ExcludePunctuation: true
+  RegistryCredentials:
+    Type: AWS::SecretsManager::Secret
+    Condition: HasRegistryCreds
+    Properties:
+      Name: !Sub "${ServiceName}/registry"
+      SecretString: !Sub '{"username":"${RegistryUsername}","password":"${RegistryToken}"}'
+
+  # ---------- Persistent data: EFS, entered as the image's user (node = 1000:1000) ----------
+  FileSystem:
+    Type: AWS::EFS::FileSystem
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Encrypted: true
+      PerformanceMode: generalPurpose
+      ThroughputMode: elastic
+      BackupPolicy:
+        Status: ENABLED
+      FileSystemTags:
+        - Key: Name
+          Value: !Sub "${ServiceName}-data"
+  EfsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: NFS from the VPC to the Agent Army EFS file system
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          CidrIp: !Ref VpcCidr
+  MountTargetA:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystem
+      SubnetId: !Ref SubnetA
+      SecurityGroups: [!Ref EfsSecurityGroup]
+  MountTargetB:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystem
+      SubnetId: !Ref SubnetB
+      SecurityGroups: [!Ref EfsSecurityGroup]
+  DataAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref FileSystem
+      PosixUser:
+        Uid: "1000"
+        Gid: "1000"
+      RootDirectory:
+        Path: /agent-army
+        CreationInfo:
+          OwnerUid: "1000"
+          OwnerGid: "1000"
+          Permissions: "0750"
+
+  # ---------- Roles ----------
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: read-agent-army-secrets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref MasterKey
+                  - !Ref SetupToken
+                  - !If [HasRegistryCreds, !Ref RegistryCredentials, !Ref AWS::NoValue]
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: mount-agent-army-data
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - elasticfilesystem:ClientMount
+                  - elasticfilesystem:ClientWrite
+                Resource: !GetAtt FileSystem.Arn
+                Condition:
+                  StringEquals:
+                    elasticfilesystem:AccessPointArn: !GetAtt DataAccessPoint.Arn
+  InfrastructureRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSInfrastructureRoleforExpressGatewayServices
+
+  # ---------- Task definition (Express Mode requires a container named Main) ----------
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/agent-army/${ServiceName}"
+      RetentionInDays: 30
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Ref ServiceName
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: !Ref Cpu
+      Memory: !Ref Memory
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+        CpuArchitecture: !Ref Architecture
+      EphemeralStorage:
+        SizeInGiB: 50
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      Volumes:
+        - Name: data
+          EFSVolumeConfiguration:
+            FilesystemId: !Ref FileSystem
+            TransitEncryption: ENABLED
+            AuthorizationConfig:
+              AccessPointId: !Ref DataAccessPoint
+              IAM: ENABLED
+      ContainerDefinitions:
+        - Name: Main
+          Image: !Ref Image
+          Essential: true
+          RepositoryCredentials: !If
+            - HasRegistryCreds
+            - CredentialsParameter: !Ref RegistryCredentials
+            - !Ref AWS::NoValue
+          PortMappings:
+            - Name: http
+              ContainerPort: 8080
+              Protocol: tcp
+          Environment:
+            - { Name: PORT, Value: "8080" }
+            - { Name: STORAGE, Value: fs }
+            - { Name: DATA_DIR, Value: /data }
+            - { Name: RUNNER, Value: local }
+            - { Name: REQUIRE_MASTER_KEY, Value: "1" }
+            - { Name: TASK_TIMEOUT_MIN, Value: !Ref TaskTimeoutMin }
+          Secrets:
+            - { Name: MASTER_KEY, ValueFrom: !Ref MasterKey }
+            - { Name: SETUP_TOKEN, ValueFrom: !Ref SetupToken }
+          MountPoints:
+            - SourceVolume: data
+              ContainerPath: /data
+          LinuxParameters:
+            InitProcessEnabled: true
+          StopTimeout: 120
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+
+  # ---------- The Express service: Fargate + HTTPS ALB + URL ----------
+  Service:
+    Type: AWS::ECS::ExpressGatewayService
+    DependsOn: [MountTargetA, MountTargetB]
+    Properties:
+      ServiceName: !Ref ServiceName
+      InfrastructureRoleArn: !GetAtt InfrastructureRole.Arn
+      TaskDefinitionArn: !Ref TaskDefinition
+      HealthCheckPath: /healthz
+      NetworkConfiguration:
+        Subnets: [!Ref SubnetA, !Ref SubnetB]
+      # One task only: per-thread queues, event dedupe and running tasks live in memory.
+      ScalingTarget:
+        MinTaskCount: 1
+        MaxTaskCount: 1
+
+Outputs:
+  Url:
+    Description: The service's address. Open it, then create the admin account with the setup token.
+    Value: !GetAtt Service.Endpoint
+  SetupTokenSecret:
+    Description: The setup token (Secrets Manager > this secret > Retrieve secret value).
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/secretsmanager/secret?name=${ServiceName}%2Fsetup-token&region=${AWS::Region}"
+  Logs:
+    Description: Server and worker logs.
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#logsV2:log-groups/log-group/$252Fagent-army$252F${ServiceName}"
