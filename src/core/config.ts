@@ -121,6 +121,9 @@ export const MondayBoardAutomationSchema = z.object({
 });
 export type MondayBoardAutomation = z.infer<typeof MondayBoardAutomationSchema>;
 
+/** Agent and provider ids as budget keys (validated against the team and the providers when saved). */
+const BUDGET_KEY_RE = /^[a-z][a-z0-9-]{0,40}$/;
+
 /** Spending caps for repo tasks and chat (see budget.ts). 0 = no cap. */
 export const BudgetSchema = z.object({
   /** Claude spend allowed per calendar month (UTC), chat and repo tasks together. */
@@ -131,8 +134,18 @@ export const BudgetSchema = z.object({
   alertPercent: z.number().int().min(10).max(100).default(80),
   /** Slack channel for spending alerts; empty = no Slack alert (the console still shows them). */
   alertChannel: z.union([z.literal(""), z.string().regex(CHANNEL_RE, "Channel IDs look like C012ABCDEF")]).default(""),
+  /**
+   * Monthly spend allowed per agent (agent id, "pointer" for Pointer itself): its share of
+   * repo tasks and chat (attribution.ts). Keys are any agent id, so a cap of a removed agent still loads.
+   */
+  perAgentUsd: z.record(z.string().regex(BUDGET_KEY_RE), z.number().min(0).max(100_000)).default(() => ({})),
+  /** Monthly spend allowed per AI provider (AI_PROVIDER_IDS) or coding agent CLI ("codex", "gemini"). */
+  perProviderUsd: z.record(z.string().regex(BUDGET_KEY_RE), z.number().min(0).max(100_000)).default(() => ({})),
+  /** What one agent may spend in a single repo task. */
+  perTaskAgentUsd: z.record(z.string().regex(BUDGET_KEY_RE), z.number().min(0).max(100_000)).default(() => ({})),
 });
 export type Budget = z.infer<typeof BudgetSchema>;
+export const DEFAULT_BUDGET = (): Budget => ({ monthlyUsd: 0, perRepoUsd: {}, alertPercent: 80, alertChannel: "", perAgentUsd: {}, perProviderUsd: {}, perTaskAgentUsd: {} });
 
 
 // ---------- More code hosts, trackers and apps ----------
@@ -586,7 +599,7 @@ export const ConfigSchema = z.object({
       previewCheck: z.enum(["off", "visible", "always"]).default("visible"),
     })
     .default({ maxTurns: 200, maxBudgetUsd: 15, maxParallel: 3, progressEveryMin: 5, ciWaitMin: 15, ciFixRounds: 2, previewCheck: "visible" }),
-  budget: BudgetSchema.default({ monthlyUsd: 0, perRepoUsd: {}, alertPercent: 80, alertChannel: "" }),
+  budget: BudgetSchema.default(DEFAULT_BUDGET),
   /** "owner/repo" -> how repo tasks set up and run that repository. */
   repoSetup: z.record(z.string().regex(REPO_RE), StoredRepoSetupSchema).default({}),
   /** Pointer and the agents it orchestrates (seeded with defaults on first load). */

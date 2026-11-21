@@ -947,7 +947,7 @@ export class ConversationService implements WebThreads {
     const slot = this.deps.brainSlot ?? (<T>(fn: () => Promise<T>) => fn());
     const answer = await slot(() => this.deps.brain.reply(req, ctx));
     void this.deps.usage
-      ?.recordChat(answer.costUsd)
+      ?.recordChat(answer)
       .then(() => this.deps.spending?.notify())
       .catch((err: unknown) => console.error("[usage] chat cost not recorded:", errorText(err)));
     const text = redact(answer.text.trim()) || "(no reply)";

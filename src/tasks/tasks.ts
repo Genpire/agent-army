@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type { ProgressSnapshot } from "./progress.js";
+import type { AgentCosts } from "../spending/attribution.js";
 import type { Store } from "../core/store.js";
 
 export type TaskStatus = "queued" | "running" | "done" | "failed";
@@ -40,6 +41,10 @@ export interface Task {
   kind?: "change" | "answer" | "blocked";
   summary?: string;
   costUsd?: number;
+  /** Each agent's share of what the task cost ("pointer" is the lead; see attribution.ts), live while it runs. */
+  agentCosts?: AgentCosts;
+  /** The AI provider the team ran on (config.ai.taskProvider when it started); absent on older tasks: Anthropic. */
+  provider?: string;
   turns?: number;
   error?: string;
   /** Live progress while the team works, saved by the worker; Pointer reads it for status questions. */

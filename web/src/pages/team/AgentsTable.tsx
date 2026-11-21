@@ -3,12 +3,15 @@ import { Icon } from "@astryxdesign/core/Icon";
 import { IconButton } from "@astryxdesign/core/IconButton";
 import { useMediaQuery } from "@astryxdesign/core/hooks";
 import { Link } from "@astryxdesign/core/Link";
+import { ProgressBar } from "@astryxdesign/core/ProgressBar";
 import { Switch } from "@astryxdesign/core/Switch";
 import { Table, type TableColumn, pixel, proportional } from "@astryxdesign/core/Table";
 import { Text } from "@astryxdesign/core/Text";
 import { VStack } from "@astryxdesign/core/VStack";
 import { PencilSquareIcon } from "@heroicons/react/24/outline";
+import { usd } from "../../lib/format";
 import { href, navigate } from "../../lib/router";
+import { type AgentSpendView, CAP_VARIANT, spendText, useSpending } from "../overview/spending";
 import type { AgentSpec } from "../../lib/types";
 import { useAction } from "../../lib/useAction";
 import { AccessToken } from "./AccessToken";
@@ -45,6 +48,23 @@ function AgentCell({ agent, isNarrow }: { agent: AgentSpec; isNarrow: boolean })
   );
 }
 
+/** This month's spend against its monthly cap ("$3.10 of $20.00"), with a bar when it has one. */
+function AgentSpend({ view }: { view: AgentSpendView | undefined }) {
+  if (!view) return <Text color="secondary">–</Text>;
+  const spent = spendText(view);
+  return (
+    <VStack gap={1}>
+      {view.capUsd ? (
+        <ProgressBar label={`${view.name} this month`} isLabelHidden value={Math.min(view.usd, view.capUsd)} max={view.capUsd} variant={CAP_VARIANT[view.level]} />
+      ) : null}
+      <Text hasTabularNumbers maxLines={1}>
+        {view.capUsd ? `${spent} of ${usd(view.capUsd)}` : spent}
+      </Text>
+      {view.perTaskCapUsd ? <Text type="supporting">{`${usd(view.perTaskCapUsd)} per task`}</Text> : null}
+    </VStack>
+  );
+}
+
 function EnabledSwitch({ agent, onToggle }: Pick<AgentsTableProps, "onToggle"> & { agent: AgentSpec }) {
   const { run } = useAction();
   return (
@@ -62,6 +82,8 @@ function EnabledSwitch({ agent, onToggle }: Pick<AgentsTableProps, "onToggle"> &
 /** The roster: one row per agent, dense. Click a name (or Edit) to open its drawer; the switch saves at once. */
 export function AgentsTable({ agents, lead, onToggle }: AgentsTableProps) {
   const isNarrow = useMediaQuery("(max-width: 720px)");
+  const spending = useSpending();
+  const spend = new Map((spending.data?.agents ?? []).map((a) => [a.agentId, a]));
 
   const agentColumn: TableColumn<AgentSpec> = {
     key: "agent",
@@ -101,6 +123,12 @@ export function AgentsTable({ agents, lead, onToggle }: AgentsTableProps) {
               <Text type="supporting">{a.effort ? `${effortLabel(a.effort)} effort` : "Effort follows the work"}</Text>
             </VStack>
           ),
+        },
+        {
+          key: "spend",
+          header: "This month",
+          width: pixel(164),
+          renderCell: (a) => <AgentSpend view={spend.get(a.id)} />,
         },
         enabledColumn,
         {

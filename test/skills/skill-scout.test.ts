@@ -108,7 +108,7 @@ describe("findSkills", () => {
       installed: ["docx"],
       queryFn,
       spending: { checkChat: async () => ({ ok: true }), notify: async () => void notified++ },
-      usage: { recordChat: async (usd) => void recorded.push(usd) },
+      usage: { recordChat: async (spend) => void recorded.push(typeof spend === "object" ? spend.costUsd : spend) },
     });
     expect(got).toEqual({ ok: true, candidates: [candidate()], costUsd: 0.12 });
     await new Promise((r) => setTimeout(r, 0));
@@ -158,7 +158,7 @@ describe("findSkills", () => {
 
   it("reports a failed search, redacted, and still counts its cost", async () => {
     const recorded: (number | undefined)[] = [];
-    const usage = { recordChat: async (usd: number | undefined) => void recorded.push(usd) };
+    const usage = { recordChat: async (spend: number | undefined | { costUsd?: number }) => void recorded.push(typeof spend === "object" ? spend.costUsd : spend) };
     const budget = await findSkills("pdf", { config: config(), installed: [], usage, queryFn: fakeQuery(result({ subtype: "error_max_budget_usd", total_cost_usd: 0.5 })).queryFn });
     expect(budget).toMatchObject({ ok: false, status: 502, error: expect.stringContaining("$0.50 budget") });
     const failed = await findSkills("pdf", {
@@ -209,7 +209,7 @@ describe("POST /api/skills/find", () => {
       // The search's cost is counted with chat (in the background).
       const usageFile = join(dir, "usage", `chat-${monthKey(new Date())}.json`);
       for (let i = 0; i < 100 && !existsSync(usageFile); i++) await new Promise((r) => setTimeout(r, 10));
-      expect(JSON.parse(await readFile(usageFile, "utf8"))).toEqual({ usd: 0.12, count: 1 });
+      expect(JSON.parse(await readFile(usageFile, "utf8"))).toEqual({ usd: 0.12, count: 1, agents: { scout: { usd: 0.12, count: 1 } }, providers: { anthropic: { usd: 0.12, count: 1 } } });
 
       // Spend past a $1 monthly cap: the Scout is refused before it runs.
       await mkdir(join(dir, "usage"), { recursive: true });

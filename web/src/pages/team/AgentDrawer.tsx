@@ -24,6 +24,7 @@ import { ACCESS_OPTIONS, type AgentSpec } from "../../lib/types";
 import { useAction } from "../../lib/useAction";
 import { useSkillLibrary } from "../skills/useSkillLibrary";
 import { ACCESS_ICON } from "./AccessToken";
+import { AgentBudgetField, useAgentBudget } from "./AgentBudgetField";
 import { AgentEmoji } from "./AgentEmoji";
 import {
   ACCESS_INFO,
@@ -222,6 +223,7 @@ function AgentForm({ target, takenIds, lead, models = CLAUDE_CHOICES, onClose, o
   const existing = target.kind === "edit" ? target.agent : undefined;
   const [draft, setDraft] = useState<AgentDraft>(() => (existing ? { ...existing } : { ...NEW_AGENT }));
   const [triedSave, setTriedSave] = useState(false);
+  const budget = useAgentBudget(existing?.id);
   const { run, pending } = useAction();
   const del = useAction();
 
@@ -240,7 +242,8 @@ function AgentForm({ target, takenIds, lead, models = CLAUDE_CHOICES, onClose, o
   const save = async () => {
     setTriedSave(true);
     if (hasErrors(errors)) return;
-    const ok = await run(() => onSave(toSpec(id, draft), !existing), { success: existing ? `${draft.name.trim()} saved.` : `${draft.name.trim()} added.` });
+    // The agent first: a new one must be on the team before it can have a cap.
+    const ok = await run(() => onSave(toSpec(id, draft), !existing).then(() => budget.save(id)), { success: existing ? `${draft.name.trim()} saved.` : `${draft.name.trim()} added.` });
     if (ok) onClose();
   };
 
@@ -357,6 +360,11 @@ function AgentForm({ target, takenIds, lead, models = CLAUDE_CHOICES, onClose, o
                   description="How hard it thinks. Higher is slower and uses more credit."
                 />
               </Grid>
+            </FormSection>
+
+            <Divider />
+            <FormSection title="Budget" description="How much it may spend: per month, and in a single repo task. Settings → Spending has every agent's and provider's caps.">
+              <AgentBudgetField budget={budget} />
             </FormSection>
 
             <Divider />

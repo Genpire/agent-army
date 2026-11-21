@@ -234,7 +234,7 @@ async function askPointer(
   }
   const reply = await state.brainSlots.run(() => deps.brain.reply(req, pointerCtx));
   void deps.usage
-    ?.recordChat(reply.costUsd)
+    ?.recordChat(reply)
     .then(() => deps.spending?.notify())
     .catch((err) => console.error("[usage] chat cost not recorded:", errorText(err)));
   const body = ctx.redact(reply.text.trim()) || "(no reply)";

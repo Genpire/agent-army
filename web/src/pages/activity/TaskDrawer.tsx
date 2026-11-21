@@ -20,6 +20,7 @@ import { plural, usd } from "../../lib/format";
 import { href } from "../../lib/router";
 import type { Task } from "../../lib/types";
 import { checksView, isActive, plainText, prLabel, requestHeadline, taskDuration, taskStatus } from "./model";
+import { TaskAgentCosts } from "./AgentSpend";
 import { ChecksStatus, StatusLabel } from "./TaskTable";
 import { estimateRange, sizeDetail } from "../chat/labels";
 import { PreviewStatus } from "../chat/PreviewStatus";
@@ -185,6 +186,16 @@ function TaskDetails({ task }: { task: Task }) {
       <Block title="Details">
         <Details task={task} />
       </Block>
+      {task.agentCosts && Object.keys(task.agentCosts).length > 0 && (
+        <Block title="Cost by agent">
+          <VStack gap={2}>
+            <TaskAgentCosts task={task} />
+            <Text type="supporting">
+              {`Each agent's share of the task's cost${isActive(task) ? " so far" : ""}. Codex and Gemini CLI report tokens, so their dollars are estimates; a model with no price here shows tokens only.`}
+            </Text>
+          </VStack>
+        </Block>
+      )}
     </VStack>
   );
 }

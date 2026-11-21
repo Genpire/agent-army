@@ -17,7 +17,7 @@ import {
   taskBudgetFor,
   taskDecision,
 } from "../../src/spending/budget.js";
-import { type Budget, BudgetSchema, type Config, ConfigRepo } from "../../src/core/config.js";
+import { type Budget, BudgetSchema, type Config, ConfigRepo, ConfigSchema } from "../../src/core/config.js";
 import { ConversationService } from "../../src/chat/conversations.js";
 import { deriveKey } from "../../src/core/crypto.js";
 import { handleSlackEvent, resetDispatchStateForTests } from "../../src/slack/dispatch.js";
@@ -179,7 +179,7 @@ async function spendingSetup(b: Partial<Budget>, opts: { channel?: string; botTo
   const store = new FsStore(await mkdtemp(join(tmpdir(), "army-budget-")));
   const tasks = new TaskRepo(store);
   const usage = new UsageRepo(store, tasks);
-  const config = { budget: budget({ alertChannel: opts.channel ?? "CALERTS", ...b }), slack: { botToken: opts.botToken ?? "xoxb-secret" } } as unknown as Config;
+  const config: Config = ConfigSchema.parse({ budget: { alertChannel: opts.channel ?? "CALERTS", ...b }, slack: { botToken: opts.botToken ?? "xoxb-secret" } });
   const posts: { channel: string; text: string }[] = [];
   const slack = { fail: false };
   let now = NOW;
@@ -520,7 +520,7 @@ describe("POST /api/budget and GET /api/usage", () => {
     expect((await post("/api/budget", { monthlyUsd: 50, alertChannel: " C0ALERTS1 " })).status).toBe(200);
     const res = await post("/api/budget", { perRepoUsd: { "acme/web": 5, "acme/api": 0 }, alertPercent: 75 });
     expect(res.status).toBe(200);
-    const expected = { monthlyUsd: 50, perRepoUsd: { "acme/web": 5 }, alertPercent: 75, alertChannel: "C0ALERTS1" };
+    const expected = { monthlyUsd: 50, perRepoUsd: { "acme/web": 5 }, alertPercent: 75, alertChannel: "C0ALERTS1", perAgentUsd: {}, perProviderUsd: {}, perTaskAgentUsd: {} };
     expect(await res.json()).toEqual({ ok: true, budget: expected });
     expect((await get("/api/state")).config.budget).toEqual(expected);
   });

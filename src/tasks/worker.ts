@@ -15,7 +15,10 @@ import {
   parseReport,
 } from "../team/agents.js";
 import { AttachmentRepo, type ThreadRef, classify, expandZip } from "../chat/attachments.js";
-import { Spending } from "../spending/budget.js";
+import { Spending, agentNamer, perTaskCapUsd, teamWithout } from "../spending/budget.js";
+import { LEAD_AGENT_ID } from "../spending/attribution.js";
+import { runtimePrices } from "../spending/prices.js";
+import { TaskSpend } from "../spending/task-spend.js";
 import { type Screenshot, browserAvailable, browserServer, collectScreenshots } from "./browser.js";
 import { type CiOutcome, type WaitOptions, ciFailureDetails, ciFixPrompt, ciSummary, ciSummaryLine, storedCiSummary, waitForChecks } from "./ci.js";
 import { type ProviderSession, providerProblem, providerRuntime, secretParts } from "../ai/ai-providers.js";
@@ -1126,6 +1129,8 @@ export async function main(): Promise<void> {
   };
 
   task.status = "running";
+  // Its Claude cost counts for this provider's monthly cap (budget.ts).
+  task.provider = runtime.provider;
   await tasks.save(task);
   await ticketStarted(ticket, task);
 
@@ -1243,8 +1248,27 @@ export async function main(): Promise<void> {
     });
     if (apps) timeline.add({ kind: "note", text: `Apps for this task: ${Object.keys(apps.servers).length}` });
 
+    // Agents over their monthly budget, or working through an engine whose budget is used up, sit this task out (budget.ts).
+    const overBudget = await spending.leftOut(config.team);
+    for (const l of overBudget) timeline.add({ kind: "note", text: l.note }, true);
+    const teamConfig: Config = overBudget.length ? { ...taskConfig, team: teamWithout(taskConfig.team, overBudget) } : taskConfig;
+    // Who spends what (attribution.ts), and each agent's budget for this task: past it, its tool calls are denied and its engine runs stopped.
+    const agentName = agentNamer(config.team);
+    const spend = new TaskSpend({
+      agents: teamConfig.team.agents.filter((a) => a.enabled).map((a) => a.id),
+      engineAgents: {
+        codex: teamConfig.team.agents.filter((a) => a.enabled && a.engine === "codex").map((a) => a.id),
+        gemini: teamConfig.team.agents.filter((a) => a.enabled && a.engine === "gemini").map((a) => a.id),
+      },
+      price: runtimePrices(runtime),
+      capFor: (id) => perTaskCapUsd(config.budget, id),
+      name: agentName,
+      onCapReached: (_id, text) => timeline.add({ kind: "note", text }, true),
+    });
+
     // Coding agent CLIs (Codex, Gemini) for agents whose engine is not Claude; one that cannot start is left out, never fails the task.
-    const engines = await repoTaskEngines(config, { repoDir, workRoot, redact, note: (text) => timeline.add({ kind: "note", text }) }).catch((err: unknown) => {
+    const engineDeps = { repoDir, workRoot, redact, note: (text: string) => timeline.add({ kind: "note", text }), spend: spend.engines };
+    const engines = await repoTaskEngines(teamConfig, engineDeps).catch((err: unknown) => {
       console.warn("[worker] engines not available:", redact(errorText(err)).slice(0, 300));
       return undefined;
     });
@@ -1290,7 +1314,7 @@ export async function main(): Promise<void> {
     if (allowance.note) timeline.add({ kind: "note", text: allowance.note });
     const routed = config.team.pointer.routing.enabled
       ? await routeRepoTask({
-          config: taskConfig,
+          config: teamConfig,
           task,
           followUp: resumed,
           attachments: attachments.length,
@@ -1301,7 +1325,7 @@ export async function main(): Promise<void> {
         })
       : undefined;
     // The team runs with the routed model and effort (agents with their own keep them).
-    const runConfig = routed?.config ?? taskConfig;
+    const runConfig = routed?.config ?? teamConfig;
     if (routed) {
       task.size = routed.size;
       task.estimateUsd = routed.estimateUsd;
@@ -1373,11 +1397,14 @@ export async function main(): Promise<void> {
         onEvent: (e) => timeline.tracker(e),
       });
       if (opts.phaseLabel) tracker.setPhase(opts.phaseLabel);
+      // Each agent's share of this run, on top of the task's earlier runs (the console shows them live).
+      const spendTracker = spend.startRun();
       let lastSaved = 0;
       const saveProgress = async (force = false) => {
         if (!force && Date.now() - lastSaved < 30_000) return;
         lastSaved = Date.now();
         task.progress = tracker.snapshot();
+        task.agentCosts = spend.live();
         await tasks.save(task).catch((err: unknown) => console.error("[worker] progress not saved:", redact(String(err))));
       };
       let updating: Promise<void> = Promise.resolve();
@@ -1404,6 +1431,7 @@ export async function main(): Promise<void> {
       let failure: string | undefined;
       let costUsd = 0;
       let turns = 0;
+      let result: Parameters<TaskSpend["endRun"]>[0];
       try {
         for await (const message of query({
           prompt: runPrompt,
@@ -1414,7 +1442,8 @@ export async function main(): Promise<void> {
             // Headless: nothing can prompt, so anything not in allowedTools is denied.
             permissionMode: "dontAsk",
             settingSources: ["project"], // loads the project's own CLAUDE.md
-            hooks: { PreToolUse: [{ matcher: "Bash", hooks: [bashGuard] }] },
+            // The shell guard, and each agent's budget for this task (it also matches engine runs to their agents).
+            hooks: { PreToolUse: [{ matcher: "Bash", hooks: [bashGuard] }, { hooks: [spend.hook] }] },
             outputFormat: { type: "json_schema", schema: REPORT_SCHEMA },
             maxTurns: config.limits.maxTurns,
             maxBudgetUsd: opts.budgetUsd,
@@ -1424,12 +1453,14 @@ export async function main(): Promise<void> {
             env: agentEnv,
           },
         })) {
+          spendTracker.feed(message);
           if (tracker.onMessage(message)) {
             await progress(redact(formatProgress(tracker.snapshot(), { kind: "live", everyMin })));
             await saveProgress();
           }
           if (message.type === "result") {
             costUsd = message.total_cost_usd;
+            result = message;
             turns = message.num_turns;
             if (message.subtype === "success" && !message.is_error) {
               report = parseReport(message.structured_output, message.result);
@@ -1452,6 +1483,8 @@ export async function main(): Promise<void> {
         // No progress save may land after the final status below.
         clearInterval(updateTimer);
         await updating;
+        // Claude Code's own cost per model, shared out between the agents.
+        task.agentCosts = spend.endRun(result);
       }
       if (opts.abort.signal.aborted) failure = `Timed out after ${opts.timeoutMin} minutes.`;
       if (!report && !failure) failure = "The team finished without a report.";
@@ -1561,8 +1594,12 @@ export async function main(): Promise<void> {
       context,
     });
     clearTimeout(timer);
-    // The size estimate's own (tiny) cost counts too.
+    // The size estimate's own (tiny) cost counts too: Pointer's.
     task.costUsd = first.costUsd + (routed?.costUsd ?? 0);
+    if (routed?.costUsd) {
+      spend.add({ [LEAD_AGENT_ID]: { usd: routed.costUsd } });
+      task.agentCosts = spend.live();
+    }
     task.turns = first.turns;
     const { report, failure } = first;
     // What the Slack result says, kept on the task for the console (and Pointer).

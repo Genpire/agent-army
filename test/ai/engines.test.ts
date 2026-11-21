@@ -61,6 +61,7 @@ process.stdin.on("end", () => {
     const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
     fs.writeFileSync(DIR + "/cli.pid", String(process.pid));
     fs.writeFileSync(DIR + "/grandchild.pid", String(child.pid));
+    for (const o of behavior.before || []) emit(o);
     setInterval(() => {}, 1000);
     return;
   }
@@ -412,6 +413,49 @@ describe("coding agent CLIs in a repo task", () => {
     expect(result.text).toContain("timed out after 1 min");
     const pid = Number(await readFile(join(root, "grandchild.pid"), "utf8"));
     expect(await until(() => !alive(pid), 2_000)).toBe(true);
+  });
+
+  it("stops a run, and everything it started, once its agent's budget for the task is reached", { timeout: 20_000 }, async () => {
+    // 8,000 characters streamed: about 2,000 tokens before the CLI reports any.
+    await behave({ kind: "hang", before: [{ type: "item.completed", item: { id: "1", type: "agent_message", text: "x".repeat(8_000) } }] });
+    const seen: { input: number; output: number }[] = [];
+    let ended: { input: number; output: number } | undefined;
+    const started = Date.now();
+    const result = await runEngine(codex({ model: "gpt-5.1-codex" }), {
+      task: "Work forever.",
+      mode: "write",
+      timeoutMin: 1,
+      deps: deps(),
+      root: engineRoot,
+      gitHome,
+      spend: {
+        update: (usage, model) => {
+          expect(model).toBe("gpt-5.1-codex");
+          seen.push(usage);
+          return usage.input >= 2_000;
+        },
+        end: (usage) => void (ended = usage),
+      },
+    });
+    expect(Date.now() - started).toBeLessThan(15_000);
+    expect(result.ok).toBe(false);
+    expect(result.text).toContain("its agent's budget for this task was reached, so it was stopped");
+    expect(seen.at(-1)!.input).toBeGreaterThanOrEqual(2_000);
+    expect(ended).toMatchObject({ output: 0 });
+    expect(ended!.input).toBeGreaterThanOrEqual(2_000);
+    expect(notes).toContain("Codex stopped: its agent's budget for this task is reached");
+    const pid = Number(await readFile(join(root, "grandchild.pid"), "utf8"));
+    expect(await until(() => !alive(pid), 2_000)).toBe(true);
+  });
+
+  it("reports the CLI's own token count when it gives one, and the model Gemini CLI says it runs", async () => {
+    const updates: [number, string][] = [];
+    let ended: { input: number; output: number; cached?: number } | undefined;
+    await run(gemini(), "write", {
+      spend: { update: (u, model) => void updates.push([u.input, model]) as unknown as boolean, end: (u) => void (ended = u) },
+    });
+    expect(ended).toEqual({ input: 1200, output: 300, cached: 100 });
+    expect(updates.at(-1)).toEqual([1200, "auto"]);
   });
 
   describe("when the worker ends first", () => {

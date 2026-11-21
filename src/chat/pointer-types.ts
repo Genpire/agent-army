@@ -10,6 +10,7 @@ import type { NotesRepo } from "./notes.js";
 import type { Runner } from "../tasks/runner.js";
 import type { TaskRepo, ThreadState } from "../tasks/tasks.js";
 import type { UsageRepo } from "../spending/usage.js";
+import type { AgentCosts } from "../spending/attribution.js";
 
 /** A file attached to a Slack message (subset of Slack's file object). */
 export interface SlackFileRef {
@@ -110,6 +111,10 @@ export interface PointerReply {
   /** Final answer, Markdown (the Slack layer converts it to mrkdwn). */
   text: string;
   costUsd?: number;
+  /** Who spent costUsd: Pointer ("pointer") and the team members it asked (see attribution.ts). */
+  agentCosts?: AgentCosts;
+  /** The AI provider the reply ran on (config.ai.chatProvider), for its monthly cap. */
+  provider?: string;
   isError: boolean;
 }
 
