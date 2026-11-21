@@ -1,8 +1,9 @@
 /**
  * The Codex and Gemini CLI panes: connect the engine's API key and pick its
- * model, add a ready-made team member that works through it, whether it may
- * run without a sandbox, and what it costs and may do. One pane, filled in
- * from each engine's ENGINE_INFO.
+ * model (from the vendor's live list, GET /api/engines/:id/models), the
+ * agents that work through it with the model each runs, adding another on a
+ * model of its own, whether it may run without a sandbox, and what it costs
+ * and may do. One pane, filled in from each engine's ENGINE_INFO.
  */
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
@@ -12,18 +13,20 @@ import { List, ListItem } from "@astryxdesign/core/List";
 import { MetadataList, MetadataListItem } from "@astryxdesign/core/MetadataList";
 import { Switch } from "@astryxdesign/core/Switch";
 import { Text } from "@astryxdesign/core/Text";
-import { TextInput } from "@astryxdesign/core/TextInput";
 import { Timestamp } from "@astryxdesign/core/Timestamp";
 import { VStack } from "@astryxdesign/core/VStack";
 import { CommandLineIcon } from "@heroicons/react/24/outline";
 import { type ReactNode, useState } from "react";
 import { ConfirmButton } from "../../components/ConfirmButton";
+import { ModelPicker } from "../../components/ModelPicker";
 import { SecretField } from "../../components/SecretField";
 import { api } from "../../lib/api";
 import { ENGINE_NAME, type EngineId } from "../../lib/engines";
+import { forgetModelLists } from "../../lib/models";
 import { href } from "../../lib/router";
 import { useConfig } from "../../lib/state";
 import type { AgentSpec } from "../../lib/types";
+import { MAX_AGENTS, engineModelSpecials } from "../team/team";
 import type { IntegrationSummary } from "./catalog";
 import { FormActions, FormError, PaneHeader, PaneSection, Steps, Strong, useSave } from "./parts";
 
@@ -67,7 +70,7 @@ const ENGINE_INFO: Record<EngineId, EngineInfo> = {
       <>Use an API key: signing in with ChatGPT is not allowed for a hosted service like this one.</>,
       <>Paste it below. It is checked with OpenAI, stored encrypted and never shown again.</>,
     ],
-    modelDescription: "An OpenAI model Codex supports. Leave it empty for Codex's default.",
+    modelDescription: "The OpenAI model Codex runs for agents without a model of their own. Empty: Codex's default.",
     memberName: "Codex",
     sandbox:
       "Codex runs its commands in its own sandbox when the task container allows it (each task checks). Where its sandbox does not work, it runs only if you allow it below.",
@@ -92,7 +95,7 @@ const ENGINE_INFO: Record<EngineId, EngineInfo> = {
       <>Use a paid key: Google moved its free consumer users to Antigravity CLI, and Gemini CLI stays available with paid Gemini API keys.</>,
       <>Paste it below. It is checked with Google, stored encrypted and never shown again.</>,
     ],
-    modelDescription: "A Gemini model id. Leave it empty for the CLI's default, which picks a model for each request.",
+    modelDescription: "The Gemini model the CLI runs for agents without a model of their own. Empty: the CLI's default, which picks a model for each request.",
     memberName: "Gemini",
     sandbox: "Gemini CLI has no sandbox here, so it runs only if you allow it below.",
     offMeans: "Off: Gemini CLI never runs, and agents set to it work as Claude.",
@@ -238,7 +241,11 @@ function EngineKey({ info }: { info: EngineInfo }) {
       invalid,
       success: key ? `${name} connected: the key was verified with ${info.vendor}.` : "Model saved.",
     });
-    if (ok) setApiKey("");
+    if (ok) {
+      setApiKey("");
+      // A new key can see other models.
+      if (key) forgetModelLists();
+    }
   };
 
   return (
@@ -256,7 +263,15 @@ function EngineKey({ info }: { info: EngineInfo }) {
           description={info.keyDescription}
           isRequired
         />
-        <TextInput label="Model" value={model} onChange={edit(setModel)} placeholder="The CLI's default" description={info.modelDescription} isOptional />
+        <ModelPicker
+          label="Model"
+          source={{ kind: "engine", id: info.id }}
+          value={model}
+          onChange={edit(setModel)}
+          specials={[{ value: "", label: "The CLI's default", description: `${name} picks its own model` }]}
+          description={info.modelDescription}
+          isOptional
+        />
       </FormLayout>
       <FormError message={error} />
       <FormActions>
@@ -278,48 +293,68 @@ function EngineKey({ info }: { info: EngineInfo }) {
   );
 }
 
-/** The agents that work through this engine, or a ready-made one to add. */
+/** The agents that work through this engine, each with the model it runs, and another to add, on a model of its own if wanted. */
 function EngineMembers({ info, agents }: { info: EngineInfo; agents: AgentSpec[] }) {
   const { config } = useConfig();
-  const connected = config.engines[info.id].connected;
+  const engine = config.engines[info.id];
+  const connected = engine.connected;
   const name = ENGINE_NAME[info.id];
-  const { save, error } = useSave();
+  const [engineModel, setEngineModel] = useState("");
+  const { save, error, edit } = useSave();
+  const full = config.team.agents.length >= MAX_AGENTS;
+  const engineDefault = engine.model ? `${engine.model} (the engine's model)` : "the CLI's default model";
 
   const add = async () => {
-    await save(() => api.post<{ ok: true; agent: AgentSpec }>(`/api/engines/${info.id}/agent`, {}), {
-      success: (r) => `${r.agent.name} joined the team as ${r.agent.role}.`,
+    const ok = await save(() => api.post<{ ok: true; agent: AgentSpec }>(`/api/engines/${info.id}/agent`, engineModel ? { engineModel } : {}), {
+      success: (r) => `${r.agent.name} joined the team as ${r.agent.role}${r.agent.engineModel ? `, on ${r.agent.engineModel}` : ""}.`,
     });
+    if (ok) setEngineModel("");
   };
 
   return (
     <PaneSection
       title="On the team"
-      description={`An agent set to ${name} hands its assignment to ${name} and checks what it did. Any agent can work through it: set its Engine on the Team page.`}>
-      {agents.length > 0 ? (
+      description={`An agent set to ${name} hands its assignment to ${name} and checks what it did. Add as many as you like, each on a model of its own, or set any agent's Engine on the Team page.`}>
+      {agents.length > 0 && (
         <List density="compact" edge="flush">
           {agents.map((a) => (
             <ListItem
               key={a.id}
               label={a.name}
-              description={`${a.role}${a.enabled ? "" : " · off"}${connected ? "" : " · works as Claude until connected"}`}
+              description={`${a.role} · ${a.engineModel || engineDefault}${a.enabled ? "" : " · off"}${connected ? "" : " · works as Claude until connected"}`}
               href={href("team", "agent", a.id)}
             />
           ))}
         </List>
-      ) : (
-        <>
-          <Text color="secondary">
-            {connected ? `Add ${info.memberName}, a coder that works through ${name}, or switch an agent you have.` : `Connect ${name} first.`}
-          </Text>
-          <FormActions>
-            <Button label={`Add ${info.memberName} to the team`} variant="secondary" clickAction={add} isDisabled={!connected} />
-            <Link href={href("team")} isStandalone>
-              Team page
-            </Link>
-          </FormActions>
-          <FormError message={error} />
-        </>
       )}
+      {!connected ? (
+        <Text color="secondary">Connect {name} first.</Text>
+      ) : (
+        <FormLayout>
+          <ModelPicker
+            label={agents.length ? `Model for another ${info.memberName} agent` : `Model for ${info.memberName}`}
+            source={{ kind: "engine", id: info.id }}
+            value={engineModel}
+            onChange={edit(setEngineModel)}
+            specials={engineModelSpecials(name, engine.model)}
+            description={`A coder that works through ${name}, named ${agents.length ? `“${info.memberName} ${agents.length + 1}” or the next free name` : `“${info.memberName}”`}. Rename it on the Team page.`}
+            isOptional
+          />
+        </FormLayout>
+      )}
+      <FormActions>
+        <Button
+          label={agents.length ? `Add another ${info.memberName} agent` : `Add ${info.memberName} to the team`}
+          variant="secondary"
+          clickAction={add}
+          isDisabled={!connected || full}
+          tooltip={full ? `A team can have at most ${MAX_AGENTS} agents.` : undefined}
+        />
+        <Link href={href("team")} isStandalone>
+          Team page
+        </Link>
+      </FormActions>
+      <FormError message={error} />
     </PaneSection>
   );
 }

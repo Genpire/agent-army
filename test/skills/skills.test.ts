@@ -477,7 +477,8 @@ describe("skills library", () => {
     expect(await lib.remove("pdf-tools")).toBe(false);
   });
 
-  it("holds at most 50 skills", async () => {
+  // 51 encrypted installs: about a second alone, more when the whole suite runs in parallel.
+  it("holds at most 50 skills", { timeout: 30_000 }, async () => {
     const { store, configRepo } = await setupConfig();
     const lib = new SkillLibrary(store, KEY, { configRepo, ttlMs: 0 });
     const config = await configRepo.load(true);

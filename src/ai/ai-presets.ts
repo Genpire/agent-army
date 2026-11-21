@@ -6,7 +6,10 @@
  * needs; the console shows the presets as they are (no secrets here).
  *
  * Model ids and prices were checked on each provider's own pages on
- * 2026-11-20 and change often: check them again before relying on them.
+ * 2026-11-20 (the Claude lists on 2026-11-21) and change often: check them
+ * again before relying on them. These lists are the fallback: the console's
+ * model pickers list each provider's models live where it can
+ * (model-catalog.ts).
  * Prices are USD per million tokens. Claude models (Anthropic, Bedrock,
  * Vertex, Google Cloud, Foundry) need none: Claude Code prices them itself.
  *
@@ -59,6 +62,8 @@ export interface PresetModel {
   id: string;
   label: string;
   tier: "opus" | "sonnet" | "haiku";
+  /** Input tokens, when the provider says. */
+  contextWindow?: number;
 }
 
 /** USD per million tokens, as Claude Code's modelPricing takes them. */
@@ -141,10 +146,21 @@ const credentialsJsonField = (role: string): PresetField => ({
   help: `A key for a service account with ${role}. Leave it empty to use the service's own Google credentials (on Cloud Run, its service account).`,
 });
 
+/** A million tokens: the context window of every current Claude model (Haiku 4.5 has 200K). */
+const M = 1_000_000;
+
+/** Claude on Anthropic's API (and Claude Platform on AWS, Google Cloud), newest of each line first. */
 const CLAUDE_MODELS: PresetModel[] = [
-  { id: "claude-opus-5-5", label: "Opus 5.5", tier: "opus" },
-  { id: "claude-sonnet-5-5", label: "Sonnet 5.5", tier: "sonnet" },
-  { id: "claude-haiku-5-5", label: "Haiku 5.5", tier: "haiku" },
+  { id: "claude-fable-5-2", label: "Fable 5.2", tier: "opus", contextWindow: M },
+  { id: "claude-opus-5-5", label: "Opus 5.5", tier: "opus", contextWindow: M },
+  { id: "claude-sonnet-5-5", label: "Sonnet 5.5", tier: "sonnet", contextWindow: M },
+  { id: "claude-haiku-5-5", label: "Haiku 5.5", tier: "haiku", contextWindow: M },
+  { id: "claude-fable-5-1", label: "Fable 5.1", tier: "opus", contextWindow: M },
+  { id: "claude-opus-5", label: "Opus 5", tier: "opus", contextWindow: M },
+  { id: "claude-opus-4-8", label: "Opus 4.8", tier: "opus", contextWindow: M },
+  { id: "claude-sonnet-5", label: "Sonnet 5", tier: "sonnet", contextWindow: M },
+  { id: "claude-sonnet-4-6", label: "Sonnet 4.6", tier: "sonnet", contextWindow: M },
+  { id: "claude-haiku-4-5", label: "Haiku 4.5", tier: "haiku", contextWindow: 200_000 },
 ];
 
 const CLAUDE_CAPABILITIES: PresetCapabilities = { webSearch: true, pdf: true, images: true, effort: ALL_EFFORTS, thinkingOff: true };
@@ -201,19 +217,27 @@ export const AI_PRESETS: readonly AiPreset[] = [
       "us.anthropic.claude-haiku-4-5-20251001-v1:0",
     ),
     models: [
-      { id: "us.anthropic.claude-opus-5-5", label: "Opus 5.5 (US)", tier: "opus" },
-      { id: "global.anthropic.claude-opus-5-5", label: "Opus 5.5 (global)", tier: "opus" },
-      { id: "eu.anthropic.claude-opus-5-5", label: "Opus 5.5 (EU)", tier: "opus" },
-      { id: "us.anthropic.claude-opus-4-8", label: "Opus 4.8 (US)", tier: "opus" },
-      { id: "us.anthropic.claude-sonnet-4-6", label: "Sonnet 4.6 (US)", tier: "sonnet" },
-      { id: "us.anthropic.claude-haiku-4-5-20251001-v1:0", label: "Haiku 4.5 (US)", tier: "haiku" },
+      { id: "us.anthropic.claude-fable-5-2", label: "Fable 5.2 (US)", tier: "opus", contextWindow: M },
+      { id: "us.anthropic.claude-opus-5-5", label: "Opus 5.5 (US)", tier: "opus", contextWindow: M },
+      { id: "global.anthropic.claude-opus-5-5", label: "Opus 5.5 (global)", tier: "opus", contextWindow: M },
+      { id: "eu.anthropic.claude-opus-5-5", label: "Opus 5.5 (EU)", tier: "opus", contextWindow: M },
+      { id: "us.anthropic.claude-sonnet-5-5", label: "Sonnet 5.5 (US)", tier: "sonnet", contextWindow: M },
+      { id: "global.anthropic.claude-sonnet-5-5", label: "Sonnet 5.5 (global)", tier: "sonnet", contextWindow: M },
+      { id: "us.anthropic.claude-haiku-5-5", label: "Haiku 5.5 (US)", tier: "haiku", contextWindow: M },
+      { id: "us.anthropic.claude-opus-4-8", label: "Opus 4.8 (US)", tier: "opus", contextWindow: M },
+      { id: "us.anthropic.claude-sonnet-4-6", label: "Sonnet 4.6 (US)", tier: "sonnet", contextWindow: M },
+      { id: "us.anthropic.claude-haiku-4-5-20251001-v1:0", label: "Haiku 4.5 (US)", tier: "haiku", contextWindow: 200_000 },
     ],
     capabilities: { ...CLAUDE_CAPABILITIES, webSearch: false },
     env: { CLAUDE_CODE_USE_BEDROCK: "1" },
     pricing: {},
     docsUrl: "https://code.claude.com/docs/en/amazon-bedrock",
     keyHelp: "In the AWS console: Bedrock, API keys (or IAM, an access key). Enable the Claude models in the region first.",
-    notes: ["Web search: not available on Bedrock.", "Costs are estimated at Anthropic's list prices, not Bedrock's."],
+    notes: [
+      "Web search: not available on Bedrock.",
+      "Costs are estimated at Anthropic's list prices, not Bedrock's.",
+      "Fable 5.2 runs only in the regions AWS offers it in.",
+    ],
     bestEffort: false,
   },
   {
@@ -236,18 +260,20 @@ export const AI_PRESETS: readonly AiPreset[] = [
     ],
     defaults: tiers("claude-opus-5-5", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5@20251001"),
     models: [
-      { id: "claude-opus-5-5", label: "Opus 5.5", tier: "opus" },
-      { id: "claude-opus-4-8", label: "Opus 4.8", tier: "opus" },
-      { id: "claude-sonnet-5-5", label: "Sonnet 5.5", tier: "sonnet" },
-      { id: "claude-sonnet-5", label: "Sonnet 5", tier: "sonnet" },
-      { id: "claude-haiku-4-5@20251001", label: "Haiku 4.5", tier: "haiku" },
+      { id: "claude-fable-5-2", label: "Fable 5.2", tier: "opus", contextWindow: M },
+      { id: "claude-opus-5-5", label: "Opus 5.5", tier: "opus", contextWindow: M },
+      { id: "claude-sonnet-5-5", label: "Sonnet 5.5", tier: "sonnet", contextWindow: M },
+      { id: "claude-haiku-5-5", label: "Haiku 5.5", tier: "haiku", contextWindow: M },
+      { id: "claude-opus-4-8", label: "Opus 4.8", tier: "opus", contextWindow: M },
+      { id: "claude-sonnet-5", label: "Sonnet 5", tier: "sonnet", contextWindow: M },
+      { id: "claude-haiku-4-5@20251001", label: "Haiku 4.5", tier: "haiku", contextWindow: 200_000 },
     ],
     capabilities: CLAUDE_CAPABILITIES,
     env: { CLAUDE_CODE_USE_VERTEX: "1" },
     pricing: {},
     docsUrl: "https://code.claude.com/docs/en/google-vertex-ai",
     keyHelp: "In the Google Cloud console: enable the Claude models in Model Garden, then create a service account key (IAM, Service accounts, Keys).",
-    notes: ["Costs are estimated at Anthropic's list prices, not Google's."],
+    notes: ["Costs are estimated at Anthropic's list prices, not Google's.", "Fable 5.2 runs only where Google offers it: enable it in Model Garden first."],
     bestEffort: false,
   },
   {
@@ -264,10 +290,13 @@ export const AI_PRESETS: readonly AiPreset[] = [
     ],
     defaults: tiers("claude-opus-5-5", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5-20251001"),
     models: [
-      { id: "claude-opus-5-5", label: "Opus 5.5", tier: "opus" },
-      { id: "claude-fable-5-1", label: "Fable 5.1", tier: "opus" },
-      { id: "claude-sonnet-5-5", label: "Sonnet 5.5", tier: "sonnet" },
-      { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5", tier: "haiku" },
+      { id: "claude-fable-5-2", label: "Fable 5.2", tier: "opus", contextWindow: M },
+      { id: "claude-opus-5-5", label: "Opus 5.5", tier: "opus", contextWindow: M },
+      { id: "claude-sonnet-5-5", label: "Sonnet 5.5", tier: "sonnet", contextWindow: M },
+      { id: "claude-haiku-5-5", label: "Haiku 5.5", tier: "haiku", contextWindow: M },
+      { id: "claude-fable-5-1", label: "Fable 5.1", tier: "opus", contextWindow: M },
+      { id: "claude-opus-5", label: "Opus 5", tier: "opus", contextWindow: M },
+      { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5", tier: "haiku", contextWindow: 200_000 },
     ],
     capabilities: CLAUDE_CAPABILITIES,
     env: { CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD: "1" },
@@ -296,17 +325,23 @@ export const AI_PRESETS: readonly AiPreset[] = [
     ],
     defaults: tiers("claude-opus-5-5", "claude-opus-5-5", "claude-sonnet-5", "claude-haiku-4-5"),
     models: [
-      { id: "claude-opus-5-5", label: "Opus 5.5", tier: "opus" },
-      { id: "claude-opus-4-8", label: "Opus 4.8", tier: "opus" },
-      { id: "claude-sonnet-5", label: "Sonnet 5", tier: "sonnet" },
-      { id: "claude-haiku-4-5", label: "Haiku 4.5", tier: "haiku" },
+      { id: "claude-opus-5-5", label: "Opus 5.5", tier: "opus", contextWindow: M },
+      { id: "claude-fable-5-2", label: "Fable 5.2", tier: "opus", contextWindow: M },
+      { id: "claude-sonnet-5-5", label: "Sonnet 5.5", tier: "sonnet", contextWindow: M },
+      { id: "claude-haiku-5-5", label: "Haiku 5.5", tier: "haiku", contextWindow: M },
+      { id: "claude-opus-4-8", label: "Opus 4.8", tier: "opus", contextWindow: M },
+      { id: "claude-sonnet-5", label: "Sonnet 5", tier: "sonnet", contextWindow: M },
+      { id: "claude-haiku-4-5", label: "Haiku 4.5", tier: "haiku", contextWindow: 200_000 },
     ],
     capabilities: CLAUDE_CAPABILITIES,
     env: { CLAUDE_CODE_USE_FOUNDRY: "1" },
     pricing: {},
     docsUrl: "https://code.claude.com/docs/en/microsoft-foundry",
     keyHelp: "Deploy the Claude models in your Foundry resource, then copy its key. The models below are deployment names: name deployments after the model ids.",
-    notes: ["Models are deployment names; costs are only right when they are named after the model ids."],
+    notes: [
+      "Models are deployment names; costs are only right when they are named after the model ids.",
+      "Fable 5.2 deploys only on Foundry's Anthropic-hosted option.",
+    ],
     bestEffort: false,
   },
   {
@@ -318,8 +353,8 @@ export const AI_PRESETS: readonly AiPreset[] = [
     fields: [apiKeyField("DeepSeek API key", "sk-…", "A pay-as-you-go key from the DeepSeek platform, under API keys.")],
     defaults: tiers("deepseek-flash[1m]", "deepseek-flash[1m]", "deepseek-flash[1m]", "deepseek-flash", "deepseek-flash"),
     models: [
-      { id: "deepseek-v4-pro[1m]", label: "DeepSeek V4 Pro", tier: "opus" },
-      { id: "deepseek-flash[1m]", label: "DeepSeek Flash", tier: "sonnet" },
+      { id: "deepseek-v4-pro[1m]", label: "DeepSeek V4 Pro", tier: "opus", contextWindow: 1_048_576 },
+      { id: "deepseek-flash[1m]", label: "DeepSeek Flash", tier: "sonnet", contextWindow: 1_048_576 },
       { id: "deepseek-flash", label: "DeepSeek Flash (background)", tier: "haiku" },
     ],
     capabilities: { webSearch: true, pdf: false, images: true, effort: ["low", "high", "max"], thinkingOff: true },
@@ -373,9 +408,9 @@ export const AI_PRESETS: readonly AiPreset[] = [
     ],
     defaults: tiers("qwen3.7-max", "qwen3.7-max", "qwen3.7-max", "qwen3.6-flash"),
     models: [
-      { id: "qwen4-max", label: "Qwen4 Max", tier: "opus" },
-      { id: "qwen3.7-max", label: "Qwen3.7 Max", tier: "sonnet" },
-      { id: "qwen3.6-flash", label: "Qwen3.6 Flash", tier: "haiku" },
+      { id: "qwen4-max", label: "Qwen4 Max", tier: "opus", contextWindow: M },
+      { id: "qwen3.7-max", label: "Qwen3.7 Max", tier: "sonnet", contextWindow: M },
+      { id: "qwen3.6-flash", label: "Qwen3.6 Flash", tier: "haiku", contextWindow: M },
     ],
     capabilities: { webSearch: true, pdf: true, images: true, effort: ["low", "high", "xhigh"], thinkingOff: true },
     env: {},
@@ -414,8 +449,8 @@ export const AI_PRESETS: readonly AiPreset[] = [
     ],
     defaults: tiers("kimi-k3[1m]", "kimi-k3[1m]", "kimi-k3[1m]", "kimi-k3[1m]"),
     models: [
-      { id: "kimi-k3[1m]", label: "Kimi K3", tier: "opus" },
-      { id: "kimi-k3.1-pro[1m]", label: "Kimi K3.1 Pro", tier: "opus" },
+      { id: "kimi-k3[1m]", label: "Kimi K3", tier: "opus", contextWindow: 1_048_576 },
+      { id: "kimi-k3.1-pro[1m]", label: "Kimi K3.1 Pro", tier: "opus", contextWindow: 1_048_576 },
       { id: "kimi-k3.1-pro-highspeed[1m]", label: "Kimi K3.1 Pro (high speed)", tier: "sonnet" },
     ],
     capabilities: { webSearch: false, pdf: false, images: true, effort: ["low", "high", "max"], thinkingOff: false },
@@ -454,8 +489,8 @@ export const AI_PRESETS: readonly AiPreset[] = [
     ],
     defaults: tiers("glm-5.3[1m]", "glm-5.3[1m]", "glm-5.3[1m]", "glm-5.3-flash[1m]"),
     models: [
-      { id: "glm-5.3[1m]", label: "GLM-5.3", tier: "opus" },
-      { id: "glm-5.3-flash[1m]", label: "GLM-5.3 Flash", tier: "haiku" },
+      { id: "glm-5.3[1m]", label: "GLM-5.3", tier: "opus", contextWindow: M },
+      { id: "glm-5.3-flash[1m]", label: "GLM-5.3 Flash", tier: "haiku", contextWindow: M },
     ],
     capabilities: { webSearch: false, pdf: false, images: false, effort: ["low", "high", "max"], thinkingOff: false },
     env: {

@@ -22,6 +22,7 @@ import { join } from "node:path";
 import { type Options, type Settings, query } from "@anthropic-ai/claude-agent-sdk";
 import { type FetchLike, appUrlProblem, guardedFetch } from "../integrations/apps/apps-net.js";
 import { AI_PRESETS, type AiPreset, type ModelPrice, type PresetCapabilities, QWEN_SHARED_HOSTS, compatibleBaseUrl, presetFor } from "./ai-presets.js";
+import { MODEL_ID_RE } from "./model-ids.js";
 import type { AiProviderConnection, AiProviderId, Config, ModelTier } from "../core/config.js";
 import type { QueryFn } from "../chat/pointer.js";
 import { EFFORT_LEVELS, type Effort } from "../team/team.js";
@@ -137,8 +138,8 @@ const DNS_LABEL_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/;
 const FOUNDRY_RESOURCE_RE = /^[A-Za-z0-9][A-Za-z0-9-]{1,62}$/;
 /** Keys and tokens: printable, no spaces. */
 const TOKEN_RE = /^[\x21-\x7e]{8,4000}$/;
-/** Model ids as providers spell them: "kimi-k3[1m]", "us.anthropic.claude-haiku-4-5-20251001-v1:0", "~anthropic/claude-opus-latest". */
-export const MODEL_ID_RE = /^[\x21-\x7e]{1,200}$/;
+/** Model ids as providers spell them (model-ids.ts, which the console's model picker shares). */
+export { MODEL_ID_RE };
 const PRICE_RE = /^\d{1,5}(?:\.\d{1,6})?$/;
 const HEADER_NAME_RE = /^[A-Za-z0-9-]{1,100}$/;
 const RESERVED_HEADERS = new Set([

@@ -5,12 +5,15 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
-import type { AgentDefinition } from "@anthropic-ai/claude-agent-sdk";
+import type { AgentDefinition, McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { type Config, ConfigSchema } from "../../src/core/config.js";
 import {
   ENGINES_SERVER,
   type EngineDeps,
+  agentEngineToolName,
   LINE_MAX_CHARS,
   SUMMARY_MAX_CHARS,
   codexRunner,
@@ -39,6 +42,19 @@ const ESCAPED_SECRET = 'pa"ss\\word\nnext-line-0123456789';
 const REPO_ROOT = resolve(import.meta.dirname, "../..");
 
 const sh = promisify(execFile);
+
+/** Calls the engines server's tools the way the CLI would, over an in-memory transport. */
+async function mcpClient(server: McpSdkServerConfigWithInstance) {
+  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+  await server.instance.connect(serverSide);
+  const client = new Client({ name: "test", version: "1.0.0" });
+  await client.connect(clientSide);
+  return {
+    listTools: async () => (await client.listTools()).tools.map((t) => t.name),
+    call: async (name: string, args: Record<string, unknown>) =>
+      (await client.callTool({ name, arguments: args })) as { content: { type: string; text?: string }[]; isError?: boolean },
+  };
+}
 
 /** A stand-in for both CLIs: what it was started with goes to record.json; behavior.json says what it does. */
 function fakeCliSource(dir: string): string {
@@ -684,6 +700,65 @@ describe("coding agent CLIs in a repo task", () => {
       expect(repoAllowedTools(config.team, { engines })).toEqual(expect.arrayContaining(engines.allToolNames));
     });
 
+    it("gives each agent with a model of its own its own tool, which runs the CLI with that --model over the engine's", async () => {
+      const carbon = { ...agent("carbon", "gemini", "write"), engineModel: "gemini-4-carbon" };
+      const neon = { ...agent("neon", "gemini", "write"), engineModel: "gemini-4-neon" };
+      const argon = { ...agent("argon", "gemini", "read"), engineModel: "gemini-4-argon" };
+      const plain = agent("gemini", "gemini", "write");
+      const config = configWith([carbon, neon, argon, plain], { gemini: GEMINI_KEY }, { gemini: true });
+      config.engines.gemini.model = "gemini-engine-default";
+      const engines = (await repoTaskEngines(config, deps()))!;
+
+      // The shared tool for the agent on the engine's model, one of its own for each of the others.
+      expect(engines.allToolNames).toEqual([
+        "mcp__engines__gemini_run",
+        "mcp__engines__gemini_run_as_carbon",
+        "mcp__engines__gemini_run_as_neon",
+        "mcp__engines__gemini_read_as_argon",
+      ]);
+      expect(agentEngineToolName("gemini", "write", "carbon")).toBe("mcp__engines__gemini_run_as_carbon");
+      // The longest agent id still makes a tool name of at most 64 characters.
+      expect(agentEngineToolName("gemini", "read", `a${"b".repeat(30)}`).length).toBeLessThanOrEqual(64);
+      const base: AgentDefinition = { description: "d", prompt: "My own instructions." };
+      expect(engines.agentDefinition(carbon, base)!.tools![0]).toBe("mcp__engines__gemini_run_as_carbon");
+      expect(engines.agentDefinition(neon, base)!.prompt).toContain("Send the whole assignment to mcp__engines__gemini_run_as_neon in one call");
+      expect(engines.agentDefinition(argon, base)!.tools).toEqual(["mcp__engines__gemini_read_as_argon", "Read", "Glob", "Grep"]);
+      expect(engines.agentDefinition(plain, base)!.tools![0]).toBe("mcp__engines__gemini_run");
+      // An agent given a model of its own after the task started has no tool of its own in it: it keeps its own definition.
+      expect(engines.agentDefinition({ ...plain, engineModel: "gemini-4-neon" }, base)).toBeUndefined();
+      expect(engines.promptRule).toContain("- carbon (Carbon, Coder (Gemini CLI)) works through Gemini CLI on gemini-4-carbon and changes files.");
+      expect(engines.promptRule).toContain("- argon (Argon, Coder (Gemini CLI)) works through Gemini CLI on gemini-4-argon and looks only.");
+      expect(engines.promptRule).toContain("- gemini (Gemini, Coder (Gemini CLI)) works through Gemini CLI and changes files.");
+
+      // Each tool runs the CLI with its own --model.
+      const client = await mcpClient(engines.servers[ENGINES_SERVER] as McpSdkServerConfigWithInstance);
+      expect(await client.listTools()).toEqual(["gemini_run", "gemini_run_as_carbon", "gemini_run_as_neon", "gemini_read_as_argon"]);
+      const modelOf = async (name: string) => {
+        const result = await client.call(name, { task: "Add feature.txt with a line of text." });
+        expect(result.isError).toBeFalsy();
+        const r = await record();
+        return { model: r.args[r.args.indexOf("--model") + 1], approval: r.args[r.args.indexOf("--approval-mode") + 1] };
+      };
+      expect(await modelOf("gemini_run_as_carbon")).toEqual({ model: "gemini-4-carbon", approval: "yolo" });
+      expect(await modelOf("gemini_run_as_neon")).toEqual({ model: "gemini-4-neon", approval: "yolo" });
+      expect(await modelOf("gemini_read_as_argon")).toEqual({ model: "gemini-4-argon", approval: "default" });
+      expect(await modelOf("gemini_run")).toEqual({ model: "gemini-engine-default", approval: "yolo" });
+    });
+
+    it("runs two Codex agents on different OpenAI models, each with its own --model", async () => {
+      const astra = { ...agent("astra", "codex", "write"), engineModel: "gpt-6.2-astra" };
+      const sol = { ...agent("sol", "codex", "write"), engineModel: "gpt-6.2-sol" };
+      const engines = (await repoTaskEngines(configWith([astra, sol], { codex: CODEX_KEY }), deps()))!;
+      expect(engines.allToolNames).toEqual(["mcp__engines__codex_run_as_astra", "mcp__engines__codex_run_as_sol"]);
+      const client = await mcpClient(engines.servers[ENGINES_SERVER] as McpSdkServerConfigWithInstance);
+      for (const [name, model] of [["codex_run_as_astra", "gpt-6.2-astra"], ["codex_run_as_sol", "gpt-6.2-sol"]] as const) {
+        await client.call(name, { task: "Add feature.txt with a line of text." });
+        const r = await record();
+        expect(r.args[r.args.indexOf("--model") + 1]).toBe(model);
+        expect(r.args[r.args.indexOf("--sandbox") + 1]).toBe("workspace-write");
+      }
+    });
+
     it("leaves Codex agents on Claude where its sandbox does not work, unless the owner allows it to run without one", async () => {
       await behave({ sandbox: false });
       const coder = agent("codex", "codex", "write");
@@ -834,14 +909,83 @@ describe("Engines admin API", () => {
     expect((await state()).config.engines.gemini).toMatchObject({ connected: false, allowUnsandboxed: false });
   });
 
-  it("adds a ready-made team member once, and only when connected", async () => {
+  it("adds ready-made team members only when connected, as many as the team has room for, each with its own name and model", async () => {
     expect(await reply(await post("/api/engines/gemini/agent", {}))).toEqual({ status: 400, body: { error: "Connect Gemini CLI first." } });
     expect((await post("/api/engines/gemini", { apiKey: GEMINI_KEY })).status).toBe(200);
     const added = await reply(await post("/api/engines/gemini/agent", {}));
     expect(added.status).toBe(200);
-    expect(added.body.agent).toMatchObject({ id: "gemini", name: "Gemini", role: "Coder (Gemini CLI)", access: "write", engine: "gemini", enabled: true });
-    expect((await state()).config.team.agents.filter((a) => a.engine === "gemini").map((a) => a.id)).toEqual(["gemini"]);
-    expect(await reply(await post("/api/engines/gemini/agent", {}))).toEqual({ status: 409, body: { error: "Gemini already works through Gemini CLI." } });
+    expect(added.body.agent).toMatchObject({ id: "gemini", name: "Gemini", role: "Coder (Gemini CLI)", access: "write", engine: "gemini", engineModel: "", enabled: true });
+    // Another on the same engine: the next free name and id, on a model of its own.
+    const second = await reply(await post("/api/engines/gemini/agent", { engineModel: "gemini-4-neon" }));
+    expect(second).toMatchObject({ status: 200, body: { agent: { id: "gemini-2", name: "Gemini 2", engine: "gemini", engineModel: "gemini-4-neon" } } });
+    const third = await reply(await post("/api/engines/gemini/agent", { name: "Carbon", engineModel: "gemini-4-carbon" }));
+    expect(third).toMatchObject({ status: 200, body: { agent: { id: "carbon", name: "Carbon", engineModel: "gemini-4-carbon" } } });
+    // A name already taken gets a number.
+    const fourth = await reply(await post("/api/engines/gemini/agent", { name: "carbon" }));
+    expect(fourth.body.agent).toMatchObject({ id: "carbon-2", name: "carbon 2", engineModel: "" });
+    const team = (await state()).config.team.agents.filter((a) => a.engine === "gemini");
+    expect(team.map((a) => [a.id, a.engineModel])).toEqual([
+      ["gemini", ""],
+      ["gemini-2", "gemini-4-neon"],
+      ["carbon", "gemini-4-carbon"],
+      ["carbon-2", ""],
+    ]);
+
+    expect(await reply(await post("/api/engines/gemini/agent", { engineModel: "bad model;" }))).toMatchObject({ status: 400, body: { error: expect.stringContaining("letters, digits") } });
+    expect((await post("/api/engines/gemini/agent", { name: "x".repeat(41) })).status).toBe(400);
+    expect((await post("/api/engines/gemini/agent", { model: "gemini-4-neon" })).status).toBe(400);
+
+    // A full team takes no more.
+    const s = await state();
+    const fillers = Array.from({ length: 30 - s.config.team.agents.length }, (_, i) => ({ ...team[0]!, id: `filler-${i}`, name: `Filler ${i}` }));
+    const full = await fetch(`${base}/api/team`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({ ...(s.config.team as object), agents: [...s.config.team.agents, ...fillers] }),
+    });
+    expect(full.status).toBe(200);
+    expect(await reply(await post("/api/engines/gemini/agent", {}))).toEqual({ status: 400, body: { error: "A team can have at most 30 agents. Delete one first." } });
+    // Back to the team before, for the tests after this one.
+    await fetch(`${base}/api/team`, { method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify(s.config.team) });
+  });
+
+  it("lists the engine's models: admin only, the built-in list until connected, then live from the vendor, kept until a refresh", async () => {
+    const get = (path: string, withCookie = true) => fetch(base + path, { headers: withCookie ? { cookie } : {} });
+    expect((await get("/api/engines/codex/models", false)).status).toBe(401);
+    expect((await get("/api/engines/cursor/models")).status).toBe(404);
+    expect((await post("/api/engines/codex/disconnect", {})).status).toBe(200);
+    const builtIn = await (await get("/api/engines/codex/models")).json();
+    expect(builtIn).toMatchObject({ live: false, source: "OpenAI", reason: expect.stringContaining("Connect Codex") });
+    expect(builtIn.models.map((m: { id: string }) => m.id)).toContain("gpt-6.2-sol");
+
+    const realFetch = globalThis.fetch;
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.hostname !== "api.openai.com") return realFetch(input, init);
+      calls.push(`${url.pathname} ${new Headers(init?.headers).get("authorization")}`);
+      const data = [
+        { id: "gpt-6.2-sol", object: "model", created: 1_790_000_000, owned_by: "openai" },
+        { id: "gpt-6.2-astra", object: "model", created: 1_790_000_100, owned_by: "openai" },
+        { id: "text-embedding-3-large", object: "model", created: 1, owned_by: "openai" },
+        { id: "gpt-realtime", object: "model", created: 1, owned_by: "openai" },
+      ];
+      return new Response(JSON.stringify({ object: "list", data }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    expect((await post("/api/engines/codex", { apiKey: CODEX_KEY })).status).toBe(200);
+    const live = await (await get("/api/engines/codex/models")).json();
+    expect(live).toMatchObject({ live: true, source: "OpenAI" });
+    expect(live.models.map((m: { id: string; label: string }) => [m.id, m.label])).toEqual([
+      ["gpt-6.2-astra", "GPT-6.2 Astra"],
+      ["gpt-6.2-sol", "GPT-6.2 Sol"],
+    ]);
+    expect(calls).toEqual([`/v1/models Bearer ${CODEX_KEY}`]);
+    expect(JSON.stringify(live)).not.toContain(CODEX_KEY);
+    // Kept: no second call, until a refresh.
+    await get("/api/engines/codex/models");
+    expect(calls).toHaveLength(1);
+    await get("/api/engines/codex/models?refresh=1");
+    expect(calls).toHaveLength(2);
   });
 
   it("disconnects, keeping the model and the agents", async () => {

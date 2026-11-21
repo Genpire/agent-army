@@ -3,7 +3,8 @@
  * run on, each provider's connection (its fields, models and what it can
  * do), and the connected ones with their status. The presets and the saved
  * connections come from GET /api/ai/providers (src/routes/ai.ts); secrets are
- * never sent back, only masked.
+ * never sent back, only masked. Each tier's model picker lists the
+ * provider's models live where it can (GET /api/ai/providers/:id/models).
  */
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
@@ -26,10 +27,12 @@ import { CheckCircleIcon, CloudIcon, CpuChipIcon, ServerStackIcon, SparklesIcon,
 import { useState } from "react";
 import { BrandLogo } from "../../components/BrandLogo";
 import { ConfirmButton } from "../../components/ConfirmButton";
+import { ModelPicker } from "../../components/ModelPicker";
 import { SecretField } from "../../components/SecretField";
 import { capabilityLines, presetModelLabel, providerById, providerStatus, TIER_INFO, tierModels, useAiProviders } from "../../lib/aiProviders";
 import { api } from "../../lib/api";
 import { timeAgo, usd } from "../../lib/format";
+import { forgetModelLists } from "../../lib/models";
 import { useConfig } from "../../lib/state";
 import { type AiProviderId, type AiProviderView, type AiProvidersView, MODEL_TIER_OPTIONS, type ModelTier, type PresetField } from "../../lib/types";
 import { useAction } from "../../lib/useAction";
@@ -129,7 +132,10 @@ function ConnectedProviders({ view, onEdit, reload }: { view: AiProvidersView; o
                     label="Remove"
                     onConfirm={async () => {
                       const ok = await save(() => api.post(`/api/ai/providers/${p.id}/delete`, {}), { success: `Removed ${p.name}.` });
-                      if (ok) await reload();
+                      if (ok) {
+                        forgetModelLists();
+                        await reload();
+                      }
                     }}
                   />
                 </HStack>
@@ -209,6 +215,8 @@ function ProviderSetup({ provider: p, view, reload }: { provider: AiProviderView
     if (ok) {
       setSecrets({});
       setCleared(new Set());
+      // A new key or address can see other models.
+      forgetModelLists();
       await reload();
     }
   };
@@ -286,7 +294,7 @@ function ProviderSetup({ provider: p, view, reload }: { provider: AiProviderView
             {p.kind === "anthropic"
               ? "For repo tasks, and for chat when the Team page sets no chat model."
               : p.kind === "custom"
-                ? "Type the model ids the endpoint expects. A tier left empty sends Claude's own model id."
+                ? "Pick from the endpoint's models, or type the ids it expects. A tier left empty sends Claude's own model id."
                 : `Claude Code's model tiers, mapped onto ${p.short}'s models. An agent set to a Claude model runs on the tier of the same size.`}
           </Text>
         </VStack>
@@ -390,66 +398,30 @@ function FieldInput({
   );
 }
 
-/** The picker's "type an id" choice; never a model id (ids have no spaces). */
-const ANOTHER = "another model";
+/** USD per million tokens, from the provider's prices (a "[1m]" id costs as its model). */
+function priceText(p: AiProviderView, id: string): string | undefined {
+  const row = p.pricing[id.replace(/\[1m\]$/i, "")];
+  return row ? `$${row.input} in, $${row.output} out per million tokens` : undefined;
+}
 
-/** The model of one tier: the provider's list, its default, or an id typed by hand. */
+/** The model of one tier: the provider's models (live where it can), its default, or an id typed by hand. */
 function TierField({ provider: p, tier, value, onChange }: { provider: AiProviderView; tier: ModelTier; value: string; onChange: (value: string) => void }) {
   const fallback = p.defaults[tier];
-  const listed = p.models.some((m) => m.id === value);
-  const [typing, setTyping] = useState(Boolean(value) && !listed && p.models.length > 0);
   const info = p.kind === "anthropic" ? { label: "Model", description: "" } : TIER_INFO[tier];
-  const price = (id: string) => {
-    const row = p.pricing[id.replace(/\[1m\]$/i, "")];
-    return row ? ` · $${row.input} in, $${row.output} out per million tokens` : "";
-  };
   const defaultText = fallback ? presetModelLabel(p, fallback) : p.kind === "anthropic" ? "the Agent SDK's default model" : "Claude's own model id";
-
-  if (!p.models.length) {
-    return (
-      <TextInput
-        label={info.label}
-        value={value}
-        onChange={(v) => onChange(v.trim())}
-        description={info.description}
-        placeholder={fallback || "e.g. anthropic/claude-sonnet-5"}
-        isOptional
-      />
-    );
-  }
-  const options: SelectorOptionData[] = [
-    { value: "", label: `Default: ${defaultText}`, description: fallback ? `${fallback}${price(fallback)}` : undefined },
-    ...p.models.map((m) => ({ value: m.id, label: m.label, description: `${m.id}${price(m.id)}` })),
-    ...(value && !listed ? [{ value, label: value, description: "Typed by hand" }] : []),
-    ...(p.kind === "anthropic" ? [] : [{ value: ANOTHER, label: "Another model…", description: "Type its id" }]),
-  ];
+  const notes = Object.fromEntries(Object.keys(p.pricing).flatMap((id) => [id, `${id}[1m]`].map((key) => [key, priceText(p, id) ?? ""])));
   return (
-    <VStack gap={2}>
-      <Selector
-        label={info.label}
-        options={options}
-        value={typing ? (value && !listed ? value : ANOTHER) : value}
-        onChange={(v) => {
-          if (v === ANOTHER) {
-            setTyping(true);
-            return;
-          }
-          setTyping(false);
-          onChange(v);
-        }}
-        description={info.description || undefined}
-        isOptional
-      />
-      {typing && (
-        <TextInput
-          label={`${info.label} id`}
-          value={value}
-          onChange={(v) => onChange(v.trim())}
-          placeholder={fallback || "model-id"}
-          description={`As ${p.short} names it. Empty uses the default.`}
-        />
-      )}
-    </VStack>
+    <ModelPicker
+      label={info.label}
+      source={{ kind: "provider", id: p.id }}
+      value={value}
+      onChange={(v) => onChange(v.trim())}
+      specials={[{ value: "", label: `Default: ${defaultText}`, description: fallback ? [fallback, priceText(p, fallback)].filter(Boolean).join(" · ") : undefined }]}
+      modelNotes={notes}
+      description={info.description || undefined}
+      placeholder={p.kind === "custom" ? "Search the endpoint's models, or type an id" : undefined}
+      isOptional
+    />
   );
 }
 

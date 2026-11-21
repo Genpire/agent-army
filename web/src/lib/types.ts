@@ -99,6 +99,8 @@ export const TASK_PHASE_ORDER = ["clone", "setup", "plan", "build", "verify", "p
 export type { AiProviderView, AiProvidersView } from "../../../src/routes/ai.js";
 export type { ModelPrice, PresetCapabilities, PresetField, PresetKind, PresetModel } from "../../../src/ai/ai-presets.js";
 export type { AiProviderId, ModelTier } from "../../../src/core/config.js";
+/** A source's models (GET /api/ai/providers/:id/models, GET /api/engines/:id/models). */
+export type { CatalogModel, ModelList } from "../../../src/ai/model-catalog.js";
 
 /** The model tiers a provider maps, in the order the page shows them (checked against the server's list). */
 export const MODEL_TIER_OPTIONS = ["main", "opus", "sonnet", "haiku", "subagent"] as const satisfies readonly import("../../../src/core/config.js").ModelTier[];

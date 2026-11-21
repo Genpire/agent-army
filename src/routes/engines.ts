@@ -2,15 +2,20 @@
  * Coding agent CLI admin routes (/api/engines/:id/…, id "codex" or "gemini"):
  * connect or update (the key, checked with OpenAI or Google unless
  * SKIP_VALIDATION=1, the model, and whether it may run without a sandbox),
- * disconnect, and add a ready-made team member that works through the engine. Keys are stored encrypted with the
- * config and never returned (publicView masks them).
+ * disconnect, the engine's models (live from OpenAI or Google with the saved
+ * key, model-catalog.ts), and add ready-made team members that work through
+ * the engine, as many as the team has room for, each on a model of its own
+ * if wanted. Keys are stored encrypted with the config and never returned
+ * (publicView masks them).
  */
 import { type Response, Router } from "express";
 import { z } from "zod";
 import { ENGINE_IDS, type EngineId } from "../core/config.js";
-import { ENGINES, engineAgentTemplate, engineAgents } from "../ai/engines.js";
+import { ENGINES, engineAgentTemplate, engineMemberName } from "../ai/engines.js";
+import { type ModelCatalog, modelCatalog } from "../ai/model-catalog.js";
 import { agentIdFor } from "../team/hr.js";
-import { type AgentSpec, TeamSchema } from "../team/team.js";
+import { type AgentSpec, EngineModelSchema, TeamSchema } from "../team/team.js";
+import { wantsRefresh } from "./ai.js";
 import { checkGeminiKey, checkOpenAiKey } from "../core/validate.js";
 import { configSecrets, makeRedactor } from "../tasks/worker.js";
 import type { IntegrationRouteDeps } from "./types.js";
@@ -22,17 +27,31 @@ const SAVE = z.object({
   /** Empty or absent: keep the saved key (changing the model only). */
   apiKey: z.string().max(500).optional(),
   /** Empty = the CLI's default. */
-  model: z
-    .string()
-    .trim()
-    .max(100)
-    .regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*$|^$/, "A model id is letters, digits and . _ : / -, like the CLI's --model takes.")
-    .optional(),
+  model: EngineModelSchema.optional(),
   /** Run the CLI where it has no sandbox (EngineConnection.allowUnsandboxed); absent: unchanged. */
   allowUnsandboxed: z.boolean().optional(),
 });
 
+/** POST /api/engines/:id/agent: a name (else "Codex", "Codex 2"…) and the model its CLI runs (else the engine's). */
+const ADD_AGENT = z
+  .object({
+    name: z.string().trim().min(1, "Give the agent a name.").max(40, "Names are at most 40 characters.").optional(),
+    engineModel: EngineModelSchema.optional(),
+  })
+  .strict();
+
 const CHECK: Record<EngineId, (key: string) => Promise<void>> = { codex: checkOpenAiKey, gemini: checkGeminiKey };
+
+/** `base`, or "base 2", "base 3"… when an agent already has that name (any case), at most 40 characters. */
+export function uniqueAgentName(base: string, agents: Pick<AgentSpec, "name">[]): string {
+  const taken = new Set(agents.map((a) => a.name.trim().toLowerCase()));
+  if (!taken.has(base.toLowerCase())) return base;
+  for (let n = 2; ; n++) {
+    const suffix = ` ${n}`;
+    const name = `${base.slice(0, 40 - suffix.length).trimEnd()}${suffix}`;
+    if (!taken.has(name.toLowerCase())) return name;
+  }
+}
 
 /** A refusal the owner reads, with its HTTP status. */
 class Refusal extends Error {
@@ -44,7 +63,7 @@ class Refusal extends Error {
   }
 }
 
-export function enginesRoutes(deps: IntegrationRouteDeps): Router {
+export function enginesRoutes(deps: IntegrationRouteDeps, catalog: ModelCatalog = modelCatalog): Router {
   const { configRepo, requireAdmin } = deps;
   const router = Router();
 
@@ -90,6 +109,13 @@ export function enginesRoutes(deps: IntegrationRouteDeps): Router {
     res.json({ ok: true });
   });
 
+  // The engine's models for the pickers: live from its vendor with the saved key, else the built-in list and why (ModelList).
+  router.get("/api/engines/:id/models", requireAdmin, async (req, res) => {
+    const id = engineOf(req.params.id, res);
+    if (!id) return;
+    res.json(await catalog.engineModels(await configRepo.load(true), id, { refresh: wantsRefresh(req.query) }));
+  });
+
   // Forgets the key, and turns running without a sandbox off (a later reconnect starts safe); the model stays. Agents set to this engine work as Claude meanwhile.
   router.post("/api/engines/:id/disconnect", requireAdmin, async (req, res) => {
     const id = engineOf(req.params.id, res);
@@ -100,19 +126,21 @@ export function enginesRoutes(deps: IntegrationRouteDeps): Router {
     res.json({ ok: true });
   });
 
-  // "Add Codex to the team": a ready-made coder that works through the engine (as POST /api/hr/agent adds HR).
+  // "Add a Codex agent": a ready-made coder that works through the engine (as POST /api/hr/agent adds HR). Any number of
+  // them, each with a name and id of its own ("Gemini", "Gemini 2"…) and, if given, a model of its own for the CLI.
   router.post("/api/engines/:id/agent", requireAdmin, async (req, res) => {
     const id = engineOf(req.params.id, res);
     if (!id) return;
+    const parsed = ADD_AGENT.safeParse(req.body ?? {});
+    if (!parsed.success) return void res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Invalid input." });
     const info = ENGINES[id];
     let agent: AgentSpec | undefined;
     try {
       await configRepo.update((c) => {
         if (!c.engines[id].apiKey) throw new Refusal(`Connect ${info.label} first.`, 400);
-        const existing = engineAgents(c.team, id)[0];
-        if (existing) throw new Refusal(`${existing.name} already works through ${info.label}.`, 409);
         if (c.team.agents.length >= MAX_TEAM_AGENTS) throw new Refusal(`A team can have at most ${MAX_TEAM_AGENTS} agents. Delete one first.`, 400);
-        const spec = engineAgentTemplate(id, agentIdFor(id === "codex" ? "Codex" : "Gemini", new Set(c.team.agents.map((a) => a.id))));
+        const name = uniqueAgentName(parsed.data.name ?? engineMemberName(id), c.team.agents);
+        const spec = engineAgentTemplate(id, agentIdFor(name, new Set(c.team.agents.map((a) => a.id))), { name, engineModel: parsed.data.engineModel ?? "" });
         c.team = TeamSchema.parse({ ...c.team, agents: [...c.team.agents, spec] });
         agent = spec;
       });

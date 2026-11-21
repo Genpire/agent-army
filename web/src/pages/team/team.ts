@@ -6,56 +6,93 @@
  */
 import type { SelectorOptionData } from "@astryxdesign/core/Selector";
 import { presetModelLabel, tierModels } from "../../lib/aiProviders";
-import { type Access, type AgentSpec, type AiProviderView, type Effort, EFFORT_OPTIONS, type PointerSpec, type PresetModel } from "../../lib/types";
+import type { PickerSpecial } from "../../lib/modelPicker";
+import type { ModelSource } from "../../lib/models";
+import {
+  type Access,
+  type AgentSpec,
+  type AiProviderId,
+  type AiProviderView,
+  type CatalogModel,
+  type Effort,
+  EFFORT_OPTIONS,
+  type PointerSpec,
+  type PresetModel,
+} from "../../lib/types";
 
 export const MAX_AGENTS = 30;
 
 // ---------- Models ----------
 
-const MODELS = [
-  { value: "claude-opus-5-5", label: "Opus 5.5", description: "claude-opus-5-5 · strongest" },
-  { value: "claude-sonnet-5-5", label: "Sonnet 5.5", description: "claude-sonnet-5-5 · half the price of Opus" },
-  { value: "claude-haiku-5-5", label: "Haiku 5.5", description: "claude-haiku-5-5 · far cheaper, for simple lookups" },
+/** Claude's models by id, for their names where no list is loaded (the agents table, HR, the office). */
+const MODELS: { value: string; label: string }[] = [
+  { value: "claude-fable-5-2", label: "Fable 5.2" },
+  { value: "claude-opus-5-5", label: "Opus 5.5" },
+  { value: "claude-sonnet-5-5", label: "Sonnet 5.5" },
+  { value: "claude-haiku-5-5", label: "Haiku 5.5" },
+  { value: "claude-fable-5-1", label: "Fable 5.1" },
+  { value: "claude-opus-5", label: "Opus 5" },
+  { value: "claude-opus-4-8", label: "Opus 4.8" },
+  { value: "claude-sonnet-5", label: "Sonnet 5" },
+  { value: "claude-sonnet-4-6", label: "Sonnet 4.6" },
+  { value: "claude-haiku-4-5", label: "Haiku 4.5" },
 ];
 
 /** "claude-sonnet-5-5" → "Sonnet 5.5"; other ids as they are. */
 export const modelLabel = (id: string): string => MODELS.find((m) => m.value === id)?.label ?? id;
 
 /**
- * The models a picker offers: Claude's (Anthropic, as always), or those of
- * the provider chat or repo tasks run on (GET /api/ai/providers).
+ * What the model pickers need of the provider the work runs on: where its
+ * models come from (Anthropic's, or the provider chat or repo tasks run on),
+ * and how to word its default and the models its list does not name.
  */
 export interface ModelChoices {
-  /** Anthropic: the Claude list and wording, exactly as before providers existed. */
+  /** Anthropic: Claude's models and wording, as before providers existed. */
   isClaude: boolean;
   /** "Kimi" */
   name: string;
-  options: SelectorOptionData[];
+  /** Whose list the pickers load (ModelPicker). */
+  source: ModelSource;
+  /** Models set under Integrations that its list may not have (a tier's id typed by hand). */
+  extra: CatalogModel[];
+  /** More words for its preset models, by id: the tier each suits. */
+  notes: Record<string, string>;
   /** What an empty model runs on: the provider's main model, e.g. "Kimi K3". */
   defaultLabel: string;
   /** How a saved model the list does not name runs. */
   describe: (id: string) => string;
 }
 
-export const CLAUDE_CHOICES: ModelChoices = { isClaude: true, name: "Claude", options: MODELS, defaultLabel: "", describe: () => "Set outside this page" };
+export const CLAUDE_CHOICES: ModelChoices = {
+  isClaude: true,
+  name: "Claude",
+  source: { kind: "provider", id: "anthropic" },
+  extra: [],
+  notes: {},
+  defaultLabel: "",
+  describe: () => "Typed by hand, or set outside this page",
+};
 
 const CLAUDE_ID_RE = /^(?:claude-)?(opus|sonnet|haiku|fable)(?:$|-|\[)/;
 const TIER_HINT: Record<PresetModel["tier"], string> = { opus: "the largest", sonnet: "balanced", haiku: "fast and cheap" };
 
-/** The provider's models for the pickers; Claude's when it is Anthropic (or not loaded yet). */
-export function providerChoices(p: AiProviderView | undefined): ModelChoices {
-  if (!p || p.kind === "anthropic") return CLAUDE_CHOICES;
+/** The models of provider `id` for the pickers; Claude's when it is Anthropic. `p` is its view, once loaded. */
+export function providerChoices(id: AiProviderId, p: AiProviderView | undefined): ModelChoices {
+  if (id === "anthropic") return CLAUDE_CHOICES;
+  const source: ModelSource = { kind: "provider", id };
+  if (!p) return { isClaude: false, name: "the provider", source, extra: [], notes: {}, defaultLabel: "the provider's main model", describe: () => "Set outside this page" };
   const tiers = tierModels(p);
-  const listed = p.models.map((m) => ({ value: m.id, label: m.label, description: `${m.id} · ${TIER_HINT[m.tier]}` }));
-  const typed = [...new Set(Object.values(tiers).filter((id) => id && !p.models.some((m) => m.id === id)))].map((id) => ({
-    value: id,
-    label: id,
+  const extra = [...new Set(Object.values(tiers).filter((m) => m && !p.models.some((x) => x.id === m)))].map((m) => ({
+    id: m,
+    label: m,
     description: "Set under Integrations, AI model",
   }));
   return {
     isClaude: false,
     name: p.short,
-    options: [...listed, ...typed],
+    source,
+    extra,
+    notes: Object.fromEntries(p.models.map((m) => [m.id, TIER_HINT[m.tier]])),
     defaultLabel: tiers.main ? presetModelLabel(p, tiers.main) : "the endpoint's default",
     describe: (id) => {
       const alias = id.toLowerCase().match(CLAUDE_ID_RE)?.[1];
@@ -67,32 +104,28 @@ export function providerChoices(p: AiProviderView | undefined): ModelChoices {
   };
 }
 
-/** The list, plus the saved value when it is a model the list does not name (set through the API, or on another provider). */
-function withCurrent(options: SelectorOptionData[], current: string, choices: ModelChoices): SelectorOptionData[] {
-  const known = options.some((o) => o.value === current);
-  return known || !current ? options : [...options, { value: current, label: modelLabel(current), description: choices.describe(current) }];
-}
+/** An agent's model picker's first choice: empty runs it on Pointer's model. */
+export const agentModelSpecials = (lead: string): PickerSpecial[] => [{ value: "", label: `Same as ${lead}`, description: `The model ${lead} runs on` }];
 
-/** An agent's model: empty runs it on Pointer's model. */
-export const agentModelOptions = (current: string, lead: string, choices: ModelChoices = CLAUDE_CHOICES): SelectorOptionData[] =>
-  withCurrent([{ value: "", label: `Same as ${lead}`, description: `The model ${lead} runs on` }, ...choices.options], current, choices);
+/** Pointer's chat model picker's (and a routed size's) first choice: empty falls back to the model under Integrations, not to Pointer. */
+export const chatModelSpecials = (claudeDefault: string, choices: ModelChoices = CLAUDE_CHOICES): PickerSpecial[] => [
+  choices.isClaude
+    ? {
+        value: "",
+        label: "Claude default",
+        description: claudeDefault ? `${modelLabel(claudeDefault)}, set under Integrations` : "The model set under Integrations, else the SDK default",
+      }
+    : { value: "", label: `${choices.name} default`, description: `${choices.defaultLabel}, the main model set under Integrations` },
+];
 
-/** Pointer's chat model (and a routed size's): empty falls back to the model under Integrations, not to Pointer. */
-export const chatModelOptions = (current: string, claudeDefault: string, choices: ModelChoices = CLAUDE_CHOICES): SelectorOptionData[] =>
-  withCurrent(
-    [
-      choices.isClaude
-        ? {
-            value: "",
-            label: "Claude default",
-            description: claudeDefault ? `${modelLabel(claudeDefault)}, set under Integrations` : "The model set under Integrations, else the SDK default",
-          }
-        : { value: "", label: `${choices.name} default`, description: `${choices.defaultLabel}, the main model set under Integrations` },
-      ...choices.options,
-    ],
-    current,
-    choices,
-  );
+/** An engine agent's model picker's first choice: empty runs the engine's own model (its Integrations pane). */
+export const engineModelSpecials = (engineName: string, engineModel: string): PickerSpecial[] => [
+  {
+    value: "",
+    label: `${engineName}'s model`,
+    description: engineModel ? `${engineModel}, set under Integrations, ${engineName}` : `The CLI's default, until one is set under Integrations, ${engineName}`,
+  },
+];
 
 // ---------- Effort ----------
 
@@ -212,6 +245,7 @@ export const NEW_AGENT: AgentDraft = {
   avatar: "",
   apps: [],
   engine: "claude",
+  engineModel: "",
 };
 
 /** The checks AgentSpecSchema runs, with the page's wording. Empty when the draft can be saved. */
@@ -249,6 +283,8 @@ export const toSpec = (id: string, d: AgentDraft): AgentSpec => ({
   avatar: d.avatar.trim(),
   apps: d.apps,
   engine: d.engine,
+  // The CLI's model means nothing for an agent on Claude.
+  engineModel: d.engine === "claude" ? "" : d.engineModel.trim(),
 });
 
 export type PointerErrors = Partial<Record<keyof PointerSpec, string>>;

@@ -53,13 +53,13 @@ export default function TeamPage() {
 
   const takenIds = useMemo(() => new Set(team.agents.map((a) => a.id)), [team.agents]);
 
-  // The model pickers offer the models of the providers chat and repo tasks run on (Claude's on Anthropic, without a request).
+  // The model pickers list the models of the providers chat and repo tasks run on (each picker loads its list when it opens).
   const onClaude = config.ai.chatProvider === "anthropic" && config.ai.taskProvider === "anthropic";
   const providers = useAiProviders(!onClaude);
   const choices = useMemo(
     () => ({
-      chat: config.ai.chatProvider === "anthropic" ? CLAUDE_CHOICES : providerChoices(providerById(providers.view, config.ai.chatProvider)),
-      task: config.ai.taskProvider === "anthropic" ? CLAUDE_CHOICES : providerChoices(providerById(providers.view, config.ai.taskProvider)),
+      chat: config.ai.chatProvider === "anthropic" ? CLAUDE_CHOICES : providerChoices(config.ai.chatProvider, providerById(providers.view, config.ai.chatProvider)),
+      task: config.ai.taskProvider === "anthropic" ? CLAUDE_CHOICES : providerChoices(config.ai.taskProvider, providerById(providers.view, config.ai.taskProvider)),
     }),
     [config.ai.chatProvider, config.ai.taskProvider, providers.view],
   );
