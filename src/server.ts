@@ -47,6 +47,7 @@ import { SCOUT_NEED_MAX_CHARS, findSkills } from "./skills/skill-scout.js";
 import { type FetchLike, SKILL_LIMITS, SkillLibrary, SkillsPluginCache, skillView } from "./skills/skills.js";
 import { buildManifest, manifestCreateUrl, slackClient, verifySlackSignature } from "./slack/slack.js";
 import { createStore } from "./core/store.js";
+import { detectPublicUrl, publicUrlWarning } from "./core/public-url.js";
 import { readTimeline } from "./tasks/task-events.js";
 import { TaskRepo } from "./tasks/tasks.js";
 import { SKILL_NAME_RE, TeamSchema } from "./team/team.js";
@@ -270,8 +271,11 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
   app.disable("x-powered-by");
   app.set("trust proxy", true);
 
-  // An empty or blank PUBLIC_URL is unset too: the request's own address is used.
-  const publicUrl = env.PUBLIC_URL?.trim() || undefined;
+  // PUBLIC_URL, else the platform's own address (Render, Railway, Fly.io…), else each request's (public-url.ts).
+  // An empty PUBLIC_URL is unset; one that is not an http(s) address without a path is ignored, with a warning.
+  const publicUrl = detectPublicUrl(env);
+  const publicUrlProblem = publicUrlWarning(env);
+  if (publicUrlProblem) console.warn(`[server] ${publicUrlProblem}`);
   const baseUrl = (req: Request) => (publicUrl ?? `${req.protocol}://${req.get("host")}`).replace(/\/+$/, "");
 
   // Sessions are signed with a key tied to the current password, so a new password signs everyone out.

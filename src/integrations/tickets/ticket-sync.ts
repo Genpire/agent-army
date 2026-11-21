@@ -1,6 +1,7 @@
 import type { Config, JiraProjectAutomation } from "../../core/config.js";
 import { type JiraTicketClient, jiraClientFor } from "../jira/jira.js";
 import { MondayClient } from "../monday/monday.js";
+import { detectPublicUrl } from "../../core/public-url.js";
 import type { Store } from "../../core/store.js";
 import { addEvent, currentPhase, plainLine, readTimeline, timelineKey } from "../../tasks/task-events.js";
 import { type Task, type TaskTicket, isWebTask } from "../../tasks/tasks.js";
@@ -274,10 +275,10 @@ export async function rememberConsoleUrl(store: Pick<Store, "get" | "put">, url:
   }
 }
 
-/** PUBLIC_URL, else the address saved by the web service; undefined when neither is known. */
+/** PUBLIC_URL or the platform's address (detectPublicUrl), else the address saved by the web service; undefined when neither is known. */
 export async function consoleBaseUrl(store: Pick<Store, "get">, env: NodeJS.ProcessEnv = process.env): Promise<string | undefined> {
-  const fromEnv = env.PUBLIC_URL?.trim().replace(/\/+$/, "");
-  if (fromEnv && URL_RE.test(fromEnv)) return fromEnv;
+  const fromEnv = detectPublicUrl(env);
+  if (fromEnv) return fromEnv;
   try {
     const saved = await store.get(CONSOLE_URL_KEY);
     const url = saved ? (JSON.parse(saved.toString("utf8")) as { url?: unknown }).url : undefined;
