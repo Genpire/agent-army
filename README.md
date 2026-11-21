@@ -11,7 +11,7 @@ Pointer, a self-hosted assistant for Slack and the web, leads a team of Claude a
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-[Run it in 5 minutes](#run-it-in-5-minutes) · [Try the demo](#try-the-demo) · [Screenshots](#screenshots) · [Deploy to Cloud Run](#google-cloud-run) · [Contributing](CONTRIBUTING.md)
+[Deploy anywhere](#deploy-anywhere) · [Try the demo](#try-the-demo) · [Screenshots](#screenshots) · [How it works](#how-it-works) · [Contributing](CONTRIBUTING.md)
 
 <img src="docs/screenshots/office-meeting.png" alt="The virtual office: every agent at their desk with a face and a name; Pointer, Sara and Omar meet around the table on a task while Kenji researches, and a card shows the task's step and what Omar is doing" width="100%">
 
@@ -31,22 +31,175 @@ Pointer, a self-hosted assistant for Slack and the web, leads a team of Claude a
 - **Humans stay in charge.** Agents only ever open pull requests; they never push to your branches or merge.
 - **Yours.** MIT licensed and self-hosted: your code, conversations and keys stay in your deployment. You pay only for the Claude API you use, with per-task budgets.
 
-## Run it in 5 minutes
+<a id="run-it-in-5-minutes"></a><a id="deploy"></a>
 
-You need Docker and an [Anthropic API key](https://console.anthropic.com). Slack, GitHub (or GitLab, Bitbucket) and the other integrations are optional: connect them later from the console.
+## Deploy anywhere
+
+Agent Army is one Docker image, `ghcr.io/genpire/agent-army`. It needs a container that stays on, a disk for its data, and about 8 GB of RAM to run 3 repo tasks at the same time (4 GB runs one at a time). Pick a host:
+
+| Where | How | Live in | Per month | Notes |
+| --- | --- | --- | --- | --- |
+| [Railway](#railway) | Button | 5–8 min | about $10–30, by usage | Fastest: the prebuilt image, with the keys and the HTTPS address made for you. |
+| [Render](#render) | Button | 15–25 min | $87–137 | Builds the repository's Dockerfile, so a fork deploys its own code; everything is in `render.yaml`. |
+| [A Linux server](#a-linux-server) | One command | 8–15 min | €9–48 for an 8 GB server | Cheapest, and all yours: Docker, the app and automatic HTTPS. |
+| [Fly.io](#flyio) | `fly.toml` and 5 commands | 12–20 min | about $54 | For the command line; Fly builds the image for you. |
+| [Google Cloud Run](#google-cloud-run) | Button or `deploy/gcp.sh` | 15–25 min | from about $53, plus tasks | Each repo task runs in its own container. |
+| [Your computer](#your-computer-docker) | `docker run` | 2 min | free | To try it. Slack needs a public HTTPS address. |
+| [Kubernetes, AWS, Azure](#kubernetes-aws-and-azure-experimental) | Helm, CloudFormation, Bicep | – | your cluster; about $101–123; about $46–152 | Experimental: not yet tested on a real account. |
+
+Minutes and prices are estimates for one always-on instance; Claude usage is billed separately, on your Anthropic key.
+
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template/TEMPLATE_CODE?utm_medium=integration&utm_source=button&utm_campaign=agent-army)
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/Genpire/agent-army)
+[![Open in Cloud Shell](https://gstatic.com/cloudssh/images/open-btn.svg)](https://shell.cloud.google.com/cloudshell/editor?cloudshell_git_repo=https%3A%2F%2Fgithub.com%2FGenpire%2Fagent-army&cloudshell_git_branch=main&cloudshell_workspace=.&cloudshell_tutorial=deploy%2Fgcp-tutorial.md)
+
+> **Not live yet:** the Railway button's `TEMPLATE_CODE` is a placeholder until a maintainer creates the template ([deploy/railway.md](deploy/railway.md)).
+
+**Any Linux server with 8 GB of RAM** (Docker and HTTPS included):
 
 ```bash
-docker run -d --name agent-army -p 8080:8080 -v agent-army-data:/data \
-  -e MASTER_KEY="$(openssl rand -base64 32)" ghcr.io/genpire/agent-army:latest
+curl -fsSL https://raw.githubusercontent.com/Genpire/agent-army/main/deploy/install.sh | sh
+```
+
+**Vercel and Netlify cannot host Agent Army.** They run short-lived functions: no process stays on between requests, there is no disk to keep data on, and Chromium doesn't fit in a function. Agent Army is one always-on process that keeps its queues in memory, runs repo tasks for hours as child processes, drives a headless Chromium and writes its data to a disk. (The team still checks your own apps' Vercel and Netlify preview deployments; this is only about where Agent Army itself runs.)
+
+### The first sign-in
+
+1. Open the deployment's address and create the admin account with the **setup token** (where to find it is below), then choose a password.
+2. On **Integrations → Claude**, paste your [Anthropic API key](https://console.anthropic.com).
+3. Open **Chat** and ask Pointer anything.
+4. To have the team change code, connect **GitHub**, **GitLab** or **Bitbucket** on the same page and ask for a change, for example "in owner/repo: add a dark mode toggle". It comes back as a pull request (a merge request on GitLab). Slack and the other integrations are optional: see [Onboarding](#onboarding-in-the-web-page).
+
+| Where | The setup token |
+| --- | --- |
+| Railway | The service → **Variables** → `SETUP_TOKEN`. |
+| Render | The service → **Environment** → `SETUP_TOKEN`. |
+| A Linux server | Printed at the end of the install; again: `sudo grep SETUP_TOKEN /opt/agent-army/.env`. |
+| Fly.io | Printed by the commands below; again: `fly ssh console --app <name> -C 'printenv SETUP_TOKEN'`. |
+| Google Cloud Run | Printed by `deploy/gcp.sh`; again: `gcloud secrets versions access latest --secret agent-army-setup-token --project <PROJECT>`. |
+| Docker | The `SETUP_TOKEN` you set, or, when unset, the one in the log: `docker logs agent-army 2>&1 \| grep setup`. |
+| Kubernetes | The command that `helm install` prints (it reads the release's Secret). |
+| AWS | Secrets Manager → `agent-army/setup-token` (the stack's `SetupTokenSecret` output links to it). |
+| Azure | The container app → **Settings** → **Secrets** → `setup-token`. |
+
+`MASTER_KEY` encrypts everything the deployment stores. Each option above creates it once and keeps it (on Azure you pass it yourself); never change it, or the stored data can't be read. The public address that Slack, GitHub and the other webhooks use is found by itself: Railway, Render, Fly.io and Azure name it, the server installer and `deploy/gcp.sh` set it, and otherwise it is each request's own address. Set `PUBLIC_URL` when you add a custom domain. A redeploy restarts the server, which stops the repo tasks that are running.
+
+### Railway
+
+Click **Deploy on Railway**, sign in with GitHub, choose the Hobby plan and **Deploy**. Railway runs the prebuilt image with a 5 GB volume at `/data`, generates `MASTER_KEY` and `SETUP_TOKEN`, and gives the service an `*.up.railway.app` address. It bills what the service uses: about $10–30 a month, and roughly $0.08 for each hour a repo task runs. To update, redeploy the service. The template is made in Railway, not from a file in this repo: [deploy/railway.md](deploy/railway.md) shows how, for the maintainers and for a fork that wants its own.
+
+### Render
+
+Click **Deploy to Render**, sign in, add a card and **Apply**. The Blueprint, [`render.yaml`](render.yaml), builds this repository's Dockerfile on Render (15–25 minutes the first time) and runs it on a `2c-8g` instance ($135) with a 10 GB disk at `/data` ($2.50), generating both keys. To run one task at a time on a `2c-4g` ($85), change the instance type, then set **Settings → Repo task limits → Tasks at the same time** to 1. Deploys are manual (**Manual Deploy**), so a push upstream never restarts your tasks.
+
+### A Linux server
+
+Create an Ubuntu or Debian server with 8 GB of RAM and a 40 GB disk, point a DNS A record at it, make sure ports 80 and 443 are open, then run on it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Genpire/agent-army/main/deploy/install.sh | sh
+```
+
+[`deploy/install.sh`](deploy/install.sh) installs Docker if it is missing, asks for the domain, and writes `/opt/agent-army`: `.env` (mode 600, with the keys), `compose.yaml` and a Caddyfile. It starts Agent Army behind [Caddy](https://caddyserver.com), which gets and renews a Let's Encrypt certificate, waits for HTTPS, and prints the address and the setup token (never the master key). Run it again to update: it pulls the newest image and keeps the keys, the settings and the data.
+
+- **Without questions**, for example as the server's cloud-init user data: `curl -fsSL …/install.sh | DOMAIN=army.example.com SETUP_TOKEN=a-long-random-string sh`.
+- **No domain:** leave it empty to use the server's IP address with a 6-day Let's Encrypt IP certificate. This is experimental; behind 1:1 NAT (Lightsail, EC2) pass `PUBLIC_IP=`.
+- **By hand:** the same files are in [`deploy/compose/`](deploy/compose).
+- **Servers that fit** (prices checked in November 2026): Hetzner CX33, €8.99 (EU); Lightsail 8 GB, $44 (open port 443 in its Networking tab); DigitalOcean 8 GB, $48.
+
+### Fly.io
+
+Fly has no deploy button; from a clone of this repository (or your fork), with [flyctl](https://fly.io/docs/flyctl/install/) logged in (`fly auth login`):
+
+```bash
+fly apps create <name>
+fly volumes create agent_army_data --app <name> --region iad --size 20 --yes
+SETUP_TOKEN="$(openssl rand -hex 18)"; echo "Setup token: $SETUP_TOKEN"
+fly secrets set --app <name> --stage MASTER_KEY="$(openssl rand -base64 32)" SETUP_TOKEN="$SETUP_TOKEN"
+fly deploy --app <name> --ha=false --wait-timeout 15m
+```
+
+Then open `https://<name>.fly.dev`. [`fly.toml`](fly.toml) runs one always-on Machine (`shared-cpu-4x`, 8 GB, about $54 a month with the volume) and puts the repo checkouts on the volume; it explains the bigger sizes. Update with `fly deploy --app <name> --ha=false`.
+
+### Google Cloud Run
+
+Click **Open in Cloud Shell** for a guided run of the script ([deploy/gcp-tutorial.md](deploy/gcp-tutorial.md)), or, with `gcloud` logged in:
+
+```bash
+PROJECT=your-gcp-project REGION=us-central1 ./deploy/gcp.sh
+```
+
+The script prints the URL and a one-time **setup token**. It creates a private bucket (encrypted config, memory, project notes and task records), two secrets, two least-privilege service accounts, the web service, and a Cloud Run Job that runs one container per task. Re-run it to update.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `PROJECT` | your gcloud default | GCP project. |
+| `REGION` | `us-central1` | Region for every resource. |
+| `NAME` | `agent-army` | Resource name prefix; the job is `<NAME>-worker`. |
+| `MIN_INSTANCES` | `0` | `1` keeps the web service warm. |
+
+The web service runs with 8 vCPU, 8 GiB (`SERVICE_CPU` / `SERVICE_MEMORY`) and **CPU always allocated** (Pointer keeps working after Slack has its HTTP 200, and the Agent SDK runs as a subprocess), as a **single instance** (per-thread queues and event dedupe live in memory). With the default `MIN_INSTANCES=0` it scales to zero when idle and the first message afterwards waits for a cold start. At this size an instance costs roughly $0.58 per hour while it is up (it stays up about 15 minutes after the last request), so `MIN_INSTANCES=1` would cost roughly $420 a month; lower `SERVICE_CPU` / `SERVICE_MEMORY` (e.g. 1 and 2Gi, about $53 a month warm) if you keep one warm. Claude usage is billed separately, capped per message and per task (see below). The worker job runs each task with 8 vCPU and 8 GiB (`JOB_CPU` / `JOB_MEMORY`), billed only while a task runs, for at most 3 hours (`JOB_TIMEOUT_MIN`, default 180): the team's own run stops after 50 minutes, and waiting for CI checks, fix rounds and publishing come after it.
+
+**Smoke test.** Once Claude is connected, check the deployment without Slack. This runs Pointer once inside the worker job, with the real config, team and memory. Repo tasks are disabled and nothing is posted to Slack.
+
+```bash
+gcloud run jobs execute agent-army-worker --region REGION \
+  --args=dist/smoke.js,"what is the last commit on owner/repo" --wait
+```
+
+The execution fails when Pointer returns an error. To read the reply, take the execution name the command prints (or find it with `gcloud run jobs executions list --job agent-army-worker --region REGION`):
+
+```bash
+gcloud logging read 'resource.type="cloud_run_job" AND resource.labels.job_name="agent-army-worker" AND labels."run.googleapis.com/execution_name"="EXECUTION_NAME"' \
+  --freshness 1h --order asc --format 'value(textPayload)'
+```
+
+The output is `--- reply ---`, the answer, then `--- cost: $… · error: …`. Logs can take a few seconds to appear. For a question that contains a comma, use gcloud's alternate delimiter: `--args='^;^dist/smoke.js;what changed, and why'`.
+
+<a id="anywhere-else-vm-laptop-kubernetes"></a>
+
+### Your computer (Docker)
+
+You need Docker. Keep `agent-army.env`: its key decrypts the data, so a new container must get the same one.
+
+```bash
+echo "MASTER_KEY=$(openssl rand -base64 32)" > agent-army.env
+docker run -d --name agent-army --restart unless-stopped --init --shm-size 1g \
+  -p 8080:8080 -v agent-army-data:/data --env-file agent-army.env ghcr.io/genpire/agent-army:latest
 docker logs agent-army 2>&1 | grep setup     # prints the one-time setup token
 ```
 
-1. Open http://localhost:8080, paste the setup token and choose an admin password.
-2. On **Integrations → Claude**, paste your API key.
-3. Open **Chat** and ask Pointer anything.
-4. To have the team change code, connect **GitHub**, **GitLab** or **Bitbucket** on the same page and ask for a change, for example "in owner/repo: add a dark mode toggle". It comes back as a pull request (a merge request on GitLab).
+Then open http://localhost:8080 and follow [the first sign-in](#the-first-sign-in). Or, from a clone, with Docker Compose (it builds the image from your code):
 
-The `MASTER_KEY` encrypts everything the deployment stores; the container keeps it across restarts, so recreate the container with the same key. To use Slack, the deployment must be reachable over public HTTPS: [deploy to Cloud Run](#google-cloud-run), or put a tunnel or TLS proxy in front (see [Anywhere else](#anywhere-else-vm-laptop-kubernetes)).
+```bash
+cp .env.example .env          # set MASTER_KEY=$(openssl rand -base64 32)
+docker compose up -d --build  # then open http://localhost:8080
+```
+
+Workers run as child processes of the server (`RUNNER=local`). Slack needs to reach `/slack/events` over public HTTPS, so put a TLS proxy or a tunnel in front, or use one of the hosts above. Smoke test: `docker compose exec agent-army node dist/smoke.js "introduce yourself"`.
+
+### Kubernetes, AWS and Azure (experimental)
+
+These are drafted and pass their linters (`helm lint`, `cfn-lint`, `bicep lint`) but have not yet been tested on a real cluster or account. If you try one, please open an issue with what happened.
+
+- **Kubernetes:** a Helm chart, [`deploy/helm/agent-army`](deploy/helm/agent-army): one replica with a persistent volume, the keys in a Secret that upgrades keep.
+
+  ```bash
+  helm install army ./deploy/helm/agent-army --namespace agent-army --create-namespace \
+    --set ingress.enabled=true --set ingress.host=army.example.com
+  ```
+
+  For TLS with cert-manager, see the top of its `values.yaml`.
+- **AWS:** a CloudFormation template, [`deploy/aws/agent-army.yaml`](deploy/aws/agent-army.yaml), for ECS Express Mode on Fargate (2 vCPU / 8 GB, data on EFS, keys in Secrets Manager); the deploy command is at the top of the file.
+- **Azure:** Container Apps, [`deploy/azure/main.bicep`](deploy/azure/main.bicep) (and `azuredeploy.json`), with the data on an Azure Files share. Replicas stop at 4 vCPU / 8 GiB, so run 1–2 tasks at a time. You pass the master key yourself and must pass the same one on every redeploy.
+
+### In a fork
+
+The buttons and commands above deploy this repository's code or image. To deploy your fork's:
+
+- **Image:** the release workflow publishes `ghcr.io/<you>/agent-army` (`latest` from `main`, and a version for each `vX.Y.Z` tag). A new GitHub package is **private** even in a public repository: after the first release run, open the package on GitHub → **Package settings** → **Change visibility** → **Public**. Then use your image: `AGENT_ARMY_IMAGE=ghcr.io/<you>/agent-army:latest` for the server installer, `image =` in `fly.toml`.
+- **Render and Cloud Shell:** put your fork's URL in the buttons' links (`repo=` and `cloudshell_git_repo=`).
+- **Railway:** a template deploys its own source, so make your own ([deploy/railway.md](deploy/railway.md)).
 
 ## Try the demo
 
@@ -97,50 +250,6 @@ one isolated worker per task
 GitHub: review or /pointer comment on the team's PR ──webhook──► follow-up task in the same thread or conversation
 ```
 
-## Deploy
-
-### Google Cloud Run
-
-```bash
-PROJECT=your-gcp-project REGION=us-central1 ./deploy/gcp.sh
-```
-
-The script prints the URL and a one-time **setup token**. It creates a private bucket (encrypted config, memory, project notes and task records), two secrets, two least-privilege service accounts, the web service, and a Cloud Run Job that runs one container per task. Re-run it to update.
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `PROJECT` | your gcloud default | GCP project. |
-| `REGION` | `us-central1` | Region for every resource. |
-| `NAME` | `agent-army` | Resource name prefix; the job is `<NAME>-worker`. |
-| `MIN_INSTANCES` | `0` | `1` keeps the web service warm. |
-
-The web service runs with 8 vCPU, 8 GiB (`SERVICE_CPU` / `SERVICE_MEMORY`) and **CPU always allocated** (Pointer keeps working after Slack has its HTTP 200, and the Agent SDK runs as a subprocess), as a **single instance** (per-thread queues and event dedupe live in memory). With the default `MIN_INSTANCES=0` it scales to zero when idle and the first message afterwards waits for a cold start. At this size an instance costs roughly $0.58 per hour while it is up (it stays up about 15 minutes after the last request), so `MIN_INSTANCES=1` would cost roughly $420 a month; lower `SERVICE_CPU` / `SERVICE_MEMORY` (e.g. 1 and 2Gi, about $55 a month warm) if you keep one warm. Claude usage is billed separately, capped per message and per task (see below). The worker job runs each task with 8 vCPU and 8 GiB (`JOB_CPU` / `JOB_MEMORY`), billed only while a task runs, for at most 3 hours (`JOB_TIMEOUT_MIN`, default 180): the team's own run stops after 50 minutes, and waiting for CI checks, fix rounds and publishing come after it.
-
-**Smoke test.** Once Claude is connected, check the deployment without Slack. This runs Pointer once inside the worker job, with the real config, team and memory. Repo tasks are disabled and nothing is posted to Slack.
-
-```bash
-gcloud run jobs execute agent-army-worker --region REGION \
-  --args=dist/smoke.js,"what is the last commit on owner/repo" --wait
-```
-
-The execution fails when Pointer returns an error. To read the reply, take the execution name the command prints (or find it with `gcloud run jobs executions list --job agent-army-worker --region REGION`):
-
-```bash
-gcloud logging read 'resource.type="cloud_run_job" AND resource.labels.job_name="agent-army-worker" AND labels."run.googleapis.com/execution_name"="EXECUTION_NAME"' \
-  --freshness 1h --order asc --format 'value(textPayload)'
-```
-
-The output is `--- reply ---`, the answer, then `--- cost: $… · error: …`. Logs can take a few seconds to appear. For a question that contains a comma, use gcloud's alternate delimiter: `--args='^;^dist/smoke.js;what changed, and why'`.
-
-### Anywhere else (VM, laptop, Kubernetes)
-
-```bash
-cp .env.example .env          # set MASTER_KEY=$(openssl rand -base64 32)
-docker compose up -d --build  # then open http://localhost:8080
-```
-
-Workers run as child processes of the server (`RUNNER=local`). Slack needs to reach `/slack/events` over public HTTPS, so put a TLS proxy or tunnel in front. If `SETUP_TOKEN` is unset, the token is printed in the container log. Smoke test: `docker compose exec agent-army node dist/smoke.js "introduce yourself"`.
-
 ## Onboarding (in the web page)
 
 1. **Admin account**: paste the setup token, choose a password.
@@ -155,7 +264,7 @@ Workers run as child processes of the server (`RUNNER=local`). Slack needs to re
 
 Every credential is verified before it is saved, stored encrypted (AES-256-GCM with `MASTER_KEY`), and never sent back to the browser.
 
-**Forgot the admin password?** On the sign-in page, choose **Forgot your password?** and paste the setup token to set a new one. On Cloud Run the token is in Secret Manager: `gcloud secrets versions access latest --secret <NAME>-setup-token --project <PROJECT>` (`agent-army-setup-token` by default). Elsewhere it is the `SETUP_TOKEN` you set, or, when unset, the one printed in the server log at startup (`docker logs agent-army 2>&1 | grep setup`). A new password, from a reset or from **Settings → Admin password**, signs out every other session.
+**Forgot the admin password?** On the sign-in page, choose **Forgot your password?** and paste the setup token to set a new one. [The first sign-in](#the-first-sign-in) shows where each host keeps it; on Cloud Run it is in Secret Manager: `gcloud secrets versions access latest --secret <NAME>-setup-token --project <PROJECT>` (`agent-army-setup-token` by default). Elsewhere it is the `SETUP_TOKEN` you set, or, when unset, the one printed in the server log at startup (`docker logs agent-army 2>&1 | grep setup`). A new password, from a reset or from **Settings → Admin password**, signs out every other session.
 
 ## AI providers
 
