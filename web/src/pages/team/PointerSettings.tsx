@@ -11,6 +11,7 @@ import { TextArea } from "@astryxdesign/core/TextArea";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { VStack } from "@astryxdesign/core/VStack";
 import { type ReactNode, useState } from "react";
+import { ModelPicker } from "../../components/ModelPicker";
 import type { PointerSpec } from "../../lib/types";
 import { useAction } from "../../lib/useAction";
 import {
@@ -20,7 +21,7 @@ import {
   SIZE_INFO,
   TASK_SIZE_OPTIONS,
   type TaskSize,
-  chatModelOptions,
+  chatModelSpecials,
   fieldStatus,
   hasErrors,
   isEffort,
@@ -161,11 +162,16 @@ function RuntimeRow({ pointer, claudeModel, chatModels = CLAUDE_CHOICES, onSave 
     <SettingsRow
       title="Model, effort and limits"
       description="Higher effort thinks longer: better on hard work, slower, and more credit. The limits cap one reply in Slack; repo tasks use the limits under Projects.">
-      <Selector
+      <ModelPicker
         label="Chat model"
-        options={chatModelOptions(row.draft.model, claudeModel, chatModels)}
+        source={chatModels.source}
         value={row.draft.model}
         onChange={row.set("model")}
+        specials={chatModelSpecials(claudeModel, chatModels)}
+        extra={chatModels.extra}
+        modelNotes={chatModels.notes}
+        describeUnknown={chatModels.describe}
+        maxLength={100}
         description={
           chatModels.isClaude
             ? "For replies in Slack. Sonnet 5.5 costs half as much as Opus 5.5 and is plenty for most chat."
@@ -259,12 +265,17 @@ function RoutingRow({ pointer, claudeModel, taskModels = CLAUDE_CHOICES, onSave 
               {SIZE_INFO[size].description}
             </Text>
           </VStack>
-          <Grid columns={{ minWidth: 200, max: 2 }} gap={4}>
-            <Selector
+          <Grid columns={{ minWidth: 200, max: 2 }} gap={4} align="start">
+            <ModelPicker
               label={`${SIZE_INFO[size].label} task model`}
-              options={chatModelOptions(draft[size].model, claudeModel, taskModels)}
+              source={taskModels.source}
               value={draft[size].model}
               onChange={(v) => setRoute(size, { model: v })}
+              specials={chatModelSpecials(claudeModel, taskModels)}
+              extra={taskModels.extra}
+              modelNotes={taskModels.notes}
+              describeUnknown={taskModels.describe}
+              maxLength={100}
             />
             <Selector
               label={`${SIZE_INFO[size].label} task effort`}

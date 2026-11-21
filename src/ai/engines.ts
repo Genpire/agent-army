@@ -6,7 +6,10 @@
  *
  * The CLIs run from an in-process MCP server ("engines"), one tool per engine
  * and mode: `<engine>_run` for agents that change things, `<engine>_run_read_only`
- * for agents that only look. An engine runs only inside its own sandbox (Codex,
+ * for agents that only look. An agent with a model of its own for the CLI
+ * (AgentSpec.engineModel) gets a tool of its own, `<engine>_run_as_<agent>` or
+ * `<engine>_read_as_<agent>`, which runs the CLI with that --model; the others
+ * share the engine's tools and its model. An engine runs only inside its own sandbox (Codex,
  * where the container allows it) or when the owner allowed it to run without
  * one (EngineConnection.allowUnsandboxed; Gemini CLI has none here). Unsandboxed,
  * its commands run as the worker's user, outside the shell guard: they can read
@@ -104,6 +107,13 @@ export const engineMode = (agent: Pick<AgentSpec, "access">): EngineMode => (age
 const toolBase = (id: EngineId, mode: EngineMode) => (mode === "write" ? `${id}_run` : `${id}_run_read_only`);
 /** The tool an agent calls, e.g. mcp__engines__codex_run. */
 export const engineToolName = (id: EngineId, mode: EngineMode) => `mcp__${ENGINES_SERVER}__${toolBase(id, mode)}`;
+/** The tool of an agent with its own model: agent ids have no "_", so these never meet the shared names (at most 60 characters). */
+const agentToolBase = (id: EngineId, mode: EngineMode, agentId: string) => `${id}_${mode === "write" ? "run" : "read"}_as_${agentId}`;
+/** The tool an agent with its own engine model calls, e.g. mcp__engines__gemini_run_as_gemini-2. */
+export const agentEngineToolName = (id: EngineId, mode: EngineMode, agentId: string) => `mcp__${ENGINES_SERVER}__${agentToolBase(id, mode, agentId)}`;
+/** The tool an engine agent calls: its own when it has a model of its own, else the engine's for its mode. */
+export const engineToolFor = (id: EngineId, agent: Pick<AgentSpec, "id" | "access" | "engineModel">) =>
+  agent.engineModel ? agentEngineToolName(id, engineMode(agent), agent.id) : engineToolName(id, engineMode(agent));
 
 export const DEFAULT_TIMEOUT_MIN = 20;
 export const MAX_TIMEOUT_MIN = 60;
@@ -131,10 +141,13 @@ const BACKSTOP_KILL_AFTER = "10s";
 
 // ---------- The ready-made team members (POST /api/engines/:id/agent) ----------
 
-/** A new team member that works through `id`, with a unique agent id (the caller checks the team's limits). */
-export function engineAgentTemplate(id: EngineId, agentId: string): AgentSpec {
+/** The name a ready-made member starts from: "Codex", "Gemini". */
+export const engineMemberName = (id: EngineId) => (id === "codex" ? "Codex" : "Gemini");
+
+/** A new team member that works through `id`, with a unique agent id (the caller checks the team's limits), optionally named and on a model of its own. */
+export function engineAgentTemplate(id: EngineId, agentId: string, o: { name?: string; engineModel?: string } = {}): AgentSpec {
   const info = ENGINES[id];
-  const name = id === "codex" ? "Codex" : "Gemini";
+  const name = o.name ?? engineMemberName(id);
   return {
     id: agentId,
     name,
@@ -154,6 +167,7 @@ export function engineAgentTemplate(id: EngineId, agentId: string): AgentSpec {
     avatar: "",
     apps: [],
     engine: id,
+    engineModel: o.engineModel ?? "",
   };
 }
 
@@ -905,11 +919,11 @@ export async function probeCodexSandbox(command: string, root: string): Promise<
 
 const names = (agents: AgentSpec[]) => agents.map((a) => a.name).join(", ");
 
-/** The subagent of an agent that works through an engine: it hands the work over and checks it. */
+/** The subagent of an agent that works through an engine: it hands the work over and checks it (through its own tool when it has a model of its own). */
 export function engineAgentDefinition(agent: AgentSpec, base: AgentDefinition, id: EngineId): AgentDefinition {
   const info = ENGINES[id];
   const mode = engineMode(agent);
-  const toolName = engineToolName(id, mode);
+  const toolName = engineToolFor(id, agent);
   const bash = agent.access !== "read";
   const prompt = `You are ${agent.name}, the team's ${agent.role}. You work through ${info.label}, ${info.vendor}'s coding agent, which runs in the task's checkout${mode === "read" ? " read-only" : " and can read, edit files and run commands there"}. ${info.label} does the work; you hand it the assignment and check what it did.
 
@@ -936,7 +950,10 @@ ${base.prompt}`;
 /** The orchestrator's rule: which agents work through which CLI. */
 function enginePromptRule(groups: { id: EngineId; agents: AgentSpec[] }[]): string {
   const lines = groups.flatMap(({ id, agents }) =>
-    agents.map((a) => `- ${a.id} (${a.name}, ${a.role}) works through ${ENGINES[id].label} and ${engineMode(a) === "read" ? "looks only" : "changes files"}.`),
+    agents.map(
+      (a) =>
+        `- ${a.id} (${a.name}, ${a.role}) works through ${ENGINES[id].label}${a.engineModel ? ` on ${a.engineModel}` : ""} and ${engineMode(a) === "read" ? "looks only" : "changes files"}.`,
+    ),
   );
   return [
     "Coding agent CLIs: these agents hand their assignment to a coding agent CLI that works in the checkout like any coding agent (it reads code, edits files and runs commands), then check the result and report back.",
@@ -948,7 +965,7 @@ function enginePromptRule(groups: { id: EngineId; agents: AgentSpec[] }[]): stri
 /** Undefined when no enabled agent uses a connected engine. */
 export async function repoTaskEngines(config: Config, deps: EngineDeps): Promise<RepoTaskEngines | undefined> {
   const usedBy = (id: EngineId) => enabledAgents(config.team).filter((a) => a.engine === id);
-  const active: { id: EngineId; runner: EngineRunner; agents: AgentSpec[] }[] = [];
+  const active: { id: EngineId; runner: EngineRunner; makeRunner: (model: string) => EngineRunner; agents: AgentSpec[] }[] = [];
   let root: string | undefined;
   const privateRoot = async () => {
     root ??= await mkdtemp(join(deps.workRoot, "engines-"));
@@ -970,14 +987,17 @@ export async function repoTaskEngines(config: Config, deps: EngineDeps): Promise
       continue;
     }
     const options: RunnerOptions = { command, key: conn.apiKey, model: conn.model, repoDir: deps.repoDir, allowUnsandboxed: conn.allowUnsandboxed };
-    let runner: EngineRunner;
+    let makeRunner: (model: string) => EngineRunner;
     let sandboxed = false;
     if (id === "codex") {
       sandboxed = await probeCodexSandbox(command, await privateRoot());
-      runner = codexRunner({ ...options, sandboxWorks: sandboxed });
+      makeRunner = (model) => codexRunner({ ...options, model, sandboxWorks: sandboxed });
     } else {
-      runner = geminiRunner({ ...options, systemSettings: deps.geminiSettings ?? { path: GEMINI_SYSTEM_SETTINGS_PATH, checkOwner: true } });
+      const systemSettings = deps.geminiSettings ?? { path: GEMINI_SYSTEM_SETTINGS_PATH, checkOwner: true };
+      makeRunner = (model) => geminiRunner({ ...options, model, systemSettings });
     }
+    // The engine's own model; an agent with an engineModel gets a runner of its own with that one (below).
+    const runner = makeRunner(conn.model);
     // What would refuse a run (no sandbox and not allowed, the image, the checkout's own settings): those agents work as Claude, as they could not hand their work over.
     const refused = new Map<string, AgentSpec[]>();
     const usable: AgentSpec[] = [];
@@ -994,7 +1014,7 @@ export async function repoTaskEngines(config: Config, deps: EngineDeps): Promise
     if (!usable.length) continue;
     if (id === "codex") deps.note(sandboxed ? "Codex runs in its own sandbox." : "Codex runs without its sandbox, as the owner allows: the task container is the only boundary.");
     else deps.note("Gemini CLI runs with no sandbox, as the owner allows: the task container is the only boundary.");
-    active.push({ id, runner, agents: usable });
+    active.push({ id, runner, makeRunner, agents: usable });
   }
   if (!active.length) return undefined;
 
@@ -1006,36 +1026,55 @@ export async function repoTaskEngines(config: Config, deps: EngineDeps): Promise
     task: z.string().trim().min(1).max(TASK_MAX_CHARS).describe("The whole assignment, self-contained: the goal, files, constraints and how to check the result"),
     timeoutMin: z.number().int().min(1).max(MAX_TIMEOUT_MIN).optional().describe(`Minutes before the run is stopped (default ${DEFAULT_TIMEOUT_MIN})`),
   };
-  const tools = active.flatMap(({ id, runner, agents }) => {
+  /** One run tool: the engine's shared one for a mode (the engine's model), or an agent's own (its model). */
+  const runTool = (id: EngineId, name: string, mode: EngineMode, runner: EngineRunner) => {
     const info = ENGINES[id];
-    const modes = [...new Set(agents.map(engineMode))];
-    return modes.map((mode) =>
-      tool(
-        toolBase(id, mode),
-        mode === "read"
-          ? `Hand an assignment to ${info.label} (${info.vendor}'s coding agent), read-only: it reads and searches the task's checkout and answers, without changing files. Send the whole assignment in one call. Returns its final message and the state of the checkout.`
-          : `Hand an assignment to ${info.label} (${info.vendor}'s coding agent), which works in the task's checkout: reads code, edits files, runs commands. Send the whole assignment in one call. Returns what it did: the files changed (git status, diff stat), its final message, and any failure.`,
-        input,
-        async (args, extra) => {
-          const signal = (extra as { signal?: AbortSignal } | undefined)?.signal;
-          const result = await runEngine(runner, { task: args.task, mode, timeoutMin: args.timeoutMin ?? DEFAULT_TIMEOUT_MIN, deps, root: engineRoot, gitHome, signal });
-          return { content: [{ type: "text" as const, text: result.text }], ...(result.ok ? {} : { isError: true }) };
-        },
-        { annotations: { readOnlyHint: mode === "read", destructiveHint: mode === "write", openWorldHint: true }, alwaysLoad: true },
-      ),
+    const on = runner.model ? ` It runs ${runner.model}.` : "";
+    return tool(
+      name,
+      mode === "read"
+        ? `Hand an assignment to ${info.label} (${info.vendor}'s coding agent), read-only: it reads and searches the task's checkout and answers, without changing files.${on} Send the whole assignment in one call. Returns its final message and the state of the checkout.`
+        : `Hand an assignment to ${info.label} (${info.vendor}'s coding agent), which works in the task's checkout: reads code, edits files, runs commands.${on} Send the whole assignment in one call. Returns what it did: the files changed (git status, diff stat), its final message, and any failure.`,
+      input,
+      async (args, extra) => {
+        const signal = (extra as { signal?: AbortSignal } | undefined)?.signal;
+        const result = await runEngine(runner, { task: args.task, mode, timeoutMin: args.timeoutMin ?? DEFAULT_TIMEOUT_MIN, deps, root: engineRoot, gitHome, signal });
+        return { content: [{ type: "text" as const, text: result.text }], ...(result.ok ? {} : { isError: true }) };
+      },
+      { annotations: { readOnlyHint: mode === "read", destructiveHint: mode === "write", openWorldHint: true }, alwaysLoad: true },
     );
-  });
+  };
 
-  const byAgent = new Map(active.flatMap(({ id, agents }) => agents.map((a) => [a.id, id] as const)));
+  const tools: ReturnType<typeof runTool>[] = [];
+  const allToolNames: string[] = [];
+  /** Each engine agent of this task: its engine and the tool it calls. */
+  const byAgent = new Map<string, { id: EngineId; toolName: string }>();
+  for (const { id, runner, makeRunner, agents } of active) {
+    // The engine's shared tools, one per mode its agents on the engine's own model need.
+    const shared = agents.filter((a) => !a.engineModel);
+    for (const mode of [...new Set(shared.map(engineMode))]) {
+      tools.push(runTool(id, toolBase(id, mode), mode, runner));
+      allToolNames.push(engineToolName(id, mode));
+    }
+    // An agent on a model of its own gets its own tool and runner: two agents on one engine can each run another model.
+    for (const a of agents.filter((x) => x.engineModel)) {
+      const mode = engineMode(a);
+      tools.push(runTool(id, agentToolBase(id, mode, a.id), mode, makeRunner(a.engineModel)));
+      allToolNames.push(agentEngineToolName(id, mode, a.id));
+    }
+    for (const a of agents) byAgent.set(a.id, { id, toolName: engineToolFor(id, a) });
+  }
+
   return {
     servers: {
       [ENGINES_SERVER]: createSdkMcpServer({ name: ENGINES_SERVER, version: "1.0.0", tools, alwaysLoad: true, timeout: (MAX_TIMEOUT_MIN + 5) * 60_000 }),
     },
     agentDefinition: (agent, base) => {
-      const id = byAgent.get(agent.id);
-      return id && agent.engine === id ? engineAgentDefinition(agent, base, id) : undefined;
+      const entry = byAgent.get(agent.id);
+      // Only as the task set it up: the same engine, and the tool it has (a changed model would have none).
+      return entry && agent.engine === entry.id && engineToolFor(entry.id, agent) === entry.toolName ? engineAgentDefinition(agent, base, entry.id) : undefined;
     },
-    allToolNames: active.flatMap(({ id, agents }) => [...new Set(agents.map(engineMode))].map((mode) => engineToolName(id, mode))),
+    allToolNames,
     promptRule: enginePromptRule(active),
   };
 }

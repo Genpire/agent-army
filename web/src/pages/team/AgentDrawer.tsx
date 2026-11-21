@@ -17,6 +17,7 @@ import { TextInput } from "@astryxdesign/core/TextInput";
 import { VStack } from "@astryxdesign/core/VStack";
 import { type ReactNode, useMemo, useState } from "react";
 import { ConfirmButton } from "../../components/ConfirmButton";
+import { ModelPicker } from "../../components/ModelPicker";
 import { type AgentEngine, ENGINE_NAME, type EngineId, isAgentEngine } from "../../lib/engines";
 import { href } from "../../lib/router";
 import { useConfig } from "../../lib/state";
@@ -34,7 +35,8 @@ import {
   type AgentDraft,
   NEW_AGENT,
   agentErrors,
-  agentModelOptions,
+  agentModelSpecials,
+  engineModelSpecials,
   fieldStatus,
   hasErrors,
   isAccess,
@@ -185,6 +187,23 @@ function EngineField({ value, onChange }: { value: AgentEngine; onChange: (engin
   );
 }
 
+/** The model the agent's coding agent CLI runs for it (--model), from the engine's list; empty runs the engine's own. */
+function EngineModelField({ engine, value, onChange }: { engine: EngineId; value: string; onChange: (model: string) => void }) {
+  const { config } = useConfig();
+  const name = ENGINE_NAME[engine];
+  return (
+    <ModelPicker
+      label={`${name} model`}
+      source={{ kind: "engine", id: engine }}
+      value={value}
+      onChange={onChange}
+      specials={engineModelSpecials(name, config.engines[engine].model)}
+      description={`The model ${name} runs for this agent. Agents on ${name} can each run a different one.`}
+      isOptional
+    />
+  );
+}
+
 /** The connected apps (Integrations, Apps) this agent may use. Apps that are off are listed but marked. */
 function AppsField({ value, onChange, lead }: { value: string[]; onChange: (apps: string[]) => void; lead: string }) {
   const { config } = useConfig();
@@ -332,21 +351,30 @@ function AgentForm({ target, takenIds, lead, models = CLAUDE_CHOICES, onClose, o
 
             <Divider />
             <FormSection title="Engine" description="Who does its work in repo tasks. With Codex or Gemini CLI, the agent hands its assignment to that coding agent, which works in the checkout, and checks what it did. In chat it works like any other agent.">
-              <EngineField value={draft.engine} onChange={set("engine")} />
+              {/* Another engine has other models: its model starts over at the engine's own. */}
+              <EngineField value={draft.engine} onChange={(engine) => setDraft((d) => ({ ...d, engine, engineModel: engine === d.engine ? d.engineModel : "" }))} />
+              {draft.engine !== "claude" && <EngineModelField engine={draft.engine} value={draft.engineModel} onChange={set("engineModel")} />}
             </FormSection>
 
             <Divider />
             <FormSection title="Model and effort">
-              <Grid columns={{ minWidth: 200, max: 2 }} gap={4} align="end">
-                <Selector
-                  label="Model"
-                  options={agentModelOptions(draft.model, lead, models)}
+              <Grid columns={{ minWidth: 200, max: 2 }} gap={4} align="start">
+                <ModelPicker
+                  label={draft.engine === "claude" ? "Model" : "Claude model"}
+                  source={models.source}
                   value={draft.model}
                   onChange={set("model")}
+                  specials={agentModelSpecials(lead)}
+                  extra={models.extra}
+                  modelNotes={models.notes}
+                  describeUnknown={models.describe}
+                  maxLength={100}
                   description={
-                    models.isClaude
-                      ? "Sonnet 5.5 costs half as much as Opus 5.5; Haiku 5.5 is far cheaper for simple lookups."
-                      : `Repo tasks run on ${models.name}; a Claude model runs on ${models.name}'s model of the same size.`
+                    draft.engine !== "claude"
+                      ? `The model of the agent that hands the work to ${ENGINE_NAME[draft.engine]} and checks it.`
+                      : models.isClaude
+                        ? "Sonnet 5.5 costs half as much as Opus 5.5; Haiku 5.5 is far cheaper for simple lookups."
+                        : `Repo tasks run on ${models.name}; a Claude model runs on ${models.name}'s model of the same size.`
                   }
                 />
                 <Selector

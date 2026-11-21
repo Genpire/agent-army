@@ -1,7 +1,8 @@
 /**
  * AI provider admin routes (/api/ai/…): the presets with each one's saved
  * connection (secrets masked), saving and testing a connection, removing one,
- * and choosing the providers chat and repo tasks run on. Anthropic's key
+ * choosing the providers chat and repo tasks run on, and each provider's
+ * models (live from the provider where it can, model-catalog.ts). Anthropic's key
  * stays in config.anthropic (POST /api/anthropic keeps working); the others
  * live in config.ai.providers. See ai-providers.ts and ai-presets.ts.
  */
@@ -21,6 +22,7 @@ import {
   providerProblem,
   testConnection,
 } from "../ai/ai-providers.js";
+import { type ModelCatalog, modelCatalog } from "../ai/model-catalog.js";
 import { AI_PROVIDER_IDS, type AiProviderId, type Config, MODEL_TIERS, type ModelTier, mask } from "../core/config.js";
 import { configSecrets, makeRedactor } from "../tasks/worker.js";
 import type { IntegrationRouteDeps } from "./types.js";
@@ -184,7 +186,13 @@ function store(c: Config, id: AiProviderId, conn: ConnectionValues, checkedAt: s
   c.ai.providers[id] = { secrets: conn.secrets, settings: conn.settings, models: conn.models, ...(checkedAt ? { checkedAt } : {}) };
 }
 
-export function aiRoutes(deps: IntegrationRouteDeps, check: ConnectionTestDeps = {}): Router {
+/** `?refresh=1` reads a model list again instead of the one kept from the last hour. */
+export const wantsRefresh = (query: unknown): boolean => {
+  const value = typeof query === "object" && query !== null ? (query as Record<string, unknown>).refresh : undefined;
+  return value === "1" || value === "true";
+};
+
+export function aiRoutes(deps: IntegrationRouteDeps, check: ConnectionTestDeps = {}, catalog: ModelCatalog = modelCatalog): Router {
   const { configRepo, requireAdmin } = deps;
   const router = Router();
 
@@ -201,6 +209,13 @@ export function aiRoutes(deps: IntegrationRouteDeps, check: ConnectionTestDeps =
 
   router.get("/api/ai/providers", requireAdmin, async (_req, res) => {
     res.json(providersView(await configRepo.load(true)));
+  });
+
+  // The provider's models for the pickers: live with the saved connection, else the built-in list and why (ModelList).
+  router.get("/api/ai/providers/:id/models", requireAdmin, async (req, res) => {
+    const id = providerParam(req.params.id);
+    if (!id) return void res.status(404).json({ error: "Unknown AI provider." });
+    res.json(await catalog.providerModels(await configRepo.load(true), id, { refresh: wantsRefresh(req.query) }));
   });
 
   // Saves a connection: checked against the preset's fields, then tested with the provider (unless SKIP_VALIDATION=1).
