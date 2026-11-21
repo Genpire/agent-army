@@ -44,6 +44,11 @@ export interface Task {
   error?: string;
   /** Live progress while the team works, saved by the worker; Pointer reads it for status questions. */
   progress?: ProgressSnapshot;
+  /**
+   * Where its worker runs: a child process of the web service (local), which a restart of the service stops, or
+   * a Cloud Run job, which goes on. Absent on tasks saved before it existed: the service's runner then.
+   */
+  runner?: "local" | "cloudrun";
   /** What started the task: a Slack request (default), the admin console, or feedback on its pull request. */
   trigger?: "slack" | "web" | "review" | "monday" | "jira";
   /** The pull request's checks after the last push (see ci.ts), when the task waited for them. */

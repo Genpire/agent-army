@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { totalmem } from "node:os";
 import { fileURLToPath } from "node:url";
+import { WorkerPids } from "./restart.js";
 import { encodeTaskPayload } from "./tasks.js";
 
 /**
@@ -15,6 +16,8 @@ import { encodeTaskPayload } from "./tasks.js";
 export interface Runner {
   readonly kind: "local" | "cloudrun";
   launch(taskId: string): Promise<void>;
+  /** The server is stopping: start no more workers (queued tasks are marked interrupted at the next start). */
+  stop?(): void;
 }
 
 export type RunnerKind = Runner["kind"];
@@ -105,11 +108,14 @@ export function parallelCapNote(cap: ParallelCap | undefined, env: NodeJS.Proces
 export class LocalRunner implements Runner {
   readonly kind = "local" as const;
   private running = 0;
+  private stopped = false;
   private readonly queue: string[] = [];
 
   constructor(
     private readonly maxParallel: () => number,
     private readonly workerPath = fileURLToPath(new URL("../worker.js", import.meta.url)),
+    /** Each worker's process, so the next start can tell which tasks lost theirs (restart.ts). */
+    private readonly workers = new WorkerPids(),
   ) {}
 
   async launch(taskId: string): Promise<void> {
@@ -117,15 +123,21 @@ export class LocalRunner implements Runner {
     this.drain();
   }
 
+  stop(): void {
+    this.stopped = true;
+  }
+
   private drain(): void {
-    while (this.running < this.maxParallel() && this.queue.length > 0) {
+    while (!this.stopped && this.running < this.maxParallel() && this.queue.length > 0) {
       const taskId = this.queue.shift()!;
       this.running++;
       const child = spawn(process.execPath, [this.workerPath], {
         env: { ...process.env, TASK_B64: encodeTaskPayload(taskId) },
         stdio: "inherit",
       });
+      this.workers.started(taskId, child.pid);
       const finish = () => {
+        this.workers.ended(taskId);
         this.running--;
         this.drain();
       };

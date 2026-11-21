@@ -57,6 +57,8 @@ import { UsageRepo } from "./spending/usage.js";
 import { handleGithubWebhook, parseGithubPayload, verifyGithubSignature } from "./integrations/code-hosts/webhook.js";
 import { configSecrets, makeRedactor } from "./tasks/worker.js";
 import { removeStaleCredentialFolders } from "./ai/ai-providers.js";
+import { drain, exitLikeSignal } from "./core/shutdown.js";
+import { WorkerPids, markInterruptedTasks, removeStaleWorkFolders, staleWorkFolderAgeMs, workFolderDirs } from "./tasks/restart.js";
 import { aiRoutes } from "./routes/ai.js";
 import { dataSourcesRoutes } from "./routes/data-sources.js";
 import { emailRoutes } from "./routes/email.js";
@@ -274,6 +276,20 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
   const app = express();
   app.disable("x-powered-by");
   app.set("trust proxy", true);
+
+  // Stopping (SIGTERM, see the end of this file): while the requests in flight finish, new ones are refused,
+  // so the platform sends them to the next instance, and the local runner starts no more workers.
+  let stopping = false;
+  app.use((_req, res, next) => {
+    if (!stopping) return next();
+    res.setHeader("Connection", "close");
+    res.setHeader("Retry-After", "10");
+    res.status(503).json({ error: "The server is restarting. Try again in a moment." });
+  });
+  const stopAcceptingWork = () => {
+    stopping = true;
+    runner.stop?.();
+  };
 
   // PUBLIC_URL, else the platform's own address (Render, Railway, Fly.io…), else each request's (public-url.ts).
   // An empty PUBLIC_URL is unset; one that is not an http(s) address without a path is ignored, with a warning.
@@ -1350,7 +1366,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
     res.status(500).json({ error: "Something went wrong on the server." });
   });
 
-  return { app, runner, store, conversations, automation, routines };
+  return { app, runner, store, conversations, automation, routines, stopAcceptingWork };
 }
 
 /** The stored key of a repo's setup: repo names are compared without letter case. */
@@ -1378,8 +1394,17 @@ function agentIdAt(input: unknown, index: number): string | undefined {
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   void removeStaleCredentialFolders(); // Google key files left by processes that died (ai-providers.ts)
+  // Checkouts of workers killed with an earlier process (older than the job's deadline: no worker runs longer).
+  void removeStaleWorkFolders({ dirs: workFolderDirs(process.env), maxAgeMs: staleWorkFolderAgeMs(process.env) });
   const port = Number(process.env.PORT ?? 8080);
-  const { app, runner, store, routines } = await createApp();
+  const { app, runner, store, routines, stopAcceptingWork } = await createApp();
+  // The local runner's workers stopped with the earlier process: their tasks are marked failed before anything
+  // new starts. Cloud Run job tasks go on across a restart of this service.
+  if (runner.kind === "local") {
+    const workers = new WorkerPids();
+    await markInterruptedTasks({ tasks: new TaskRepo(store), store, runner: runner.kind, workers });
+    workers.sweep();
+  }
   const server = app.listen(port, () => {
     console.log(`[server] Agent Army listening on :${port} (runner=${runner.kind}, storage=${store.describe()})`);
     const capNote = runner.kind === "local" ? parallelCapNote(parallelCap(process.env), process.env) : undefined;
@@ -1387,17 +1412,14 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     // Routines' clock: a tick every minute; the lease keeps overlapping instances from both running them.
     routines.scheduler.start();
   });
-  // A redeploy stops this instance: give the routines' lease up (at most 3 s) so the new one takes over at once,
-  // then end as the signal would have (the listener is gone, so raising it again takes the default action).
+  // A redeploy stops this instance: stop taking work (new requests get 503, no more workers or routine ticks),
+  // let the requests in flight finish (at most SHUTDOWN_GRACE_MS), give the routines' lease up (at most 3 s) so
+  // the new instance takes over at once, then end as the signal would have (see exitLikeSignal).
   const shutdown = (signal: NodeJS.Signals) => {
-    const end = () => process.kill(process.pid, signal);
-    const timer = setTimeout(end, 3_000);
-    timer.unref();
-    void routines.scheduler.stop().finally(() => {
-      clearTimeout(timer);
-      server.close();
-      end();
-    });
+    console.log(`[server] ${signal}: finishing the requests in flight, then stopping`);
+    void drain({ server, stopAccepting: stopAcceptingWork, finish: [{ run: () => routines.scheduler.stop(), timeoutMs: 3_000 }] }).finally(() =>
+      exitLikeSignal(signal),
+    );
   };
   process.once("SIGTERM", shutdown);
   process.once("SIGINT", shutdown);

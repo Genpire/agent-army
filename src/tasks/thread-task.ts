@@ -74,6 +74,7 @@ export async function startThreadTask(deps: ThreadTaskDeps, input: ThreadTaskInp
       userId: input.userId,
       instruction: input.instruction.trim(),
       trigger: input.trigger ?? "slack",
+      runner: deps.runner.kind,
       ...(input.ticket ? { ticket: input.ticket } : {}),
     };
     await deps.tasks.save(task);
