@@ -379,10 +379,10 @@ export type EngineConnection = z.infer<typeof EngineConnectionSchema>;
 
 // ---------- Email, company data and routines (proactive work) ----------
 
-/** How Pointer sends email (routines' reports): SMTP (Gmail, Outlook, SES…) or an email API. */
+/** How Pointer sends email (routines' reports): SMTP (Gmail, Outlook, SES…) or an email API (Resend, SendGrid). */
 export const EmailConfigSchema = z
   .object({
-    provider: z.enum(["none", "smtp", "resend"]).default("none"),
+    provider: z.enum(["none", "smtp", "resend", "sendgrid"]).default("none"),
     /** The From address, e.g. "Pointer <pointer@example.com>". */
     from: z.string().trim().max(200).default(""),
     smtp: z
@@ -396,10 +396,26 @@ export const EmailConfigSchema = z
       })
       .default(() => ({ host: "", port: 587, secure: false, user: "" })),
     resend: z.object({ apiKey: z.string().max(500).optional() }).default(() => ({})),
+    sendgrid: z
+      .object({
+        apiKey: z.string().max(500).optional(),
+        /** "eu" for an EU regional subuser, whose key is sent to api.eu.sendgrid.com. */
+        region: z.enum(["global", "eu"]).default("global"),
+      })
+      .default(() => ({ region: "global" as const })),
     checkedAt: z.string().optional(),
   })
-  .default(() => ({ provider: "none" as const, from: "", smtp: { host: "", port: 587, secure: false, user: "" }, resend: {} }));
+  .default(() => ({ provider: "none" as const, from: "", smtp: { host: "", port: 587, secure: false, user: "" }, resend: {}, sendgrid: { region: "global" as const } }));
 export type EmailConfig = z.infer<typeof EmailConfigSchema>;
+
+/** Whether the saved provider has what it needs to send: its server or key, and a From address. */
+export function emailConfigured(e: EmailConfig): boolean {
+  if (!e.from) return false;
+  if (e.provider === "smtp") return Boolean(e.smtp.host);
+  if (e.provider === "resend") return Boolean(e.resend.apiKey);
+  if (e.provider === "sendgrid") return Boolean(e.sendgrid.apiKey);
+  return false;
+}
 
 /** Data source ids: "ds-" and a slug. */
 export const DATA_SOURCE_ID_RE = /^ds-[a-z0-9][a-z0-9-]{1,40}$/;
@@ -828,9 +844,10 @@ export function publicView(c: Config) {
     email: {
       provider: c.email.provider,
       from: c.email.from,
-      configured: c.email.provider === "smtp" ? Boolean(c.email.smtp.host && c.email.from) : c.email.provider === "resend" ? Boolean(c.email.resend.apiKey && c.email.from) : false,
+      configured: emailConfigured(c.email),
       smtp: { host: c.email.smtp.host, port: c.email.smtp.port, secure: c.email.smtp.secure, user: c.email.smtp.user, pass: mask(c.email.smtp.pass) },
       resend: { key: mask(c.email.resend.apiKey) },
+      sendgrid: { key: mask(c.email.sendgrid.apiKey), region: c.email.sendgrid.region },
       checkedAt: c.email.checkedAt ?? null,
     },
     /** Without credentials: kind, address, auth type and masked secrets only. */
@@ -935,6 +952,7 @@ export function integrationSecrets(c: Config): string[] {
     ...ENGINE_IDS.map((id) => c.engines[id].apiKey),
     c.email.smtp.pass,
     c.email.resend.apiKey,
+    c.email.sendgrid.apiKey,
     ...c.dataSources.flatMap((d) => {
       const a = d.http?.auth;
       const http = !a ? [] : a.type === "bearer" ? [a.token] : a.type === "basic" ? [a.password] : a.type === "header" ? [a.value] : a.type === "login" ? [a.password] : [];

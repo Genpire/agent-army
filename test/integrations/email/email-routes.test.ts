@@ -73,13 +73,14 @@ describe("Email admin API", () => {
       configured: false,
       smtp: { host: "", port: 587, secure: false, user: "", pass: null },
       resend: { key: null },
+      sendgrid: { key: null, region: "global" },
       checkedAt: null,
     });
     expect(await error("/api/email/test", { to: "a@example.com" })).toEqual({ status: 400, error: "Set up email first." });
   });
 
   it("validates the settings", async () => {
-    expect(await error("/api/email", { provider: "carrier-pigeon", from: "p@example.com" })).toEqual({ status: 400, error: "Choose SMTP or Resend." });
+    expect(await error("/api/email", { provider: "carrier-pigeon", from: "p@example.com" })).toEqual({ status: 400, error: "Choose SMTP, Resend or SendGrid." });
     expect(await error("/api/email", { ...smtp({ pass: PASS }), from: "not an address" })).toEqual({
       status: 400,
       error: "Enter the From address, like Pointer <pointer@example.com> or reports@example.com.",
@@ -110,6 +111,7 @@ describe("Email admin API", () => {
       configured: true,
       smtp: { host: "smtp.example.com", port: 587, secure: false, user: "pointer@example.com", pass: "••••0001" },
       resend: { key: null },
+      sendgrid: { key: null, region: "global" },
       // Not checked: SKIP_VALIDATION=1.
       checkedAt: null,
     });
@@ -214,6 +216,7 @@ describe("Email admin API", () => {
       configured: false,
       smtp: { host: "smtp.other.example", port: 587, secure: false, user: "pointer@example.com", pass: null },
       resend: { key: null },
+      sendgrid: { key: null, region: "global" },
       checkedAt: null,
     });
     expect(await error("/api/email/test", { to: "a@example.com" })).toEqual({ status: 400, error: "Set up email first." });
