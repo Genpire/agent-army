@@ -7,7 +7,7 @@ import { plural } from "../../lib/format";
 import type { PublicConfig } from "../../lib/types";
 import { GENPIRE_PRESET_ID, genpireApp, genpireStatus } from "./genpire/genpire";
 
-export const INTEGRATION_IDS = ["claude", "codex", "gemini", "slack", "github", "gitlab", "bitbucket", "monday", "jira", "miro", "genpire", "apps"] as const;
+export const INTEGRATION_IDS = ["claude", "codex", "gemini", "slack", "github", "gitlab", "bitbucket", "monday", "jira", "miro", "genpire", "email", "data", "apps"] as const;
 export type IntegrationId = (typeof INTEGRATION_IDS)[number];
 
 export const isIntegrationId = (s: string | undefined): s is IntegrationId => (INTEGRATION_IDS as readonly string[]).includes(s ?? "");
@@ -191,6 +191,24 @@ export function summarize(config: PublicConfig): IntegrationSummary[] {
       required: false,
       connected: miro.connected,
       status: optional(miro.connected, `Connected${miro.userName ? ` as ${miro.userName}` : ""}`),
+    },
+    {
+      id: "email",
+      name: "Email",
+      group: "Boards",
+      enables: `Lets ${name} send routines' reports by email (SMTP or Resend).`,
+      required: false,
+      connected: config.email.configured,
+      status: optional(config.email.configured, `Sends as ${config.email.from}`),
+    },
+    {
+      id: "data",
+      name: "Company data",
+      group: "Boards",
+      enables: `Lets ${name} read your own APIs, admin panel or database (read-only) for numbers and reports.`,
+      required: false,
+      connected: config.dataSources.some((d) => d.enabled),
+      status: optional(config.dataSources.some((d) => d.enabled), plural(config.dataSources.filter((d) => d.enabled).length, "source")),
     },
     {
       id: "genpire",

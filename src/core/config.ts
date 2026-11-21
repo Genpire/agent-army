@@ -363,6 +363,112 @@ export const EngineConnectionSchema = z.object({
 });
 export type EngineConnection = z.infer<typeof EngineConnectionSchema>;
 
+
+// ---------- Email, company data and routines (proactive work) ----------
+
+/** How Pointer sends email (routines' reports): SMTP (Gmail, Outlook, SES…) or an email API. */
+export const EmailConfigSchema = z
+  .object({
+    provider: z.enum(["none", "smtp", "resend"]).default("none"),
+    /** The From address, e.g. "Pointer <pointer@example.com>". */
+    from: z.string().trim().max(200).default(""),
+    smtp: z
+      .object({
+        host: z.string().trim().max(200).default(""),
+        port: z.number().int().min(1).max(65535).default(587),
+        /** true = TLS from the start (465); false = STARTTLS when offered (587). */
+        secure: z.boolean().default(false),
+        user: z.string().max(200).default(""),
+        pass: z.string().max(500).optional(),
+      })
+      .default(() => ({ host: "", port: 587, secure: false, user: "" })),
+    resend: z.object({ apiKey: z.string().max(500).optional() }).default(() => ({})),
+    checkedAt: z.string().optional(),
+  })
+  .default(() => ({ provider: "none" as const, from: "", smtp: { host: "", port: 587, secure: false, user: "" }, resend: {} }));
+export type EmailConfig = z.infer<typeof EmailConfigSchema>;
+
+/** Data source ids: "ds-" and a slug. */
+export const DATA_SOURCE_ID_RE = /^ds-[a-z0-9][a-z0-9-]{1,40}$/;
+
+/**
+ * A company system Pointer may read for reports and questions (see
+ * integrations/data-sources): an HTTP API (GET only) or a Postgres database
+ * (read-only transactions). Credentials are secrets; `description` tells
+ * Pointer what it holds ("users, subscriptions, orders").
+ */
+export const DataSourceSchema = z.object({
+  id: z.string().regex(DATA_SOURCE_ID_RE),
+  name: z.string().trim().min(1).max(60),
+  description: z.string().trim().max(2000).default(""),
+  kind: z.enum(["http", "postgres"]),
+  http: z
+    .object({
+      baseUrl: z.string().max(500),
+      auth: z
+        .discriminatedUnion("type", [
+          z.object({ type: z.literal("none") }),
+          z.object({ type: z.literal("bearer"), token: z.string().max(10_000) }),
+          z.object({ type: z.literal("basic"), username: z.string().max(200), password: z.string().max(500) }),
+          z.object({ type: z.literal("header"), name: z.string().regex(/^[A-Za-z0-9-]{1,100}$/), value: z.string().max(10_000) }),
+          /** Sign in with a username and password to get a token, then send it (a CMS or admin API). */
+          z.object({
+            type: z.literal("login"),
+            loginUrl: z.string().max(500),
+            username: z.string().max(200),
+            password: z.string().max(500),
+            /** Field names in the login request's JSON body. */
+            usernameField: z.string().max(60).default("email"),
+            passwordField: z.string().max(60).default("password"),
+            /** Where the token is in the login response, e.g. "token" or "data.accessToken". */
+            tokenPath: z.string().max(120).default("token"),
+            headerName: z.string().max(100).default("Authorization"),
+            headerPrefix: z.string().max(40).default("Bearer "),
+          }),
+        ])
+        .default({ type: "none" }),
+      /** Path prefixes Pointer may read, e.g. "/api/stats"; empty = any path under the base URL. */
+      allowedPaths: z.array(z.string().max(300)).max(50).default([]),
+    })
+    .optional(),
+  postgres: z.object({ connectionString: z.string().max(2000), schemas: z.array(z.string().max(63)).max(20).default(["public"]) }).optional(),
+  checkedAt: z.string().optional(),
+  enabled: z.boolean().default(true),
+});
+export type DataSource = z.infer<typeof DataSourceSchema>;
+
+/** Routine ids: "rt-" and a slug. */
+export const ROUTINE_ID_RE = /^rt-[a-z0-9][a-z0-9-]{1,40}$/;
+
+/**
+ * Work Pointer does on its own on a schedule (see routines/): a daily GitHub
+ * summary by email, a weekly metrics report from the company's data… The run
+ * only reads; its report goes only to the recipients set here.
+ */
+export const RoutineSchema = z.object({
+  id: z.string().regex(ROUTINE_ID_RE),
+  name: z.string().trim().min(1).max(80),
+  /** What to do each time, written for Pointer. */
+  instruction: z.string().trim().min(10).max(8000),
+  /** Standard 5-field cron ("0 8 * * 1-5") in `timezone` (IANA, e.g. "Asia/Jerusalem"). */
+  schedule: z.object({ cron: z.string().trim().max(100), timezone: z.string().trim().max(64).default("UTC") }),
+  deliver: z
+    .object({
+      email: z.array(z.string().trim().email().max(200)).max(20).default([]),
+      /** A Slack channel or user id to post the report to; empty = none. */
+      slack: z.string().trim().max(40).default(""),
+      /** Keep each report in a console conversation for this routine. */
+      console: z.boolean().default(true),
+    })
+    .default(() => ({ email: [], slack: "", console: true })),
+  /** Spending cap per run, USD. */
+  budgetUsd: z.number().min(0.05).max(20).default(1),
+  enabled: z.boolean().default(true),
+  createdBy: z.string().max(120).default(""),
+  createdAt: z.string().optional(),
+});
+export type Routine = z.infer<typeof RoutineSchema>;
+
 export const ConfigSchema = z.object({
   orgName: z.string().default(""),
   adminPasswordHash: z.string().optional(),
@@ -446,6 +552,13 @@ export const ConfigSchema = z.object({
   engines: z
     .object({ codex: EngineConnectionSchema.default(() => ({ model: "", allowUnsandboxed: false })), gemini: EngineConnectionSchema.default(() => ({ model: "", allowUnsandboxed: false })) })
     .default(() => ({ codex: { model: "", allowUnsandboxed: false }, gemini: { model: "", allowUnsandboxed: false } })),
+  /** The organisation's timezone (IANA), the default for routines and "today". */
+  timezone: z.string().trim().max(64).default("UTC"),
+  email: EmailConfigSchema,
+  /** Company systems Pointer may read (APIs, databases), read-only. */
+  dataSources: z.array(DataSourceSchema).max(30).default(() => []),
+  /** Scheduled work Pointer does on its own. */
+  routines: z.array(RoutineSchema).max(50).default(() => []),
   /** Apps connected through their MCP servers. */
   apps: z.array(AppConnectionSchema).max(MAX_APPS).default([]),
   /** Slack channel ID -> "owner/repo" default project for that channel. */
@@ -681,6 +794,42 @@ export function publicView(c: Config) {
         },
       ]),
     ) as Record<EngineId, { connected: boolean; key: string | null; model: string; checkedAt: string | null; allowUnsandboxed: boolean }>,
+    timezone: c.timezone,
+    email: {
+      provider: c.email.provider,
+      from: c.email.from,
+      configured: c.email.provider === "smtp" ? Boolean(c.email.smtp.host && c.email.from) : c.email.provider === "resend" ? Boolean(c.email.resend.apiKey && c.email.from) : false,
+      smtp: { host: c.email.smtp.host, port: c.email.smtp.port, secure: c.email.smtp.secure, user: c.email.smtp.user, pass: mask(c.email.smtp.pass) },
+      resend: { key: mask(c.email.resend.apiKey) },
+      checkedAt: c.email.checkedAt ?? null,
+    },
+    /** Without credentials: kind, address, auth type and masked secrets only. */
+    dataSources: c.dataSources.map((d) => ({
+      id: d.id,
+      name: d.name,
+      description: d.description,
+      kind: d.kind,
+      enabled: d.enabled,
+      checkedAt: d.checkedAt ?? null,
+      http: d.http
+        ? {
+            baseUrl: d.http.baseUrl,
+            allowedPaths: d.http.allowedPaths,
+            auth:
+              d.http.auth.type === "login"
+                ? { type: "login" as const, loginUrl: d.http.auth.loginUrl, username: d.http.auth.username, password: mask(d.http.auth.password) }
+                : d.http.auth.type === "basic"
+                  ? { type: "basic" as const, username: d.http.auth.username, password: mask(d.http.auth.password) }
+                  : d.http.auth.type === "bearer"
+                    ? { type: "bearer" as const, token: mask(d.http.auth.token) }
+                    : d.http.auth.type === "header"
+                      ? { type: "header" as const, name: d.http.auth.name, value: mask(d.http.auth.value) }
+                      : { type: "none" as const },
+          }
+        : null,
+      postgres: d.postgres ? { configured: true, schemas: d.postgres.schemas } : null,
+    })),
+    routines: c.routines,
     budget: c.budget,
     bindings: c.bindings,
     limits: c.limits,
@@ -743,6 +892,13 @@ export function integrationSecrets(c: Config): string[] {
     // With their parts: a Google key file's private key and its lines, each extra header's value.
     ...Object.values(c.ai.providers).flatMap((p) => connectionSecretParts(p.secrets)),
     ...ENGINE_IDS.map((id) => c.engines[id].apiKey),
+    c.email.smtp.pass,
+    c.email.resend.apiKey,
+    ...c.dataSources.flatMap((d) => {
+      const a = d.http?.auth;
+      const http = !a ? [] : a.type === "bearer" ? [a.token] : a.type === "basic" ? [a.password] : a.type === "header" ? [a.value] : a.type === "login" ? [a.password] : [];
+      return [...http, d.postgres?.connectionString];
+    }),
   ].filter((x): x is string => typeof x === "string" && x.length > 0);
 }
 

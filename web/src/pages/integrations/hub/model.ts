@@ -28,6 +28,8 @@ export const NATIVE_CATEGORY: Record<NativeId, AppCategory> = {
   monday: "Project management",
   jira: "Project management",
   miro: "Design",
+  email: "Communication",
+  data: "Data",
   genpire: "Design",
 };
 
@@ -65,6 +67,8 @@ const NATIVE_KEYWORDS: Record<NativeId, string[]> = {
   monday: ["monday", "tickets", "boards", "work tracking"],
   jira: ["issues", "tickets", "confluence", "wiki", "atlassian", "work tracking"],
   miro: ["whiteboard", "boards", "stickies", "diagrams"],
+  email: ["smtp", "mail", "reports", "resend", "gmail"],
+  data: ["api", "database", "postgres", "cms", "metrics", "users", "subscriptions", "reports"],
   genpire: ["design", "products", "tech pack", "brand", "manufacturing", "quotes"],
 };
 

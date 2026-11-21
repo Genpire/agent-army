@@ -57,6 +57,9 @@ import { handleGithubWebhook, parseGithubPayload, verifyGithubSignature } from "
 import { configSecrets, makeRedactor } from "./tasks/worker.js";
 import { removeStaleCredentialFolders } from "./ai/ai-providers.js";
 import { aiRoutes } from "./routes/ai.js";
+import { dataSourcesRoutes } from "./routes/data-sources.js";
+import { emailRoutes } from "./routes/email.js";
+import { routinesRoutes } from "./routes/routines.js";
 import { appsRoutes } from "./routes/apps.js";
 import { bitbucketRoutes } from "./routes/bitbucket.js";
 import { chatRoutes } from "./routes/chat.js";
@@ -1291,6 +1294,9 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
   app.use(appsRoutes(routeDeps));
   app.use(enginesRoutes(routeDeps));
   app.use(aiRoutes(routeDeps));
+  app.use(emailRoutes(routeDeps));
+  app.use(dataSourcesRoutes(routeDeps));
+  app.use(routinesRoutes(routeDeps));
   app.use(chatRoutes({ ...routeDeps, conversations }));
 
   app.use(express.static(fileURLToPath(new URL("../public", import.meta.url)), { index: "index.html" }));

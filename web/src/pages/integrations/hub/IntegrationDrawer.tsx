@@ -29,6 +29,8 @@ const LOADERS: Record<NativeId, () => Promise<PaneModule>> = {
   monday: () => import("../MondayPane").then((m) => ({ default: m.MondayPane })),
   jira: () => import("../JiraPane").then((m) => ({ default: m.JiraPane })),
   miro: () => import("../MiroPane").then((m) => ({ default: m.MiroPane })),
+  email: () => import("../EmailPane").then((m) => ({ default: m.EmailPane })),
+  data: () => import("../DataSourcesPane").then((m) => ({ default: m.DataSourcesPane })),
   genpire: () => import("../GenpirePane").then((m) => ({ default: m.GenpirePane })),
 };
 
