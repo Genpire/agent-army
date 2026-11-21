@@ -17,8 +17,9 @@ import { PageFrame } from "../../components/PageFrame";
 import { TimezoneSelector, browserTimeZone } from "../../components/TimezoneSelector";
 import { api } from "../../lib/api";
 import { useConfig } from "../../lib/state";
-import type { Limits } from "../../lib/types";
+import type { Limits, ParallelLimit } from "../../lib/types";
 import { useAction } from "../../lib/useAction";
+import { parallelCapNote } from "./parallel";
 import { SaveRow, SettingsSection } from "./parts";
 import { SpendingSection } from "./SpendingSection";
 
@@ -167,7 +168,7 @@ interface LimitField {
 }
 
 /** Mirrors the limits in ConfigSchema (src/core/config.ts); the server checks them again. */
-function limitFields(runner: string | undefined): LimitField[] {
+function limitFields(runner: string | undefined, capNote: string | undefined): LimitField[] {
   return [
     {
       key: "maxBudgetUsd",
@@ -195,7 +196,7 @@ function limitFields(runner: string | undefined): LimitField[] {
       description:
         runner === "cloudrun"
           ? "Only for the local runner: on Cloud Run every task runs as its own job. From 1 to 50."
-          : "More tasks wait in a queue until one finishes. From 1 to 50.",
+          : `More tasks wait in a queue until one finishes. From 1 to 50.${capNote ? ` ${capNote}` : ""}`,
     },
     {
       key: "progressEveryMin",
@@ -242,11 +243,11 @@ const PREVIEW_CHECK_OPTIONS: (SelectorOptionData & { value: PreviewCheck })[] = 
 ];
 const isPreviewCheck = (value: string): value is PreviewCheck => PREVIEW_CHECK_OPTIONS.some((o) => o.value === value);
 
-function LimitsSection({ saved, runner }: { saved: Limits; runner: string | undefined }) {
+function LimitsSection({ saved, runner, parallel }: { saved: Limits; runner: string | undefined; parallel: ParallelLimit | undefined }) {
   const { refresh } = useConfig();
   const { run, pending } = useAction();
   const [limits, setLimits] = useState<Limits>(saved);
-  const fields = limitFields(runner);
+  const fields = limitFields(runner, parallelCapNote(parallel, limits.maxParallel));
   const errors = fields.map((f) => limitError(f, limits[f.key]));
   const isDirty = fields.some((f) => limits[f.key] !== saved[f.key]) || limits.previewCheck !== saved.previewCheck;
   const save = () =>
@@ -403,7 +404,7 @@ export default function SettingsPage() {
   return (
     <PageFrame title="Settings" description="Limits, spending, access, the timezone, the admin password and this deployment.">
       <VStack gap={8}>
-        <LimitsSection saved={config.limits} runner={state.runner} />
+        <LimitsSection saved={config.limits} runner={state.runner} parallel={state.parallel} />
         <Divider />
         <SpendingSection saved={config.budget} pointer={pointer} />
         <Divider />

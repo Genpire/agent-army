@@ -41,7 +41,7 @@ import { NOTES_MAX_CHARS, NotesRepo } from "./chat/notes.js";
 import { loadOffice } from "./team/office.js";
 import { type QueryFn, createPointerBrain } from "./chat/pointer.js";
 import type { PointerBrain, SlackDeps, SlackMessageEvent } from "./chat/pointer-types.js";
-import { type Runner, createRunner } from "./tasks/runner.js";
+import { type Runner, createRunner, parallelCap, parallelCapNote, parallelLimit } from "./tasks/runner.js";
 import { SCREENSHOT_NAME_RE, ScreenshotRepo, TASK_ID_RE, screenshotType } from "./tasks/screenshots.js";
 import { SCOUT_NEED_MAX_CHARS, findSkills } from "./skills/skill-scout.js";
 import { type FetchLike, SKILL_LIMITS, SkillLibrary, SkillsPluginCache, skillView } from "./skills/skills.js";
@@ -181,6 +181,8 @@ export interface AppOverrides {
   hrQuery?: QueryFn;
   /** The skills library's GitHub reads and the Skills Scout's query. */
   skills?: { fetch?: FetchLike; scoutQuery?: QueryFn };
+  /** This instance's memory in bytes, instead of the container's or machine's (the parallel-task cap). */
+  memoryBytes?: number;
 }
 
 /** A skill's assignment: every agent, or the listed agent ids. */
@@ -211,8 +213,10 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
   const skills = new SkillLibrary(store, masterKey, { configRepo, ...(overrides.skills?.fetch ? { fetch: overrides.skills.fetch } : {}) });
   const skillsPlugin = new SkillsPluginCache(skills);
 
+  // Tasks at the same time: the Settings value, capped for the local runner by MAX_PARALLEL or this instance's memory.
   let maxParallel = (await configRepo.load()).limits.maxParallel;
-  const runner = overrides.runner ?? createRunner(() => maxParallel, env);
+  const cap = parallelCap(env, overrides.memoryBytes);
+  const runner = overrides.runner ?? createRunner(() => parallelLimit(maxParallel, cap).effective, env);
   const brain = overrides.brain ?? createPointerBrain({ configRepo, memory, notes, attachments }, { skills: () => skillsPlugin.current() });
   const usage = new UsageRepo(store, tasks);
   const slackFactory = overrides.slack ?? slackClient;
@@ -443,6 +447,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
             ready: isReady(config),
             config: publicView(config),
             runner: runner.kind,
+            parallel: parallelLimit(config.limits.maxParallel, runner.kind === "local" ? cap : undefined),
             storage: store.describe(),
             eventsUrl: `${baseUrl(req)}/slack/events`,
             githubWebhookUrl: `${baseUrl(req)}/github/webhook`,
@@ -1377,6 +1382,8 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const { app, runner, store, routines } = await createApp();
   const server = app.listen(port, () => {
     console.log(`[server] Agent Army listening on :${port} (runner=${runner.kind}, storage=${store.describe()})`);
+    const capNote = runner.kind === "local" ? parallelCapNote(parallelCap(process.env), process.env) : undefined;
+    if (capNote) console.log(capNote);
     // Routines' clock: a tick every minute; the lease keeps overlapping instances from both running them.
     routines.scheduler.start();
   });
