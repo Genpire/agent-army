@@ -1,0 +1,63 @@
+# Agent Army on one server: the app and Caddy (automatic HTTPS).
+# deploy/install.sh writes this file, caddy/Caddyfile and .env to /opt/agent-army.
+# By hand: copy deploy/compose/ to the server, put a .env next to this file with
+#   SITE_ADDRESS=army.example.com         (its DNS A record points at this server)
+#   PUBLIC_URL=https://army.example.com
+#   MASTER_KEY=...                        (openssl rand -hex 32; keep it: it decrypts the data)
+#   SETUP_TOKEN=...                       (openssl rand -hex 18; creates the admin account)
+# then run: docker compose up -d
+name: agent-army
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+services:
+  agent-army:
+    image: ${AGENT_ARMY_IMAGE:-ghcr.io/genpire/agent-army:latest}
+    restart: unless-stopped
+    # Reaps the task workers' child processes (the server is PID 1 otherwise).
+    init: true
+    environment:
+      MASTER_KEY: ${MASTER_KEY:?set MASTER_KEY in .env}
+      REQUIRE_MASTER_KEY: "1"
+      SETUP_TOKEN: ${SETUP_TOKEN:?set SETUP_TOKEN in .env}
+      PUBLIC_URL: ${PUBLIC_URL:?set PUBLIC_URL in .env}
+      RUNNER: local
+      STORAGE: fs
+      DATA_DIR: /data
+      TASK_TIMEOUT_MIN: ${TASK_TIMEOUT_MIN:-50}
+      BROWSER: ${BROWSER:-on}
+    volumes:
+      - army-data:/data
+    # Headless Chromium runs out of shared memory with Docker's 64 MB default.
+    shm_size: "1gb"
+    stop_grace_period: 60s
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    logging: *logging
+  caddy:
+    image: caddy:2.11
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:?set SITE_ADDRESS in .env}
+    volumes:
+      - ./caddy:/etc/caddy:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      agent-army:
+        condition: service_healthy
+    logging: *logging
+volumes:
+  army-data:
+  caddy-data:
+  caddy-config:

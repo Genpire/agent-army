@@ -1,0 +1,15 @@
+# EXPERIMENTAL: Agent Army behind Caddy on the server's public IPv4 address, with no domain.
+# Let's Encrypt issues IP address certificates only with its 6-day "shortlived" profile;
+# Caddy renews them. Caddy's ACME "profile" option is itself experimental, so this may
+# not get a certificate. If it doesn't, use a domain (Caddyfile), or a name such as
+# 203-0-113-7.sslip.io (a third-party DNS service) that resolves to the IP.
+# deploy/install.sh uses this file as caddy/Caddyfile when no domain is given.
+# By hand: copy it over caddy/Caddyfile and set SITE_ADDRESS in .env to the IP address.
+{$SITE_ADDRESS} {
+	tls {
+		issuer acme {
+			profile shortlived
+		}
+	}
+	reverse_proxy agent-army:8080
+}

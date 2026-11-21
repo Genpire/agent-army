@@ -1,0 +1,75 @@
+# Fly.io config for Agent Army (Pointer and its team).
+# First deploy, from a clone of the repo or your fork. Fly builds the Dockerfile on its
+# remote builders, so no local Docker is needed. Pick an app name nobody has taken:
+# it becomes https://<name>.fly.dev. The volume's region must be primary_region below.
+#   fly apps create <name>
+#   fly volumes create agent_army_data --app <name> --region iad --size 20 --yes
+#   SETUP_TOKEN="$(openssl rand -hex 18)"; echo "Setup token: $SETUP_TOKEN"
+#   fly secrets set --app <name> --stage MASTER_KEY="$(openssl rand -base64 32)" SETUP_TOKEN="$SETUP_TOKEN"
+#   fly deploy --app <name> --ha=false --wait-timeout 15m
+# Open https://<name>.fly.dev and create the admin account with the setup token printed
+# above. Lost it? fly ssh console --app <name> -C 'printenv SETUP_TOKEN'
+# Update: fly deploy --app <name> --ha=false. Never change MASTER_KEY: it decrypts the data.
+# One Machine only: per-thread queues, event dedupe and running tasks live in memory.
+app = "agent-army"            # overridden by --app
+primary_region = "iad"
+kill_signal = "SIGTERM"
+kill_timeout = 300            # max 300 s: lets the server finish writes on deploys
+
+[build]
+  dockerfile = "Dockerfile"
+  # Or skip the build: replace the dockerfile line with the public prebuilt image
+  # image = "ghcr.io/genpire/agent-army:latest"
+  [build.args]
+    # Coding agent CLIs: "codex gemini" (default), "codex", "gemini", or "" for neither (-520 MB).
+    ENGINES = "codex gemini"
+
+[env]
+  STORAGE = "fs"
+  DATA_DIR = "/data"
+  RUNNER = "local"
+  REQUIRE_MASTER_KEY = "1"
+  # Repo checkouts go on the volume: a Machine's root filesystem is limited to 8 GB
+  # and the image takes about 4 GB of it. Each task's folder is removed when it ends.
+  WORK_DIR = "/data"
+  # PUBLIC_URL is https://<app>.fly.dev, from FLY_APP_NAME, which Fly sets.
+  # Set it for a custom domain (fly certs add):
+  # PUBLIC_URL = "https://army.example.com"
+
+[[mounts]]
+  source = "agent_army_data"
+  destination = "/data"
+  initial_size = "20gb"
+  auto_extend_size_threshold = 80
+  auto_extend_size_increment = "5GB"
+  auto_extend_size_limit = "60GB"
+  snapshot_retention = 7
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # Always on: never stop the Machine. Pointer works after Slack gets its 200,
+  # and repo tasks run for hours as child processes.
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 40
+    hard_limit = 80
+
+  [[http_service.checks]]
+    grace_period = "60s"
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    path = "/healthz"
+
+[[restart]]
+  policy = "always"
+
+[[vm]]
+  # 3 tasks at the same time (Settings > Repo task limits) need about 2-3 GB each plus the server.
+  # Shared CPUs drop to a 6.25%-per-vCPU baseline once their burst balance is spent;
+  # for repos with heavy builds or tests use size = "performance-2x" (dedicated, up to 16 GB).
+  size = "shared-cpu-4x"
+  memory = "8gb"
