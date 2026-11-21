@@ -17,7 +17,7 @@ services:
     # The server AND the repo tasks run in this one container (RUNNER=local), so
     # RAM sets how many tasks can run at once:
     #   2c-8g  $135/month  the default 3 tasks at the same time
-    #   2c-4g  $85/month   set Settings > Repo task limits > Tasks at the same time to 1
+    #   2c-4g  $85/month   1 task at a time (the server caps it by memory by itself)
     #   1c-2g  $25/month   chat only
     # The free plan sleeps after 15 idle minutes and can't have a disk: it doesn't work here.
     plan: 2c-8g

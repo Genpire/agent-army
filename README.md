@@ -86,7 +86,7 @@ Run `npm create agent-army@latest`: it checks which provider CLIs you are logged
 | AWS | Secrets Manager → `agent-army/setup-token` (the stack's `SetupTokenSecret` output links to it). |
 | Azure | The container app → **Settings** → **Secrets** → `setup-token`. |
 
-`MASTER_KEY` encrypts everything the deployment stores. Each option above creates it once and keeps it (on Azure you pass it yourself); never change it, or the stored data can't be read. The public address that Slack, GitHub and the other webhooks use is found by itself: Railway, Render, Fly.io and Azure name it, the server installer and `deploy/gcp.sh` set it, and otherwise it is each request's own address. Set `PUBLIC_URL` when you add a custom domain. A redeploy restarts the server, which stops the repo tasks that are running.
+`MASTER_KEY` encrypts everything the deployment stores. Each option above creates it once and keeps it (on Azure you pass it yourself); never change it, or the stored data can't be read. The public address that Slack, GitHub and the other webhooks use is found by itself: Railway, Render, Fly.io and Azure name it, the server installer and `deploy/gcp.sh` set it, and otherwise it is each request's own address. Set `PUBLIC_URL` when you add a custom domain. A redeploy restarts the server, which stops the repo tasks that are running: they show as interrupted, and a reply in their thread continues the work (on Cloud Run, tasks run in their own jobs and go on).
 
 ### Railway
 
@@ -94,7 +94,7 @@ Click **Deploy on Railway**, sign in with GitHub, choose the Hobby plan and **De
 
 ### Render
 
-Click **Deploy to Render**, sign in, add a card and **Apply**. The Blueprint, [`render.yaml`](render.yaml), builds this repository's Dockerfile on Render (15–25 minutes the first time) and runs it on a `2c-8g` instance ($135) with a 10 GB disk at `/data` ($2.50), generating both keys. To run one task at a time on a `2c-4g` ($85), change the instance type, then set **Settings → Repo task limits → Tasks at the same time** to 1. Deploys are manual (**Manual Deploy**), so a push upstream never restarts your tasks.
+Click **Deploy to Render**, sign in, add a card and **Apply**. The Blueprint, [`render.yaml`](render.yaml), builds this repository's Dockerfile on Render (15–25 minutes the first time) and runs it on a `2c-8g` instance ($135) with a 10 GB disk at `/data` ($2.50), generating both keys. To run one task at a time on a `2c-4g` ($85), change the instance type: the server runs as many tasks at the same time as its memory allows (one on 4 GB, three on 8 GB; `MAX_PARALLEL` overrides it). Deploys are manual (**Manual Deploy**), so a push upstream never restarts your tasks.
 
 ### A Linux server
 
@@ -140,9 +140,11 @@ The script prints the URL and a one-time **setup token**. It creates a private b
 | `PROJECT` | your gcloud default | GCP project. |
 | `REGION` | `us-central1` | Region for every resource. |
 | `NAME` | `agent-army` | Resource name prefix; the job is `<NAME>-worker`. |
-| `MIN_INSTANCES` | `0` | `1` keeps the web service warm. |
+| `MIN_INSTANCES` | `1` | Web instances kept running. `0` scales to zero when idle: the first message afterwards waits for a cold start, and the routines' clock stops. |
+| `IMAGE` | built with Cloud Build | An image to deploy instead, such as the published `ghcr.io/genpire/agent-army:latest` (skips the build). |
+| `PUBLIC_URL` | the service's URL | The address Slack and the webhooks use; set it for a custom domain. |
 
-The web service runs with 8 vCPU, 8 GiB (`SERVICE_CPU` / `SERVICE_MEMORY`) and **CPU always allocated** (Pointer keeps working after Slack has its HTTP 200, and the Agent SDK runs as a subprocess), as a **single instance** (per-thread queues and event dedupe live in memory). With the default `MIN_INSTANCES=0` it scales to zero when idle and the first message afterwards waits for a cold start. At this size an instance costs roughly $0.58 per hour while it is up (it stays up about 15 minutes after the last request), so `MIN_INSTANCES=1` would cost roughly $420 a month; lower `SERVICE_CPU` / `SERVICE_MEMORY` (e.g. 1 and 2Gi, about $53 a month warm) if you keep one warm. Claude usage is billed separately, capped per message and per task (see below). The worker job runs each task with 8 vCPU and 8 GiB (`JOB_CPU` / `JOB_MEMORY`), billed only while a task runs, for at most 3 hours (`JOB_TIMEOUT_MIN`, default 180): the team's own run stops after 50 minutes, and waiting for CI checks, fix rounds and publishing come after it.
+The web service runs with 2 vCPU, 4 GiB (`SERVICE_CPU` / `SERVICE_MEMORY`) and **CPU always allocated** (Pointer keeps working after Slack has its HTTP 200, and the Agent SDK runs as a subprocess), as a **single instance** that stays up (per-thread queues and event dedupe live in memory). That costs about $110 a month; 1 vCPU and 2Gi cost about $53. Claude usage is billed separately, capped per message and per task (see below). The worker job runs each task with 8 vCPU and 8 GiB (`JOB_CPU` / `JOB_MEMORY`), billed only while a task runs, for at most 3 hours (`JOB_TIMEOUT_MIN`, default 180): the team's own run stops after 50 minutes, and waiting for CI checks, fix rounds and publishing come after it.
 
 **Smoke test.** Once Claude is connected, check the deployment without Slack. This runs Pointer once inside the worker job, with the real config, team and memory. Repo tasks are disabled and nothing is posted to Slack.
 
