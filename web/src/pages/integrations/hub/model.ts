@@ -67,7 +67,7 @@ const NATIVE_KEYWORDS: Record<NativeId, string[]> = {
   monday: ["monday", "tickets", "boards", "work tracking"],
   jira: ["issues", "tickets", "confluence", "wiki", "atlassian", "work tracking"],
   miro: ["whiteboard", "boards", "stickies", "diagrams"],
-  email: ["smtp", "mail", "reports", "resend", "gmail"],
+  email: ["smtp", "mail", "reports", "resend", "sendgrid", "gmail", "ses"],
   data: ["api", "database", "postgres", "cms", "metrics", "users", "subscriptions", "reports"],
   genpire: ["design", "products", "tech pack", "brand", "manufacturing", "quotes"],
 };

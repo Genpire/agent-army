@@ -196,7 +196,7 @@ export function summarize(config: PublicConfig): IntegrationSummary[] {
       id: "email",
       name: "Email",
       group: "Boards",
-      enables: `Lets ${name} send routines' reports by email (SMTP or Resend).`,
+      enables: `Lets ${name} send routines' reports by email (SMTP, SendGrid or Resend).`,
       required: false,
       connected: config.email.configured,
       status: optional(config.email.configured, `Sends as ${config.email.from}`),
