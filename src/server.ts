@@ -247,9 +247,17 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
 
   // The setup token creates the admin account on first run and resets its
   // password later: only someone who can read the deployment's secrets (the
-  // deploy output, Secret Manager) or its log can use it.
-  const setupToken = env.SETUP_TOKEN ?? randomToken(18);
-  if (!env.SETUP_TOKEN) {
+  // deploy output, Secret Manager) or its log can use it. An empty or blank
+  // SETUP_TOKEN (Docker Compose passes "" for a variable left empty in .env) is
+  // no token: one is generated, so an empty token can never be the right one.
+  const configuredToken = env.SETUP_TOKEN?.trim();
+  const setupToken = configuredToken || randomToken(18);
+  /** The submitted setup token is the deployment's. An empty one never is, whatever the deployment's is. */
+  const isSetupToken = (given: string) => {
+    const token = given.trim();
+    return token.length > 0 && setupToken.length > 0 && safeEqual(token, setupToken);
+  };
+  if (!configuredToken) {
     const firstRun = !(await configRepo.load()).adminPasswordHash;
     console.log(
       firstRun
@@ -262,8 +270,9 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
   app.disable("x-powered-by");
   app.set("trust proxy", true);
 
-  const baseUrl = (req: Request) =>
-    (env.PUBLIC_URL ?? `${req.protocol}://${req.get("host")}`).replace(/\/+$/, "");
+  // An empty or blank PUBLIC_URL is unset too: the request's own address is used.
+  const publicUrl = env.PUBLIC_URL?.trim() || undefined;
+  const baseUrl = (req: Request) => (publicUrl ?? `${req.protocol}://${req.get("host")}`).replace(/\/+$/, "");
 
   // Sessions are signed with a key tied to the current password, so a new password signs everyone out.
   const currentSessionKey = async () => sessionKey(masterKey, (await configRepo.load()).adminPasswordHash);
@@ -444,7 +453,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
     if ((await configRepo.load(true)).adminPasswordHash) {
       return void res.status(409).json({ error: "Already set up. Sign in instead." });
     }
-    if (!safeEqual(input.setupToken.trim(), setupToken)) {
+    if (!isSetupToken(input.setupToken)) {
       return void res.status(403).json({ error: "Wrong setup token." });
     }
     await configRepo.update((c) => {
@@ -462,7 +471,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
     if (!(await configRepo.load(true)).adminPasswordHash) {
       return void res.status(409).json({ error: "There is no admin account yet. Set it up instead." });
     }
-    if (!safeEqual(input.setupToken.trim(), setupToken)) {
+    if (!isSetupToken(input.setupToken)) {
       return void res.status(403).json({ error: "Wrong setup token." });
     }
     await configRepo.update((c) => {
