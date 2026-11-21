@@ -88,7 +88,8 @@ export const FILES_SHOWN = 15;
 const TEXT_MAX = 160;
 
 const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
-const AGENT_TOOLS = new Set(["Agent", "Task"]);
+/** The tool that starts a subagent: "Agent" in current SDK releases, "Task" in older ones (attribution.ts maps spend the same way). */
+export const AGENT_TOOLS: ReadonlySet<string> = new Set(["Agent", "Task"]);
 
 interface Run {
   label: string;

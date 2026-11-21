@@ -26,6 +26,8 @@ import { requesterSlackId } from "../slack/slack-tools.js";
 import type { PointerBrain, PointerBrainDeps, PointerContext, PointerReply, PointerRequest } from "./pointer-types.js";
 import { SKILL_TOOL, type TeamSkills, buildChatAgents, pluginSkillName, rosterText, skillQueryOptions } from "../team/team.js";
 import { configSecrets, makeRedactor } from "../tasks/worker.js";
+import { SpendTracker } from "../spending/attribution.js";
+import { runtimePrices } from "../spending/prices.js";
 
 /**
  * Pointer's brain: one Agent SDK query per Slack message, locked down to web
@@ -515,8 +517,13 @@ export function createPointerBrain(
         };
         const onActivity = ctx.onActivity;
         const mapper = onActivity ? new ActivityMapper(team) : undefined;
+        // Who spent what: Pointer and the team members it asked (attribution.ts), for the per-agent and per-provider caps.
+        const spend = new SpendTracker({ agents: team.agents.map((a) => a.id), price: runtimePrices(runtime) });
         for await (const message of queryFn({ prompt, options })) {
-          if (message.type === "result") reply = mapResult(message, { maxTurns: team.pointer.maxTurns, budgetUsd });
+          spend.feed(message);
+          if (message.type === "result") {
+            reply = { ...mapResult(message, { maxTurns: team.pointer.maxTurns, budgetUsd }), agentCosts: spend.costs(message), provider: runtime.provider };
+          }
           if (mapper && onActivity) {
             for (const activity of mapper.feed(message)) {
               try {
@@ -540,7 +547,7 @@ export function createPointerBrain(
 
       if (abort.signal.aborted) {
         const minutes = Math.round(timeoutMs / 60_000) || 1;
-        reply = { text: `I ran out of time (${minutes} min limit) on this one.`, costUsd: reply?.costUsd, isError: true };
+        reply = { ...reply, text: `I ran out of time (${minutes} min limit) on this one.`, costUsd: reply?.costUsd, isError: true };
       }
       reply ??= { text: "I finished without an answer. Please try again.", isError: true };
       return { ...reply, text: redact(reply.text) };

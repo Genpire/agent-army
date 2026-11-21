@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { AttachmentRepo } from "./chat/attachments.js";
-import { Spending } from "./spending/budget.js";
+import { Spending, parseCapKeys } from "./spending/budget.js";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { z } from "zod";
 import {
@@ -928,11 +928,24 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
           .trim()
           .refine((c) => c === "" || CHANNEL_RE.test(c), "Channel IDs look like C012ABCDEF.")
           .optional(),
+        // Per agent ("pointer" = Pointer itself), per AI provider or engine, and per agent in one task: each replaces its whole list.
+        perAgentUsd: z.record(z.string(), CAP_USD).optional(),
+        perProviderUsd: z.record(z.string(), CAP_USD).optional(),
+        perTaskAgentUsd: z.record(z.string(), CAP_USD).optional(),
       }),
       req,
       res,
     );
     if (!input) return;
+    const agentIds = (await configRepo.load()).team.agents.map((a) => a.id);
+    const caps: Partial<Record<"perAgentUsd" | "perProviderUsd" | "perTaskAgentUsd", Record<string, number>>> = {};
+    for (const [field, what] of [["perAgentUsd", "agent"], ["perProviderUsd", "provider"], ["perTaskAgentUsd", "task"]] as const) {
+      const given = input[field];
+      if (!given) continue;
+      const parsed = parseCapKeys(given, { what, agentIds });
+      if (!parsed.ok) return void res.status(400).json({ error: parsed.error });
+      caps[field] = parsed.caps;
+    }
     let perRepoUsd: Record<string, number> | undefined;
     if (input.perRepoUsd) {
       perRepoUsd = {};
@@ -950,6 +963,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
       if (perRepoUsd) c.budget.perRepoUsd = perRepoUsd;
       if (input.alertPercent !== undefined) c.budget.alertPercent = input.alertPercent;
       if (input.alertChannel !== undefined) c.budget.alertChannel = input.alertChannel;
+      Object.assign(c.budget, caps);
     });
     // A lower cap may already be reached: tell the alert channel now, not after the next task.
     void spending.notify();

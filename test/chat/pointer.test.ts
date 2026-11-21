@@ -1179,9 +1179,26 @@ describe("Pointer brain", () => {
       yield result();
     });
     const reply = await createPointerBrain(deps, { queryFn }).reply(baseReq(), ctx);
-    expect(reply).toEqual({ text: "Here is the answer.", costUsd: 0.0421, isError: false });
+    expect(reply).toEqual({ text: "Here is the answer.", costUsd: 0.0421, isError: false, agentCosts: { pointer: { usd: 0.0421 } }, provider: "anthropic" });
     expect(calls).toHaveLength(1);
     expect(calls[0]!.prompt).toBe(buildPointerPrompt(baseReq()));
+  });
+
+  it("shares the reply's cost between Pointer and the team members it asked", async () => {
+    const deps = await setup();
+    const msg = (id: string, model: string, parent: string | null, input: number, content: unknown[] = []) => ({
+      type: "assistant",
+      parent_tool_use_id: parent,
+      message: { id, model, content, usage: { input_tokens: input, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } },
+    });
+    const { queryFn } = fakeQuery(async function* () {
+      yield msg("m1", "claude-sonnet-5-5", null, 1_000, [{ type: "tool_use", id: "toolu_r", name: "Agent", input: { subagent_type: "researcher", description: "look it up" } }]);
+      yield msg("m2", "claude-sonnet-5-5", "toolu_r", 3_000);
+      yield result({ total_cost_usd: 0.08, modelUsage: { "claude-sonnet-5-5": { costUSD: 0.08 } } });
+    });
+    const reply = await createPointerBrain(deps, { queryFn }).reply(baseReq(), ctx);
+    expect(reply.provider).toBe("anthropic");
+    expect(reply.agentCosts).toEqual({ pointer: { usd: 0.02, tokens: 1_000 }, researcher: { usd: 0.06, tokens: 3_000 } });
   });
 
   it("runs locked down: safe built-ins, dontAsk, explicit allowlist, read-only agents", async () => {

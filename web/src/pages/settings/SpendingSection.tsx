@@ -18,23 +18,22 @@ import { usd } from "../../lib/format";
 import { useConfig } from "../../lib/state";
 import type { PublicConfig } from "../../lib/types";
 import { useAction } from "../../lib/useAction";
-import { CAP_VARIANT, type CapStatus, type UsageView, capLine, useSpending } from "../overview/spending";
+import { CAP_MAX, CAP_VARIANT, type CapStatus, type UsageView, capError, capLine, useSpending } from "../overview/spending";
 import { AddRow } from "../projects/components/AddRow";
 import { CHANNEL_ERROR, REPO_ERROR, REPO_RE, findRepo, parseChannelId } from "../projects/validation";
+import { AgentCaps } from "./AgentCaps";
 import { SaveRow, SettingsSection } from "./parts";
+import { ProviderCaps } from "./ProviderCaps";
 
 type Budget = PublicConfig["budget"];
 
-/** Mirrors BudgetSchema (src/core/config.ts); the server checks again. */
-const CAP_MAX = 100_000;
-const CAP_ERROR = `Use an amount from 0 (no cap) to ${CAP_MAX.toLocaleString()}.`;
-const capError = (n: number) => (!Number.isFinite(n) || n < 0 || n > CAP_MAX ? CAP_ERROR : undefined);
 const percentError = (n: number) => (!Number.isInteger(n) || n < 10 || n > 100 ? "Use a whole percent from 10 to 100." : undefined);
 
 /**
  * Settings → Spending: the monthly Claude budget, when to alert and where,
- * and caps for single repositories. Everything here is checked before a task
- * or a chat reply starts; running tasks finish within their own budget.
+ * and caps for single repositories, AI providers and agents. Everything here
+ * is checked before a task or a chat reply starts; within a task, an agent's
+ * per-task cap stops its work; running tasks otherwise finish within their own budget.
  */
 export function SpendingSection({ saved, pointer }: { saved: Budget; pointer: string }) {
   const usage = useSpending();
@@ -42,9 +41,11 @@ export function SpendingSection({ saved, pointer }: { saved: Budget; pointer: st
   return (
     <SettingsSection
       title="Spending"
-      description={`Caps on what Claude may cost per calendar month (UTC). When one is used up, new repo tasks are refused with a message that says so, and so are ${pointer}'s chat replies for the monthly cap; running tasks finish within their own budget. A task never gets a bigger budget than what is left. 0 means no cap.`}>
+      description={`Caps on what may be spent per calendar month (UTC): in all, per repository, per AI provider and per agent, and what one agent may spend in a single task. When one is used up, new repo tasks are refused with a message that says so (an agent over its own cap sits the task out), and so are ${pointer}'s chat replies for the monthly, the chat provider's and ${pointer}'s own cap; running tasks finish within their own budget. A task never gets a bigger budget than what is left. 0 means no cap.`}>
       <CapsForm key={formKey} saved={saved} usage={usage.data} reload={usage.reload} />
       <RepoCaps saved={saved.perRepoUsd} usage={usage.data} reload={usage.reload} />
+      <ProviderCaps key={JSON.stringify(saved.perProviderUsd)} saved={saved.perProviderUsd} usage={usage.data} reload={usage.reload} />
+      <AgentCaps key={JSON.stringify([saved.perAgentUsd, saved.perTaskAgentUsd])} saved={saved} usage={usage.data} reload={usage.reload} />
     </SettingsSection>
   );
 }
