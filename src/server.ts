@@ -60,6 +60,10 @@ import { aiRoutes } from "./routes/ai.js";
 import { dataSourcesRoutes } from "./routes/data-sources.js";
 import { emailRoutes } from "./routes/email.js";
 import { routinesRoutes } from "./routes/routines.js";
+import { normalizeTimeZone } from "./routines/cron.js";
+import { registerRoutineService } from "./routines/routines.js";
+import { consoleThreads } from "./routines/runner.js";
+import { RoutineService } from "./routines/service.js";
 import { appsRoutes } from "./routes/apps.js";
 import { bitbucketRoutes } from "./routes/bitbucket.js";
 import { chatRoutes } from "./routes/chat.js";
@@ -92,6 +96,7 @@ const CI_FIX_ERROR = "Fix rounds are a whole number from 0 to 5.";
 const PREVIEW_CHECK_ERROR = 'The preview check is "off", "visible" or "always".';
 const CAP_ERROR = "Caps are amounts in USD from 0 (no cap) to 100,000.";
 const ALERT_PERCENT_ERROR = "The alert level is a whole percent from 10 to 100.";
+const TIMEZONE_ERROR = "Choose a timezone from the list: an IANA name such as Europe/London, America/New_York or UTC.";
 const CAP_USD = z.number(CAP_ERROR).min(0, CAP_ERROR).max(100_000, CAP_ERROR);
 /** Repositories with their own monthly cap; more is not a useful setting. */
 const MAX_REPO_CAPS = 200;
@@ -214,6 +219,19 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
   const spending = new Spending({ store, usage, config: () => configRepo.load(), slack: slackFactory });
   // Console conversations: answered by the same brain, within the same limit as Slack answers.
   const conversations = new ConversationService({ store, configRepo, tasks, runner, brain, usage, spending, brainSlot: withBrainSlot, attachments });
+  // Routines: Pointer's scheduled work, run by the same brain (read-only), within the same caps and concurrency limit.
+  const routines = new RoutineService({
+    configRepo,
+    store,
+    masterKey,
+    brain,
+    usage,
+    spending,
+    threads: consoleThreads(conversations),
+    slack: slackFactory,
+    brainSlot: withBrainSlot,
+  });
+  registerRoutineService(configRepo, routines);
   const slackDeps: SlackDeps & { web: WebThreads; spending: Spending } = {
     configRepo,
     tasks,
@@ -679,6 +697,12 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
         allowedOwners: ALLOW_LIST.optional(),
         bindings: z.record(z.string().regex(CHANNEL_RE, "Channel IDs look like C012ABCDEF"), REPO_INPUT).optional(),
         pointerChannels: z.array(z.string().regex(CHANNEL_RE, "Channel IDs look like C012ABCDEF")).max(100).optional(),
+        /** The organisation's IANA timezone: the default for routines. */
+        timezone: z
+          .string()
+          .max(64, TIMEZONE_ERROR)
+          .refine((tz) => normalizeTimeZone(tz) !== undefined, TIMEZONE_ERROR)
+          .optional(),
         limits: z
           .object({
             maxTurns: z.number(),
@@ -703,6 +727,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
         if (input.allowedOwners) c.github.allowedOwners = input.allowedOwners;
         if (input.bindings) c.bindings = input.bindings;
         if (input.pointerChannels) c.slack.pointerChannels = [...new Set(input.pointerChannels)];
+        if (input.timezone !== undefined) c.timezone = normalizeTimeZone(input.timezone) ?? c.timezone;
         if (input.limits) c.limits = { ...c.limits, ...input.limits };
       });
       maxParallel = updated.limits.maxParallel;
@@ -1296,7 +1321,8 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
   app.use(aiRoutes(routeDeps));
   app.use(emailRoutes(routeDeps));
   app.use(dataSourcesRoutes(routeDeps));
-  app.use(routinesRoutes(routeDeps));
+  // The Routines page's API, and POST /routines/tick for external schedulers (outside /api: its own secret header, no session).
+  app.use(routinesRoutes({ ...routeDeps, routines }));
   app.use(chatRoutes({ ...routeDeps, conversations }));
 
   app.use(express.static(fileURLToPath(new URL("../public", import.meta.url)), { index: "index.html" }));
@@ -1306,7 +1332,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
     res.status(500).json({ error: "Something went wrong on the server." });
   });
 
-  return { app, runner, store, conversations, automation };
+  return { app, runner, store, conversations, automation, routines };
 }
 
 /** The stored key of a repo's setup: repo names are compared without letter case. */
@@ -1335,8 +1361,24 @@ function agentIdAt(input: unknown, index: number): string | undefined {
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   void removeStaleCredentialFolders(); // Google key files left by processes that died (ai-providers.ts)
   const port = Number(process.env.PORT ?? 8080);
-  const { app, runner, store } = await createApp();
-  app.listen(port, () => {
+  const { app, runner, store, routines } = await createApp();
+  const server = app.listen(port, () => {
     console.log(`[server] Agent Army listening on :${port} (runner=${runner.kind}, storage=${store.describe()})`);
+    // Routines' clock: a tick every minute; the lease keeps overlapping instances from both running them.
+    routines.scheduler.start();
   });
+  // A redeploy stops this instance: give the routines' lease up (at most 3 s) so the new one takes over at once,
+  // then end as the signal would have (the listener is gone, so raising it again takes the default action).
+  const shutdown = (signal: NodeJS.Signals) => {
+    const end = () => process.kill(process.pid, signal);
+    const timer = setTimeout(end, 3_000);
+    timer.unref();
+    void routines.scheduler.stop().finally(() => {
+      clearTimeout(timer);
+      server.close();
+      end();
+    });
+  };
+  process.once("SIGTERM", shutdown);
+  process.once("SIGINT", shutdown);
 }

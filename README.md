@@ -258,6 +258,7 @@ Pointer reacts with :eyes: while it works, then :white_check_mark: or :x:. Messa
 | `who's on the team?` | Describes the agents |
 | `fix the flaky checkout test` | Starts a repo task on this channel's default project |
 | `in owner/repo: add rate limiting to /api/login` | Starts a repo task on that project |
+| `every morning at 8, email me what happened on GitHub yesterday` | Creates a [routine](#routines): a read-only report on that schedule, to the recipients you name |
 | reply in the task's thread: `also cover the empty case` | Continues on the same branch and PR |
 | reply in a stopped task's thread: `continue` | Resumes the unfinished work on the same branch and draft PR |
 | on GitHub, request changes on the team's PR, or comment `/pointer rename the flag` | Starts a follow-up task in the task's thread (webhook set up, see [Pull request reviews](#pull-request-reviews)) |
@@ -496,6 +497,44 @@ A **skill** teaches an agent a task: a folder with a `SKILL.md` (YAML frontmatte
 ### Skills Scout
 
 The Skills Scout (an agent on the default team) finds skills for a need. On the Skills page, **Find skills** takes a need ("fill in and merge PDF forms") and runs one Claude query in the web service with web search and fetch only, Anthropic's skills repository first. It returns up to five candidates, each with what it does, why it fits, its licence, whether it runs scripts and which agents should use it. **Preview** opens the add drawer on that folder; installing is always your click. The Scout uses its own instructions from the Team page, at most $0.50 a search; the monthly spending cap applies (a search is refused once it is used up) and the cost counts with chat. `#/skills/find/<need>` opens the page with the need filled in and searched (HR's recommendations link there).
+
+## Routines
+
+A routine is work Pointer does on its own, on a schedule. Ask once and it reports from then on:
+
+| You ask | Pointer creates |
+| --- | --- |
+| `every morning at 8, email me everything that happened on GitHub in the last day` | **Daily GitHub digest**, `0 8 * * *`, emailed to the address you give |
+| `every Monday send me our signups and subscriptions from our API` | **Monday metrics**, `0 9 * * 1`, read from your company data (Integrations → Company data) |
+| `each Friday at 4pm post the week's merged PRs in #eng` | A weekly report to that Slack channel |
+
+Pointer turns the words into a 5-field cron, restates the schedule with the next run time, and says where the reports go. You can also create and change routines on the **Routines** page, which lists each one with its schedule in words, the next run, where it reports, the last run and an on/off switch. Its drawer has the instruction, schedule presets (**Every day at…**, **Weekdays at…**, **Weekly on…**, **Monthly on…**, **Custom cron**) with a live **Next runs** preview, the timezone, the recipients and the budget, plus **Run now** and the run history with every report. An empty page offers three routines to add in one click.
+
+**Schedule.** Standard cron (`minute hour day-of-month month day-of-week`; names like `mon` and `jan`, ranges, steps and lists; `@daily`, `@weekly`…) in an IANA timezone, by default the organisation's (**Settings → Timezone**). Daylight saving time works as classic cron: a time skipped when clocks go forward runs shifted by the gap (02:30 runs at 03:30 that day), a time that happens twice runs once, and every-hour schedules run in both passes. Routines run at most every 15 minutes.
+
+**Read-only.** A run goes through Pointer's brain like a chat message (the same tools, integrations, chat provider and redaction) but with only the tools that look things up: no repo tasks, no memory or project notes, no ticket, board or app changes, no Slack messages and no routine changes. The write tools are not offered at all, and a hook denies any that would get through. Each run has its own budget (`budgetUsd`, $1 by default), counts toward the monthly spending cap, and is skipped with a note when the cap is used up. The report covers what happened since the last successful run (the last 24 hours for the first one).
+
+**Delivery.** The platform delivers the report, never the model, and only to the routine's own recipients, with secrets redacted:
+
+- **Email**: to the listed addresses, subject `<routine name> · <date>` (needs **Email** set up on the Integrations page);
+- **Slack**: to one channel or person by id, converted to Slack formatting and split into several messages when long (invite Pointer to the channel first);
+- **Console**: one conversation per routine on the Chat page, titled with the routine's name, so the reports read like a thread and you can ask follow-up questions there.
+
+Every run is recorded (status, cost, where it was delivered, the report), and the last 50 are kept.
+
+**When it runs.** The web service checks every minute. When two instances overlap during a redeploy, a lease in the store lets only one of them check, and each scheduled run is claimed once. A run missed while the service was down runs once as a catch-up if it is less than an hour late; otherwise it is skipped with a note, and the routine carries on at its next time. Creating, changing or resuming a routine never catches up on runs from before.
+
+**Platforms that sleep.** A service that scales to zero (Cloud Run without minimum instances) does not tick while nobody calls it. The Routines page shows a wake-up address: have an external scheduler send `POST /routines/tick` with the `X-Routines-Secret` header every minute. With Cloud Scheduler:
+
+```bash
+gcloud scheduler jobs create http agent-army-routines --schedule="* * * * *" \
+  --uri="https://<your-service>/routines/tick" --http-method=POST \
+  --headers="X-Routines-Secret=<secret from the Routines page>" --attempt-deadline=10m
+```
+
+The request lasts until the routines it started have finished, so the work runs while the platform gives the service CPU. **New secret** on the page replaces the secret (the old one stops working at once).
+
+In chat, creating, changing and deleting routines need your confirmation once Pointer has read outside content in that turn, like other writes.
 
 ## Spending
 
@@ -794,7 +833,7 @@ Besides the admin API, the service takes `POST /slack/events` from Slack and `PO
 | `POST /api/monday` | `{ token?, defaultBoardId?, allowedBoardIds? }` | With `token`: verifies it and connects as its user. Board ids are digit strings (at most 100; `defaultBoardId: ""` clears the default, which must be among `allowedBoardIds` when those are set). Without a token, monday.com must already be connected. Returns `{ ok, userName?, accountName? }`. |
 | `POST /api/monday/disconnect` | | Forgets the token and its user; keeps the board settings. |
 | `GET /api/monday/boards` | `?search=` | `{ boards: [{ id, name, workspace? }] }`: up to 50 active boards, most recently used first, filtered by name. `400` when not connected or when monday.com fails. |
-| `POST /api/settings` | `{ orgName?, allowedUserIds?, allowedOwners?, bindings?, pointerChannels?, limits? }` | Partial update; `limits` (`maxTurns`, `maxBudgetUsd`, `maxParallel`, `progressEveryMin` 0-60, `ciWaitMin` 0-60, `ciFixRounds` 0-5, `previewCheck` `off` \| `visible` \| `always`) merges field by field. `allowedOwners` is the primary GitHub token's allow list (owners or exact repos). |
+| `POST /api/settings` | `{ orgName?, allowedUserIds?, allowedOwners?, bindings?, pointerChannels?, timezone?, limits? }` | Partial update; `timezone` is an IANA name from `Intl.supportedValuesOf('timeZone')` (or `UTC`), the default for new [routines](#routines) (`config.timezone` in `/api/state`); `limits` (`maxTurns`, `maxBudgetUsd`, `maxParallel`, `progressEveryMin` 0-60, `ciWaitMin` 0-60, `ciFixRounds` 0-5, `previewCheck` `off` \| `visible` \| `always`) merges field by field. `allowedOwners` is the primary GitHub token's allow list (owners or exact repos). |
 | `POST /api/repo-setup` | `{ repo, setupCommand?, startCommand?, appUrl?, env? }` | Creates or updates a repo's setup; omitted fields are kept. `setupCommand` up to 2 000 characters, `startCommand` up to 500, `appUrl` empty or `http(s)://…`. `env` is `{ NAME: "value" \| null }`: a value sets the variable, `null` deletes it, names left out are kept (at most 100; reserved names are refused, see [Repo setup](#repo-setup)). Returns `{ ok, repoSetup }`: that repo's setup with variable names only. |
 | `POST /api/repo-setup/delete` | `{ repo }` | Removes a repo's setup and its variables (`404` if unknown). |
 | `POST /api/team` | `{ pointer, agents }` | Replaces the team. `pointer`: `{ name, instructions, budgetUsd, maxTurns, model?, effort?, taskEffort?, routing? }`; `routing`: `{ enabled, small, medium, large }`, each size `{ model, effort }` (`model: ""` = the configured model). Each agent: `{ id, name, role, emoji, description, instructions, access, model?, effort?, enabled, skills?, avatar?, apps?, engine? }` (`apps`: ids of connected apps the agent may use; `engine`: `claude` (default), `codex` or `gemini`, see [Codex and Gemini CLI](#codex-and-gemini-cli)). Effort is `low`, `medium`, `high`, `xhigh` or `max` (an agent's `""` follows the chat or task). |
@@ -823,6 +862,18 @@ Besides the admin API, the service takes `POST /slack/events` from Slack and `PO
 | `POST /api/monday/automation` | `{ enabled?, boards?: { "<boardId>": { repo, statusColumnId, startLabel, workingLabel?, reviewLabel?, doneLabel?, stuckLabel? } \| null } }` | Turns ticket automation on or off and adds, changes (`null` removes) automated boards. Boards must be among `allowedBoardIds` when that list is set; `repo` must be allowed by a GitHub connection; the start label must differ from the others. With monday.com connected (and `SKIP_VALIDATION` unset) the status column and every label are checked on the board, and saved in the board's spelling; labels left out default to Working on it, In review, Done and Stuck, and `""` leaves the status alone. Removing a board deletes the webhook created on it. Returns `{ ok, automation }` (`config.monday.automation`: `{ enabled, webhookConfigured, boards }`, never the secret). |
 | `POST /api/monday/automation/webhook` | | Makes the webhook secret on first use and creates a `change_specific_column_value` webhook on each automated board's status column, pointing at `<base>/monday/webhook/<secret>` (an earlier one for another address is replaced). The automation must be on. Returns `{ ok, url, created: [boardId], failed: [{ boardId, error }], manualSteps? }`; `manualSteps` says how to add the webhook by hand when some boards failed. |
 | `GET /api/monday/columns` | `?boardId=` | `{ board: { id, name }, columns: [{ id, title, labels }] }`: the board's status columns and their labels, for the pickers. `400` when not connected, the board is not allowed, or monday.com fails. |
+| `GET /api/routines` | | `{ routines, timezone, emailReady, max, minIntervalMin }`. Each routine as `config.routines` holds it (`{ id, name, instruction, schedule: { cron, timezone }, deliver: { email, slack, console }, budgetUsd, enabled, createdBy, createdAt }`) plus `scheduleText` (the schedule in words), `nextRuns` (the next 3, ISO; empty while paused), `lastRun` (a run summary or `null`), `running`, `problem` (why it cannot run, or `null`) and `conversationId` (the console conversation its reports go to). See [Routines](#routines). |
+| `POST /api/routines` | `{ name, instruction, schedule: { cron, timezone? }, deliver?: { email?, slack?, console? }, budgetUsd?, enabled? }` | Creates a routine (id `rt-<slug of the name>`). The timezone defaults to the organisation's; `console` defaults to `true`. `400` for a cron that is invalid, never runs or runs more often than every 15 minutes, an unknown timezone, a bad email address (at most 20), a `slack` that is not a channel or user id, no recipient at all, or a budget outside $0.05-$20; `409` with 50 routines already. Returns `{ ok, routine }`. |
+| `POST /api/routines/preview` | `{ cron, timezone? }` | `{ ok, timezone, scheduleText, nextRuns }` (the next 3 runs), or `400` with why the schedule cannot be used. |
+| `GET /api/routines/:id` | | `{ routine }`, or `404`. |
+| `POST /api/routines/:id` | the same fields as creating, all optional | Changes a routine; fields left out are kept, `deliver.email` replaces the list. `enabled: false` pauses it, `true` resumes it. A new schedule or timezone, and resuming, count the schedule from now (no catch-up of earlier runs). Returns `{ ok, routine }`. |
+| `POST /api/routines/:id/delete` | | Deletes the routine and its run history; its console conversation stays. `404` if unknown. |
+| `POST /api/routines/:id/run` | | Runs it now in the background, to its own recipients. `202` with `{ ok, run }` (`status: "running"`); `409` while it is running. |
+| `GET /api/routines/:id/runs` | | `{ runs }`: the last 50, newest first, without reports: `{ id, routineId, trigger: "schedule" \| "catch-up" \| "manual", scheduledFor, startedAt, finishedAt?, status: "running" \| "succeeded" \| "failed" \| "skipped", costUsd?, delivered: { email, slack, console }, error?, note?, hasReport }`. Each `delivered` entry is `null` (not a recipient), `{ ok: true, detail? }` or `{ ok: false, error }`. |
+| `GET /api/routines/:id/runs/:runId` | | `{ run }`: one run with its `report` (Markdown, secrets redacted). `404` if unknown. |
+| `GET /api/routines/tick` | | `{ url, header, secret, method: "POST" }`: how an external scheduler wakes the service (the secret is made on first use and kept encrypted). |
+| `POST /api/routines/tick/rotate` | | A new tick secret; the old one stops working. Returns `{ ok, url, header, secret, method }`. |
+| `POST /routines/tick` | header `X-Routines-Secret` | Not an admin route. `401` without the right secret (compared in constant time; 20 failures per address per 10 minutes, then `429`). Starts the routines that are due, then answers when they have finished: `{ ok, leader, started: [{ routineId, runId, trigger }], skipped: [{ routineId, runId, note }], finished: [{ routineId, runId, status }] }`. `leader: false` when another instance holds the lease. |
 | `POST /monday/webhook/:secret` | monday.com's delivery | Not an admin route. `404` unless the automation is on and the secret matches (compared in constant time). Echoes `{ challenge }`; otherwise answers `200` at once, then reads the item again and starts the task (trigger `monday`, with `ticket`) when it qualifies. |
 | `POST /api/hr/review` | | Runs one HR review (one model call, at most $0.50; refused with `409` when the monthly cap is used up or a review is already running, `400` without the Claude key, `502` when the call fails, with `costUsd`). Returns `{ review }`: `{ id, createdAt, summary, proposals, costUsd, model, instructionsFrom: "team" \| "default", tasksSeen, dropped: [{ kind, why }] }`. Each proposal: `{ id: "p1"…, kind: "hire" \| "change" \| "retire" \| "skill", title, reason, evidence: string[], agent? (hire: a full agent), agentId?, agentName?, changes? (change: the new values), before? (change: the values when HR reviewed), skillNeed? (skill), status: "open" \| "applied" \| "dismissed", decidedAt?, appliedAgentId? }`. |
 | `GET /api/hr/reviews` | | `{ reviews }`, the last 20, newest first. |
@@ -904,6 +955,7 @@ Layout: `src/` is grouped into modules, one folder per area, and `test/` mirrors
   - `browser.ts` + `browser-mcp.ts`: the headless browser (Playwright MCP) and screenshots; `screenshots.ts`: encrypted screenshots from browser checks.
   - `guard.ts`: shell guard.
 - `src/spending/`: `budget.ts`: spending caps; `usage.ts`: what Claude has cost this month.
+- `src/routines/`: [routines](#routines). `cron.ts`: 5-field cron in IANA timezones; `scheduler.ts`: the minute tick, the lease and missed runs; `runner.ts`: one read-only run through Pointer's brain and its delivery; `runs.ts`: run records, state, lease and tick secret in the store; `service.ts`: create, change and list; `routines.ts`: Pointer's routine tools.
 - `src/ai/`: `ai-presets.ts` + `ai-providers.ts`: the AI providers Pointer and the team can run on, and what a query needs for each; `engines.ts`: the coding agent CLIs (Codex, Gemini CLI) the team can hand repo work to.
 - `src/integrations/`: one folder per service.
   - `code-hosts/`: `repo-id.ts`: repository ids across hosts; `code-host.ts`: what a code host does for a repo task; `code-host-factory.ts` + `code-host-access.ts`: which host and connection serve a repository, and whether it is allowed; `code-host-tools.ts`: Pointer's `gitlab_*` and `bitbucket_*` tools; `webhook.ts`: the GitHub webhook and the review follow-up every host shares.
