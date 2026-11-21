@@ -53,7 +53,7 @@ describe("due detection", () => {
 describe("the lease", () => {
   it("lets one instance tick at a time, until its lease expires or it gives it up", async () => {
     const store = await tmpStore();
-    const repo = new RoutineRunRepo(store, KEY, { settleMs: 0 });
+    const repo = new RoutineRunRepo(store, KEY);
     const t0 = at("2026-11-21T08:00:00Z");
     expect(await repo.acquireLease("a", t0, 180_000)).toBe(true);
     expect(await repo.acquireLease("b", new Date(t0.getTime() + 60_000), 180_000)).toBe(false);
@@ -68,19 +68,68 @@ describe("the lease", () => {
 
   it("of two instances writing at once, only one keeps it", async () => {
     const [storeA, storeB] = await sharedStores();
-    const a = new RoutineRunRepo(storeA, KEY, { settleMs: 30 });
-    const b = new RoutineRunRepo(storeB, KEY, { settleMs: 30 });
+    const a = new RoutineRunRepo(storeA, KEY);
+    const b = new RoutineRunRepo(storeB, KEY);
     const now = at("2026-11-21T08:00:00Z");
     const results = await Promise.all([a.acquireLease("a", now, 180_000), b.acquireLease("b", now, 180_000)]);
     expect(results.filter(Boolean)).toHaveLength(1);
   });
 });
 
+describe("the lease: takeovers", () => {
+  it("is renewed by its holder with the same token, and taken over by another only once it expires", async () => {
+    const [storeA, storeB] = await sharedStores();
+    const a = new RoutineRunRepo(storeA, KEY);
+    const b = new RoutineRunRepo(storeB, KEY);
+    const t0 = at("2026-11-21T08:00:00Z");
+    expect(await a.acquireLease("a", t0, 180_000)).toBe(true);
+    const token = (await a.lease())?.token;
+    expect(token).toBeTruthy();
+    expect(await b.acquireLease("b", at("2026-11-21T08:01:00Z"), 180_000)).toBe(false);
+    expect(await a.acquireLease("a", at("2026-11-21T08:01:00Z"), 180_000)).toBe(true);
+    expect((await a.lease())?.token).toBe(token);
+    // a stops renewing: once its lease expires, b takes it over with a new token.
+    expect(await b.acquireLease("b", at("2026-11-21T08:05:00Z"), 180_000)).toBe(true);
+    expect((await b.lease())?.owner).toBe("b");
+    expect((await b.lease())?.token).not.toBe(token);
+  });
+
+  it("is free right after its holder gives it up", async () => {
+    const [storeA, storeB] = await sharedStores();
+    const a = new RoutineRunRepo(storeA, KEY);
+    const b = new RoutineRunRepo(storeB, KEY);
+    expect(await a.acquireLease("a", at("2026-11-21T08:00:00Z"), 180_000)).toBe(true);
+    await a.releaseLease("a");
+    expect(await b.acquireLease("b", at("2026-11-21T08:00:10Z"), 180_000)).toBe(true);
+  });
+
+  it("recovers in the next lease period when a takeover's winner died before writing the lease", async () => {
+    const [storeA, storeB] = await sharedStores();
+    const a = new RoutineRunRepo(storeA, KEY);
+    const b = new RoutineRunRepo(storeB, KEY);
+    expect(await a.acquireLease("a", at("2026-11-21T08:00:00Z"), 180_000)).toBe(true);
+    const expired = at("2026-11-21T08:05:00Z");
+    // A winner that died: it created this period's race key but never wrote the lease.
+    const stuck = new RoutineRunRepo(storeA, KEY);
+    const create = storeA.create.bind(storeA);
+    storeA.create = async (key, data) => {
+      const won = await create(key, data);
+      if (key.startsWith("routines/lease-takeovers/")) throw new Error("died after winning");
+      return won;
+    };
+    await expect(stuck.acquireLease("dead", expired, 180_000)).rejects.toThrow("died after winning");
+    storeA.create = create;
+    expect(await b.acquireLease("b", expired, 180_000)).toBe(false);
+    // The next lease period opens a new race.
+    expect(await b.acquireLease("b", at("2026-11-21T08:09:00Z"), 180_000)).toBe(true);
+  });
+});
+
 describe("duplicate prevention", () => {
   it("claims a scheduled run once, even when two instances race for it", async () => {
     const [storeA, storeB] = await sharedStores();
-    const a = new RoutineRunRepo(storeA, KEY, { settleMs: 30 });
-    const b = new RoutineRunRepo(storeB, KEY, { settleMs: 30 });
+    const a = new RoutineRunRepo(storeA, KEY);
+    const b = new RoutineRunRepo(storeB, KEY);
     const scheduledFor = at("2026-11-21T08:00:00Z");
     const run = (owner: string) => ({
       id: scheduledRunId(scheduledFor),
@@ -102,11 +151,11 @@ describe("duplicate prevention", () => {
   it("two overlapping instances run a due routine once", async () => {
     const clock = new Clock(Date.parse("2026-11-21T07:00:00Z"));
     const [storeA, storeB] = await sharedStores();
-    const first = await routineEnv({ clock, store: storeA, owner: "old", settleMs: 30 });
+    const first = await routineEnv({ clock, store: storeA, owner: "old" });
     const created = await first.service.create(DIGEST, "test");
     expect(created.ok).toBe(true);
     // The new instance shares the store (a redeploy).
-    const second = await routineEnv({ clock, store: storeB, shared: true, owner: "new", settleMs: 30 });
+    const second = await routineEnv({ clock, store: storeB, shared: true, owner: "new" });
 
     clock.set("2026-11-21T08:00:30Z");
     const [a, b] = await Promise.all([first.service.scheduler.tick(), second.service.scheduler.tick()]);
@@ -213,7 +262,7 @@ describe("ticks", () => {
 
   it("keeps the last 50 runs", async () => {
     const store = new MemoryStore();
-    const repo = new RoutineRunRepo(store, KEY, { settleMs: 0 });
+    const repo = new RoutineRunRepo(store, KEY);
     for (let i = 0; i < 55; i++) {
       const when = new Date(Date.parse("2026-11-01T00:00:00Z") + i * 3_600_000);
       await repo.save({

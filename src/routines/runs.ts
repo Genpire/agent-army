@@ -14,7 +14,7 @@
  * - routines/lease.json: which instance runs the scheduler, until when.
  * - routines/tick.enc: the secret of POST /routines/tick, encrypted.
  */
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { decrypt, encrypt, randomToken } from "../core/crypto.js";
 import type { Store } from "../core/store.js";
 
@@ -70,6 +70,8 @@ export interface RoutineState {
 export interface Lease {
   owner: string;
   expiresAt: string;
+  /** Unique per lease taken (renewals keep it): taking over an expired lease is a race on this token. */
+  token?: string;
 }
 
 export const RUN_ID_RE = /^(?:s-\d{12}|m-\d{14}-[0-9a-f]{4})$/;
@@ -97,27 +99,13 @@ function parse<T>(blob: Buffer | null): T | null {
   }
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-export interface RoutineRunRepoOptions {
-  /**
-   * How long taking the lease waits before reading it back (the lease only
-   * decides which instance ticks; claiming a run is atomic, see claim()).
-   */
-  settleMs?: number;
-}
-
 export class RoutineRunRepo {
-  private readonly settleMs: number;
   private readonly chains = new Map<string, Promise<unknown>>();
 
   constructor(
     private readonly store: Store,
     private readonly masterKey: Buffer,
-    opts: RoutineRunRepoOptions = {},
-  ) {
-    this.settleMs = opts.settleMs ?? 300;
-  }
+  ) {}
 
   /** One change at a time per key (index and state files), in this process. */
   private serial<T>(key: string, fn: () => Promise<T>): Promise<T> {
@@ -208,23 +196,37 @@ export class RoutineRunRepo {
   }
 
   /**
-   * Takes or renews the scheduler's lease for `ttlMs`. Refused while another
-   * instance holds an unexpired one. A new holder reads it back after
-   * `settleMs`, so of two instances starting together only one keeps it.
+   * Takes or renews the scheduler's lease for `ttlMs`; false while another
+   * instance holds a live one. Renewing your own lease is a plain write.
+   * Taking a free lease (none yet, expired or given up) is a race on one key
+   * per lease, made with Store.create, so exactly one instance wins it. The
+   * lease only decides which instance ticks: claiming a run is atomic too.
    */
   async acquireLease(owner: string, now: Date, ttlMs: number): Promise<boolean> {
     const current = await this.lease();
-    if (current && current.owner !== owner && Date.parse(current.expiresAt) > now.getTime()) return false;
-    await this.store.put(LEASE_KEY, JSON.stringify({ owner, expiresAt: new Date(now.getTime() + ttlMs).toISOString() } satisfies Lease));
-    if (current?.owner === owner) return true;
-    if (this.settleMs > 0) await sleep(this.settleMs);
-    return (await this.lease())?.owner === owner;
+    const live = current !== null && Date.parse(current.expiresAt) > now.getTime();
+    if (live && current.owner !== owner) return false;
+    const expiresAt = new Date(now.getTime() + ttlMs).toISOString();
+    if (live && current.owner === owner) {
+      await this.store.put(LEASE_KEY, JSON.stringify({ owner, expiresAt, ...(current.token ? { token: current.token } : {}) } satisfies Lease));
+      return true;
+    }
+    // The race key names the lease being replaced (a lease written before tokens existed by its owner and
+    // expiry) and the current lease period, so a winner that dies before writing the lease blocks only
+    // this period. At a period boundary two instances may both win: harmless, as each run is claimed once.
+    const replaced = current ? (current.token ?? `${current.owner}-${current.expiresAt}`) : "none";
+    const period = Math.floor(now.getTime() / ttlMs);
+    const raceKey = `routines/lease-takeovers/${createHash("sha256").update(`${replaced}:${period}`).digest("hex").slice(0, 32)}.json`;
+    if (!(await this.store.create(raceKey, JSON.stringify({ owner, at: now.toISOString() })))) return false;
+    await this.store.put(LEASE_KEY, JSON.stringify({ owner, expiresAt, token: randomUUID() } satisfies Lease));
+    return true;
   }
 
-  /** Gives the lease up (shutdown), when this instance holds it. */
+  /** Gives the lease up (shutdown), when this instance holds it; its token stays, so the takeover race is new. */
   async releaseLease(owner: string): Promise<void> {
     const current = await this.lease();
-    if (current?.owner === owner) await this.store.put(LEASE_KEY, JSON.stringify({ owner, expiresAt: new Date(0).toISOString() } satisfies Lease));
+    if (current?.owner !== owner) return;
+    await this.store.put(LEASE_KEY, JSON.stringify({ owner, expiresAt: new Date(0).toISOString(), ...(current.token ? { token: current.token } : {}) } satisfies Lease));
   }
 
   // ---------- Tick secret ----------

@@ -875,7 +875,7 @@ async function seedRoutines(now: number): Promise<void> {
     c.timezone = DEMO_TZ;
     c.routines = DEMO_ROUTINES.map((r, i) => ({ ...structuredClone(r), createdAt: iso(now - (9 + i * 11) * 24 * 60 * MIN) }));
   });
-  const repo = new RoutineRunRepo(store, key, { settleMs: 0 });
+  const repo = new RoutineRunRepo(store, key);
   const day = (d: Date) => d.toLocaleDateString("en-US", { timeZone: DEMO_TZ, weekday: "long", month: "short", day: "numeric" });
 
   const seed = async (routine: Routine, runs: { at: Date; status: RoutineRun["status"]; report?: string; note?: string; costUsd?: number; delivered: RoutineRun["delivered"] }[]) => {

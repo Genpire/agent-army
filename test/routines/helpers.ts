@@ -156,8 +156,6 @@ export interface EnvOptions {
   /** The store already holds a config (another instance's). */
   shared?: boolean;
   owner?: string;
-  /** The store read-back delay (two instances racing need one). */
-  settleMs?: number;
 }
 
 /** A RoutineService over a temporary store, with every outside party faked. */
@@ -178,7 +176,6 @@ export async function routineEnv(opts: EnvOptions = {}) {
     slack: slack.slack,
     email: email.email,
     now: clock.now,
-    settleMs: opts.settleMs ?? 0,
     ...(opts.spending ? { spending: opts.spending } : {}),
     ...(opts.owner ? { owner: opts.owner } : {}),
   });

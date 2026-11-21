@@ -158,8 +158,6 @@ export interface RoutineServiceDeps {
   email?: EmailSender;
   brainSlot?: <T>(fn: () => Promise<T>) => Promise<T>;
   now?: () => Date;
-  /** Store read-back delay for claims and the lease (tests: 0). */
-  settleMs?: number;
   owner?: string;
 }
 
@@ -175,7 +173,7 @@ export class RoutineService {
     this.configRepo = deps.configRepo;
     this.clock = deps.now ?? (() => new Date());
     this.owner = deps.owner ?? newInstanceId();
-    this.repo = new RoutineRunRepo(deps.store, deps.masterKey, deps.settleMs !== undefined ? { settleMs: deps.settleMs } : {});
+    this.repo = new RoutineRunRepo(deps.store, deps.masterKey);
     this.runner = new RoutineRunner({
       configRepo: deps.configRepo,
       repo: this.repo,
