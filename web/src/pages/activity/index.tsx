@@ -17,6 +17,7 @@ import { PageFrame } from "../../components/PageFrame";
 import { navigate, useRoute } from "../../lib/router";
 import { useConfig } from "../../lib/state";
 import { STATUS_FILTERS, type StatusFilter, monthName } from "./model";
+import { MonthAgentsTable } from "./AgentSpend";
 import { TaskDrawer } from "./TaskDrawer";
 import { TaskTable } from "./TaskTable";
 import { LiveNote, StatTile, TopTasksTable, spendTiles } from "./Usage";
@@ -124,6 +125,15 @@ export default function ActivityPage() {
               ) : (
                 <Text color="secondary">{usage.data ? "No repo task has a cost yet this month." : "Loading"}</Text>
               )}
+            </VStack>
+          </Card>
+          <Card>
+            <VStack gap={4}>
+              <VStack gap={1}>
+                <Heading level={3}>By agent</Heading>
+                <Text type="supporting">{`Each agent's share of repo tasks and chat this month (${pointer} itself as the lead). Shares with Codex or Gemini CLI runs are estimated from their tokens.`}</Text>
+              </VStack>
+              {usage.data ? <MonthAgentsTable agents={usage.data.agents} /> : <Text color="secondary">Loading</Text>}
             </VStack>
           </Card>
         </VStack>

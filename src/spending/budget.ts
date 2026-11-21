@@ -2,15 +2,28 @@ import type { WebClient } from "@slack/web-api";
 import type { Budget, Config } from "../core/config.js";
 import { slackErrorCode } from "../slack/slack.js";
 import type { Store } from "../core/store.js";
-import { type MonthUsage, type UsageRepo, repoSpend, usd } from "./usage.js";
+import type { AgentSpec, Team } from "../team/team.js";
+import { LEAD_AGENT_ID } from "./attribution.js";
+import { BUDGET_PROVIDER_IDS, enginePrice, isBudgetProviderId, isEngineId, providerLabel } from "./prices.js";
+import { type AgentUsage, type MonthUsage, type ProviderUsage, type UsageRepo, repoSpend, usd } from "./usage.js";
 
 /**
  * Spending caps: a monthly Claude budget for chat and repo tasks together,
- * and optional monthly caps per repository (repo tasks only). New repo tasks
- * are refused when a cap is used up (every start path asks startThreadTask,
- * which asks `checkTask`), chat replies when the monthly cap is; a task's own
- * budget never exceeds what is left. Running tasks are never stopped by a cap:
- * their own budget already bounds them. A cap of 0 means no cap.
+ * optional monthly caps per repository (repo tasks only), per agent (its
+ * share of tasks and chat, attribution.ts; "pointer" is Pointer itself) and
+ * per AI provider or coding agent CLI, and what one agent may spend in a
+ * single task. A cap of 0 means no cap.
+ *
+ * - New repo tasks are refused when the monthly, the repository's, the task
+ *   provider's or Pointer's own cap is used up (every start path asks
+ *   startThreadTask, which asks `checkTask`; the worker asks again), chat
+ *   replies when the monthly, the chat provider's or Pointer's cap is. A
+ *   task's own budget never exceeds what is left.
+ * - An agent over its monthly cap, or working through an engine whose cap is
+ *   used up, is left out of the team for the task (`leftOut`).
+ * - Within a task, an agent past its per-task cap has its tool calls denied
+ *   (the worker's hook) and its engine runs stopped (engines.ts).
+ * Running tasks are otherwise never stopped by a cap: their own budget bounds them.
  *
  * Alerts: when a cap reaches `alertPercent` and again at 100%, one Slack
  * message in `alertChannel` per level per month (the log is in the store), and
@@ -22,6 +35,8 @@ export const MIN_TASK_USD = 0.5;
 
 /** Where the owner changes the caps, for every message about them. */
 const WHERE = "The owner can raise the cap in the admin console under Settings → Spending.";
+
+export { BUDGET_PROVIDER_IDS, LEAD_AGENT_ID };
 
 export type CapLevel = "ok" | "alert" | "exceeded";
 
@@ -48,6 +63,9 @@ export interface TaskBudgetCheck {
   checkTask(repo: string): Promise<CapDecision>;
 }
 
+/** The spend the caps are checked against; the per-agent and per-provider lists may be left out (no spend). */
+export type SpendInput = Pick<MonthUsage, "totalUsd" | "repos"> & Partial<Pick<MonthUsage, "agents" | "providers">>;
+
 const OK: CapDecision = { ok: true };
 
 /** A cap's state, or null when there is none (0). */
@@ -65,14 +83,37 @@ export function repoCapUsd(budget: Pick<Budget, "perRepoUsd">, repo: string): nu
   return 0;
 }
 
-/** True when some cap applies to a task on `repo` (else nothing needs to be read). */
-export const capsApply = (budget: Budget, repo?: string): boolean => budget.monthlyUsd > 0 || (repo !== undefined && repoCapUsd(budget, repo) > 0);
+const capOf = (caps: Record<string, number> | undefined, key: string): number => {
+  const cap = caps?.[key];
+  return typeof cap === "number" && cap > 0 ? cap : 0;
+};
+const anyCap = (caps: Record<string, number> | undefined) => Object.values(caps ?? {}).some((c) => c > 0);
+
+/** An agent's monthly cap ("pointer" for Pointer itself); 0 = none. */
+export const agentCapUsd = (budget: Pick<Budget, "perAgentUsd">, agentId: string): number => capOf(budget.perAgentUsd, agentId);
+/** An AI provider's or engine's monthly cap; 0 = none. */
+export const providerCapUsd = (budget: Pick<Budget, "perProviderUsd">, provider: string): number => capOf(budget.perProviderUsd, provider);
+/** What one agent may spend in a single repo task; 0 = no limit beyond the task's own budget. */
+export const perTaskCapUsd = (budget: Pick<Budget, "perTaskAgentUsd">, agentId: string): number => capOf(budget.perTaskAgentUsd, agentId);
+
+/** True when some monthly cap applies to a task on `repo` (else nothing needs to be read). */
+export const capsApply = (budget: Budget, repo?: string): boolean =>
+  budget.monthlyUsd > 0 || (repo !== undefined && repoCapUsd(budget, repo) > 0) || anyCap(budget.perAgentUsd) || anyCap(budget.perProviderUsd);
+
+const agentUsed = (usage: Partial<Pick<MonthUsage, "agents">>, agentId: string) => usage.agents?.find((a) => a.agentId === agentId)?.usd ?? 0;
+const providerUsed = (usage: Partial<Pick<MonthUsage, "providers">>, provider: string) => usage.providers?.find((p) => p.provider === provider)?.usd ?? 0;
 
 export const monthlyStatus = (budget: Budget, usage: Pick<MonthUsage, "totalUsd">): CapStatus | null =>
   capStatus(budget.monthlyUsd, usage.totalUsd, budget.alertPercent);
 
 export const repoStatus = (budget: Budget, usage: Pick<MonthUsage, "repos">, repo: string): CapStatus | null =>
   capStatus(repoCapUsd(budget, repo), repoSpend(usage, repo), budget.alertPercent);
+
+export const agentStatus = (budget: Budget, usage: Partial<Pick<MonthUsage, "agents">>, agentId: string): CapStatus | null =>
+  capStatus(agentCapUsd(budget, agentId), agentUsed(usage, agentId), budget.alertPercent);
+
+export const providerStatus = (budget: Budget, usage: Partial<Pick<MonthUsage, "providers">>, provider: string): CapStatus | null =>
+  capStatus(providerCapUsd(budget, provider), providerUsed(usage, provider), budget.alertPercent);
 
 function usedUp(what: string, spentOn: string, s: CapStatus, refused: string, forTask: boolean): string {
   const left = forTask && s.remainingUsd > 0 ? ` Only ${usd(s.remainingUsd)} is left, less than the ${usd(MIN_TASK_USD)} a repo task needs.` : "";
@@ -82,8 +123,20 @@ function usedUp(what: string, spentOn: string, s: CapStatus, refused: string, fo
 const MONTHLY = "This month's Claude budget";
 const SPENT_MONTHLY = "chat and repo tasks";
 
-/** Whether a new repo task on `repo` may start: refused when the monthly or the repository's cap has less than MIN_TASK_USD left. */
-export function taskDecision(budget: Budget, usage: Pick<MonthUsage, "totalUsd" | "repos">, repo: string): CapDecision {
+/** Who a decision is about besides the repository: the provider the work runs on, and Pointer's name. */
+export interface DecisionContext {
+  /** The AI provider the task or reply runs on (config.ai.taskProvider / chatProvider). */
+  provider?: string;
+  /** Pointer's name, for its own cap. */
+  leadName?: string;
+}
+
+/**
+ * Whether a new repo task on `repo` may start: refused when the monthly, the
+ * repository's, the task provider's or Pointer's own cap has less than
+ * MIN_TASK_USD left.
+ */
+export function taskDecision(budget: Budget, usage: SpendInput, repo: string, ctx: DecisionContext = {}): CapDecision {
   const monthly = monthlyStatus(budget, usage);
   if (monthly && monthly.remainingUsd < MIN_TASK_USD) {
     return { ok: false, error: usedUp(MONTHLY, SPENT_MONTHLY, monthly, "New repo tasks are refused", true) };
@@ -92,29 +145,58 @@ export function taskDecision(budget: Budget, usage: Pick<MonthUsage, "totalUsd" 
   if (own && own.remainingUsd < MIN_TASK_USD) {
     return { ok: false, error: usedUp(`The monthly budget for ${repo}`, `its repo tasks`, own, `New tasks on ${repo} are refused`, true) };
   }
-  return OK;
-}
-
-/** Whether a chat reply may start: refused once the monthly cap is used up. */
-export function chatDecision(budget: Budget, usage: Pick<MonthUsage, "totalUsd">): CapDecision {
-  const monthly = monthlyStatus(budget, usage);
-  if (monthly && monthly.remainingUsd <= 0) {
-    return { ok: false, error: usedUp(MONTHLY, SPENT_MONTHLY, monthly, "Chat replies and new repo tasks are refused", false) };
+  if (ctx.provider) {
+    const p = providerStatus(budget, usage, ctx.provider);
+    const label = providerLabel(ctx.provider);
+    if (p && p.remainingUsd < MIN_TASK_USD) {
+      return { ok: false, error: usedUp(`The monthly budget for ${label}`, `chat and repo tasks on ${label}`, p, `New repo tasks on ${label} are refused`, true) };
+    }
+  }
+  const lead = agentStatus(budget, usage, LEAD_AGENT_ID);
+  if (lead && lead.remainingUsd < MIN_TASK_USD) {
+    const name = ctx.leadName || "Pointer";
+    return { ok: false, error: usedUp(`${name}'s own monthly budget`, `its share of chat and repo tasks`, lead, "New repo tasks are refused", true) };
   }
   return OK;
 }
 
-/** The least left of the caps that apply to a task on `repo`, or undefined when none applies. */
+/** Whether a chat reply may start: refused once the monthly, the chat provider's or Pointer's own cap is used up. */
+export function chatDecision(budget: Budget, usage: Pick<MonthUsage, "totalUsd"> & Partial<Pick<MonthUsage, "agents" | "providers">>, ctx: DecisionContext = {}): CapDecision {
+  const monthly = monthlyStatus(budget, usage);
+  if (monthly && monthly.remainingUsd <= 0) {
+    return { ok: false, error: usedUp(MONTHLY, SPENT_MONTHLY, monthly, "Chat replies and new repo tasks are refused", false) };
+  }
+  if (ctx.provider) {
+    const p = providerStatus(budget, usage, ctx.provider);
+    const label = providerLabel(ctx.provider);
+    if (p && p.remainingUsd <= 0) {
+      return { ok: false, error: usedUp(`The monthly budget for ${label}`, `chat and repo tasks on ${label}`, p, `Chat replies on ${label} are refused`, false) };
+    }
+  }
+  const lead = agentStatus(budget, usage, LEAD_AGENT_ID);
+  if (lead && lead.remainingUsd <= 0) {
+    const name = ctx.leadName || "Pointer";
+    return { ok: false, error: usedUp(`${name}'s own monthly budget`, `its share of chat and repo tasks`, lead, "Chat replies and new repo tasks are refused", false) };
+  }
+  return OK;
+}
+
+/** The least left of the caps that bound a whole task on `repo` (monthly, repository, provider), or undefined when none applies. */
 export function remainingForTask(
   budget: Budget,
-  usage: Pick<MonthUsage, "totalUsd" | "repos">,
+  usage: SpendInput,
   repo: string,
-): { usd: number; scope: "monthly" | "repo" } | undefined {
+  provider?: string,
+): { usd: number; scope: "monthly" | "repo" | "provider" } | undefined {
+  const caps: { usd: number; scope: "monthly" | "repo" | "provider" }[] = [];
   const monthly = monthlyStatus(budget, usage);
+  if (monthly) caps.push({ usd: monthly.remainingUsd, scope: "monthly" });
   const own = repoStatus(budget, usage, repo);
-  if (!monthly && !own) return undefined;
-  if (monthly && (!own || monthly.remainingUsd <= own.remainingUsd)) return { usd: monthly.remainingUsd, scope: "monthly" };
-  return { usd: own!.remainingUsd, scope: "repo" };
+  if (own) caps.push({ usd: own.remainingUsd, scope: "repo" });
+  const p = provider ? providerStatus(budget, usage, provider) : null;
+  if (p) caps.push({ usd: p.remainingUsd, scope: "provider" });
+  // The first of the smallest: monthly before repo before provider.
+  return caps.reduce<(typeof caps)[number] | undefined>((least, c) => (!least || c.usd < least.usd ? c : least), undefined);
 }
 
 export type TaskBudget = { ok: true; budgetUsd: number; note?: string } | { ok: false; error: string };
@@ -124,38 +206,98 @@ export type TaskBudget = { ok: true; budgetUsd: number; note?: string } | { ok: 
  * the caps that apply (rounded down to the cent), or the refusal when too
  * little is left. `note` says why it was lowered (for the task's timeline).
  */
-export function taskBudgetFor(budget: Budget, usage: Pick<MonthUsage, "totalUsd" | "repos">, repo: string, maxBudgetUsd: number): TaskBudget {
-  const decision = taskDecision(budget, usage, repo);
+export function taskBudgetFor(budget: Budget, usage: SpendInput, repo: string, maxBudgetUsd: number, ctx: DecisionContext = {}): TaskBudget {
+  const decision = taskDecision(budget, usage, repo, ctx);
   if (!decision.ok) return decision;
-  const left = remainingForTask(budget, usage, repo);
+  const left = remainingForTask(budget, usage, repo, ctx.provider);
   if (!left || left.usd >= maxBudgetUsd) return { ok: true, budgetUsd: maxBudgetUsd };
   const budgetUsd = Math.floor(left.usd * 100) / 100;
-  const of = left.scope === "monthly" ? "this month's Claude budget" : `the monthly budget for ${repo}`;
+  const of =
+    left.scope === "monthly"
+      ? "this month's Claude budget"
+      : left.scope === "repo"
+        ? `the monthly budget for ${repo}`
+        : `the monthly budget for ${providerLabel(ctx.provider ?? "")}`;
   return { ok: true, budgetUsd, note: `This task may spend ${usd(budgetUsd)}: what is left of ${of} (the per-task budget is ${usd(maxBudgetUsd)}).` };
 }
 
+/** An agent left out of a task by a cap, and the timeline's line about it. */
+export interface LeftOutAgent {
+  id: string;
+  note: string;
+}
+
+/**
+ * The enabled agents that sit out the next repo task: over their own monthly
+ * cap, or working through an engine (Codex, Gemini CLI) whose monthly cap is
+ * used up. Pointer itself is never left out (its cap refuses the task instead).
+ */
+export function agentsLeftOut(budget: Budget, usage: Partial<Pick<MonthUsage, "agents" | "providers">>, agents: Pick<AgentSpec, "id" | "name" | "engine" | "enabled">[]): LeftOutAgent[] {
+  const out: LeftOutAgent[] = [];
+  for (const a of agents) {
+    if (!a.enabled) continue;
+    const own = agentStatus(budget, usage, a.id);
+    if (own && own.remainingUsd <= 0) {
+      out.push({ id: a.id, note: `${a.name} is over its monthly budget (${usd(own.usedUsd)} of ${usd(own.capUsd)}), so it is left out of this task.` });
+      continue;
+    }
+    if (a.engine === "claude") continue;
+    const engine = providerStatus(budget, usage, a.engine);
+    if (engine && engine.remainingUsd <= 0) {
+      const label = providerLabel(a.engine);
+      out.push({
+        id: a.id,
+        note: `${a.name} is over its monthly budget: ${label}, which does its work, has used up its cap (${usd(engine.usedUsd)} of ${usd(engine.capUsd)}), so ${a.name} is left out of this task.`,
+      });
+    }
+  }
+  return out;
+}
+
+/** The team without the agents a cap left out. */
+export function teamWithout(team: Team, leftOut: Pick<LeftOutAgent, "id">[]): Team {
+  if (!leftOut.length) return team;
+  const ids = new Set(leftOut.map((l) => l.id));
+  return { ...team, agents: team.agents.filter((a) => !ids.has(a.id)) };
+}
+
 // ---------- Alerts ----------
+
+export type AlertScope = "monthly" | "repo" | "agent" | "provider";
 
 export interface BudgetAlert {
   /** Identifies the alert in the month's log: scope, level, threshold and cap, so a new cap or threshold alerts again. */
   key: string;
   /** Keys this alert settles in the log: reaching 100% at once settles the alert level too. */
   covers: string[];
-  scope: "monthly" | "repo";
+  scope: AlertScope;
   /** For a repository's cap, as it is saved. */
   repo?: string;
+  /** For an agent's cap: its id ("pointer" for Pointer itself). */
+  agentId?: string;
+  /** For a provider's or engine's cap: its id. */
+  provider?: string;
+  /** The agent's or provider's name, for messages. */
+  name?: string;
   level: "alert" | "exceeded";
   capUsd: number;
   usedUsd: number;
   percent: number;
 }
 
+/** Agent names for messages: the team's, "Pointer" for the lead, else the id. */
+export function agentNamer(team: Pick<Team, "pointer" | "agents"> | undefined): (agentId: string) => string {
+  return (agentId) => {
+    if (agentId === LEAD_AGENT_ID) return team?.pointer.name || "Pointer";
+    return team?.agents.find((a) => a.id === agentId)?.name ?? agentId;
+  };
+}
+
 /** The level each cap has reached this month, at most one alert per cap (the higher level). */
-export function reachedAlerts(budget: Budget, usage: Pick<MonthUsage, "totalUsd" | "repos">): BudgetAlert[] {
+export function reachedAlerts(budget: Budget, usage: SpendInput, agentName: (agentId: string) => string = agentNamer(undefined)): BudgetAlert[] {
   const out: BudgetAlert[] = [];
-  const add = (scope: BudgetAlert["scope"], repo: string | undefined, s: CapStatus | null) => {
+  const add = (scope: AlertScope, base: string, extra: Pick<BudgetAlert, "repo" | "agentId" | "provider" | "name">, s: CapStatus | null) => {
     if (!s || s.level === "ok") return;
-    const base = scope === "monthly" ? "monthly" : `repo:${(repo ?? "").toLowerCase()}`;
     const alertKey = `${base}|alert@${budget.alertPercent}%|$${s.capUsd}`;
     const fullKey = `${base}|exceeded|$${s.capUsd}`;
     const exceeded = s.level === "exceeded";
@@ -163,27 +305,45 @@ export function reachedAlerts(budget: Budget, usage: Pick<MonthUsage, "totalUsd"
       key: exceeded ? fullKey : alertKey,
       covers: exceeded ? [fullKey, alertKey] : [alertKey],
       scope,
-      ...(repo ? { repo } : {}),
+      ...extra,
       level: exceeded ? "exceeded" : "alert",
       capUsd: s.capUsd,
       usedUsd: s.usedUsd,
       percent: s.percent,
     });
   };
-  add("monthly", undefined, monthlyStatus(budget, usage));
-  for (const repo of Object.keys(budget.perRepoUsd).sort()) add("repo", repo, repoStatus(budget, usage, repo));
+  add("monthly", "monthly", {}, monthlyStatus(budget, usage));
+  for (const repo of Object.keys(budget.perRepoUsd).sort()) add("repo", `repo:${repo.toLowerCase()}`, { repo }, repoStatus(budget, usage, repo));
+  for (const id of Object.keys(budget.perAgentUsd).sort()) add("agent", `agent:${id}`, { agentId: id, name: agentName(id) }, agentStatus(budget, usage, id));
+  for (const id of Object.keys(budget.perProviderUsd).sort()) add("provider", `provider:${id}`, { provider: id, name: providerLabel(id) }, providerStatus(budget, usage, id));
   return out;
 }
 
 const CHANGE = "Change the cap or this alert in the admin console under Settings → Spending.";
 
 /** The Slack message for an alert (mrkdwn). */
-export function alertText(a: Pick<BudgetAlert, "scope" | "repo" | "level" | "capUsd" | "usedUsd" | "percent">): string {
+export function alertText(a: Pick<BudgetAlert, "scope" | "repo" | "agentId" | "provider" | "name" | "level" | "capUsd" | "usedUsd" | "percent">): string {
   const spent = `${usd(a.usedUsd)} of ${usd(a.capUsd)}`;
   if (a.scope === "monthly") {
     return a.level === "exceeded"
       ? `:no_entry: This month's Claude spending cap is used up: ${spent} (chat and repo tasks). New repo tasks and chat replies are refused until the month ends (UTC); running tasks finish. ${WHERE}`
       : `:warning: Claude spending is at ${a.percent}% of this month's cap: ${spent} (chat and repo tasks). At the cap, new repo tasks and chat replies are refused until the month ends (UTC). ${CHANGE}`;
+  }
+  if (a.scope === "agent") {
+    const name = a.name ?? a.agentId ?? "An agent";
+    const lead = a.agentId === LEAD_AGENT_ID;
+    const atCap = lead ? "new repo tasks and chat replies are refused" : `${name} is left out of new repo tasks`;
+    return a.level === "exceeded"
+      ? `:no_entry: ${name}'s monthly budget is used up: ${spent}. ${atCap.charAt(0).toUpperCase()}${atCap.slice(1)} until the month ends (UTC); running tasks finish. ${WHERE}`
+      : `:warning: ${name} is at ${a.percent}% of its monthly budget: ${spent}. At the cap, ${atCap} until the month ends (UTC). ${CHANGE}`;
+  }
+  if (a.scope === "provider") {
+    const name = a.name ?? a.provider ?? "A provider";
+    const engine = isEngineId(a.provider ?? "");
+    const atCap = engine ? `agents working through ${name} are left out of new repo tasks` : `new repo tasks and chat replies on ${name} are refused`;
+    return a.level === "exceeded"
+      ? `:no_entry: The monthly budget for ${name} is used up: ${spent}. ${atCap.charAt(0).toUpperCase()}${atCap.slice(1)} until the month ends (UTC); running tasks finish. ${WHERE}`
+      : `:warning: ${name} is at ${a.percent}% of its monthly budget: ${spent}${engine ? " (estimated from tokens)" : ""}. At the cap, ${atCap} until the month ends (UTC). ${CHANGE}`;
   }
   const repo = `\`${a.repo ?? ""}\``;
   return a.level === "exceeded"
@@ -238,12 +398,54 @@ export interface BudgetView {
   alerts: (Omit<BudgetAlert, "covers"> & { notifiedAt?: string })[];
 }
 
-/** GET /api/usage: this month's spend with the caps. */
-export type UsageView = MonthUsage & { budget: BudgetView };
+/** One agent's month with its caps, for the console ("pointer" is Pointer itself, named "<name> (lead)"). */
+export interface AgentSpendView extends AgentUsage {
+  name: string;
+  /** Pointer itself. */
+  lead: boolean;
+  /** For team members: whether it is enabled, and who does its work in repo tasks. */
+  enabled?: boolean;
+  engine?: AgentSpec["engine"];
+  /** Its monthly cap, when it has one, and how far it is used. */
+  capUsd?: number;
+  remainingUsd?: number;
+  percent?: number;
+  level: CapLevel;
+  /** What it may spend in one repo task, when limited. */
+  perTaskCapUsd?: number;
+}
+
+/** One AI provider's or engine's month with its cap, for the console. */
+export interface ProviderSpendView extends ProviderUsage {
+  name: string;
+  kind: "ai" | "engine";
+  /** Connected (or chosen for chat or repo tasks), rather than only having spend or a cap. */
+  configured: boolean;
+  /** Engines: the model it runs ("" = the CLI's default), and whether that model has a price (else tokens only, no dollars). */
+  model?: string;
+  priced?: boolean;
+  capUsd?: number;
+  remainingUsd?: number;
+  percent?: number;
+  level: CapLevel;
+}
+
+/** GET /api/usage: this month's spend with the caps, per agent and per provider too. */
+export type UsageView = Omit<MonthUsage, "agents" | "providers"> & {
+  agents: AgentSpendView[];
+  providers: ProviderSpendView[];
+  budget: BudgetView;
+};
 
 const LEVEL_RANK: Record<CapLevel, number> = { ok: 0, alert: 1, exceeded: 2 };
+const worst = (levels: CapLevel[]): CapLevel => levels.reduce<CapLevel>((w, l) => (LEVEL_RANK[l] > LEVEL_RANK[w] ? l : w), "ok");
 
-export function budgetView(budget: Budget, usage: Pick<MonthUsage, "totalUsd" | "repos">, sent: Record<string, string> = {}): BudgetView {
+export function budgetView(
+  budget: Budget,
+  usage: SpendInput,
+  sent: Record<string, string> = {},
+  agentName: (agentId: string) => string = agentNamer(undefined),
+): BudgetView {
   const monthly = monthlyStatus(budget, usage);
   const repos = Object.keys(budget.perRepoUsd)
     .flatMap((repo) => {
@@ -251,16 +453,90 @@ export function budgetView(budget: Budget, usage: Pick<MonthUsage, "totalUsd" | 
       return s ? [{ repo, ...s }] : [];
     })
     .sort((a, b) => b.usedUsd / b.capUsd - a.usedUsd / a.capUsd || a.repo.localeCompare(b.repo));
-  const levels = [monthly?.level ?? "ok", ...repos.map((r) => r.level)];
-  const level = levels.reduce<CapLevel>((worst, l) => (LEVEL_RANK[l] > LEVEL_RANK[worst] ? l : worst), "ok");
+  const alerts = reachedAlerts(budget, usage, agentName);
   return {
     monthly,
     repos,
     alertPercent: budget.alertPercent,
     alertChannel: budget.alertChannel,
-    level,
-    alerts: reachedAlerts(budget, usage).map(({ covers: _covers, ...a }) => ({ ...a, ...(sent[a.key] ? { notifiedAt: sent[a.key] } : {}) })),
+    level: worst([monthly?.level ?? "ok", ...repos.map((r) => r.level), ...alerts.map((a) => a.level)]),
+    alerts: alerts.map(({ covers: _covers, ...a }) => ({ ...a, ...(sent[a.key] ? { notifiedAt: sent[a.key] } : {}) })),
   };
+}
+
+const capFields = (s: CapStatus | null): Pick<AgentSpendView, "capUsd" | "remainingUsd" | "percent" | "level"> =>
+  s ? { capUsd: s.capUsd, remainingUsd: s.remainingUsd, percent: s.percent, level: s.level } : { level: "ok" };
+
+const noSpend = { usd: 0, estimated: false, tasks: 0, chats: 0, tokens: 0, unpricedTokens: 0 };
+
+/** Every agent (Pointer first, then the team, then removed agents that still spent or have a cap) with its month and caps. */
+export function agentViews(config: Pick<Config, "team" | "budget">, usage: Partial<Pick<MonthUsage, "agents">>): AgentSpendView[] {
+  const { team, budget } = config;
+  const spent = new Map((usage.agents ?? []).map((a) => [a.agentId, a]));
+  const view = (agentId: string, name: string, extra: Partial<AgentSpendView>): AgentSpendView => ({
+    agentId,
+    ...noSpend,
+    ...spent.get(agentId),
+    name,
+    lead: agentId === LEAD_AGENT_ID,
+    ...extra,
+    ...capFields(agentStatus(budget, usage, agentId)),
+    ...(perTaskCapUsd(budget, agentId) > 0 ? { perTaskCapUsd: perTaskCapUsd(budget, agentId) } : {}),
+  });
+  const out = [view(LEAD_AGENT_ID, `${team.pointer.name} (lead)`, {}), ...team.agents.map((a) => view(a.id, a.name, { enabled: a.enabled, engine: a.engine }))];
+  const known = new Set(out.map((a) => a.agentId));
+  const others = new Set([...spent.keys(), ...Object.keys(budget.perAgentUsd), ...Object.keys(budget.perTaskAgentUsd)].filter((id) => !known.has(id)));
+  for (const id of [...others].sort()) {
+    const a = view(id, id, {});
+    if (a.usd > 0 || a.tokens > 0 || a.capUsd || a.perTaskCapUsd) out.push(a);
+  }
+  return out;
+}
+
+/** The providers and engines this deployment has (connected or chosen), and any other with spend or a cap, chosen ones first. */
+export function providerViews(
+  config: Pick<Config, "ai" | "anthropic" | "engines" | "budget">,
+  usage: Partial<Pick<MonthUsage, "providers">>,
+): ProviderSpendView[] {
+  const spent = new Map((usage.providers ?? []).map((p) => [p.provider, p]));
+  const configured = new Set<string>([config.ai.chatProvider, config.ai.taskProvider, ...Object.keys(config.ai.providers)]);
+  if (config.anthropic.apiKey) configured.add("anthropic");
+  for (const id of ["codex", "gemini"] as const) if (config.engines[id].apiKey) configured.add(id);
+  const ids = BUDGET_PROVIDER_IDS.filter((id) => configured.has(id) || spent.has(id) || providerCapUsd(config.budget, id) > 0);
+  return ids.map((id): ProviderSpendView => {
+    const engine = isEngineId(id);
+    const model = engine ? config.engines[id].model : undefined;
+    return {
+      provider: id,
+      ...noSpend,
+      ...spent.get(id),
+      name: providerLabel(id),
+      kind: engine ? "engine" : "ai",
+      configured: configured.has(id),
+      ...(engine ? { model: model ?? "", priced: enginePrice(id, model) !== undefined } : {}),
+      ...capFields(providerStatus(config.budget, usage, id)),
+    };
+  });
+}
+
+/** Cap keys of a POST /api/budget: an error message, or the caps to save (0 left out). */
+export function parseCapKeys(
+  caps: Record<string, number>,
+  o: { what: "agent" | "task" | "provider"; agentIds: string[] },
+): { ok: true; caps: Record<string, number> } | { ok: false; error: string } {
+  const known = new Set(o.what === "agent" ? [LEAD_AGENT_ID, ...o.agentIds] : o.agentIds);
+  const out: Record<string, number> = {};
+  for (const [key, cap] of Object.entries(caps)) {
+    if (o.what === "provider" ? !isBudgetProviderId(key) : !known.has(key)) {
+      const error =
+        o.what === "provider"
+          ? `${key} is not an AI provider or coding agent CLI. Use one of: ${BUDGET_PROVIDER_IDS.join(", ")}.`
+          : `${key} is not an agent on the team${o.what === "agent" ? ` (use "${LEAD_AGENT_ID}" for Pointer itself)` : ""}.`;
+      return { ok: false, error };
+    }
+    if (cap > 0) out[key] = cap;
+  }
+  return { ok: true, caps: out };
 }
 
 // ---------- The service ----------
@@ -294,39 +570,58 @@ export class Spending implements TaskBudgetCheck {
     return this.deps.now?.() ?? new Date();
   }
 
+  private month(config: Config): Promise<MonthUsage> {
+    return this.deps.usage.month(this.now(), { chatProvider: config.ai?.chatProvider });
+  }
+
   /** The config and this month's spend, or undefined when no cap applies (nothing is read then) or the lookup failed. */
   private async current(repo?: string): Promise<{ config: Config; usage: MonthUsage } | undefined> {
     try {
       const config = await this.deps.config();
       if (!capsApply(config.budget, repo)) return undefined;
-      return { config, usage: await this.deps.usage.month(this.now()) };
+      return { config, usage: await this.month(config) };
     } catch (err) {
       console.error("[budget] spend not checked:", errorText(err).slice(0, 200));
       return undefined;
     }
   }
 
+  private static context(config: Config, scope: "task" | "chat"): DecisionContext {
+    return { provider: scope === "task" ? config.ai?.taskProvider : config.ai?.chatProvider, leadName: config.team?.pointer.name };
+  }
+
   async checkTask(repo: string): Promise<CapDecision> {
     const c = await this.current(repo);
-    return c ? taskDecision(c.config.budget, c.usage, repo) : OK;
+    return c ? taskDecision(c.config.budget, c.usage, repo, Spending.context(c.config, "task")) : OK;
   }
 
   async checkChat(): Promise<CapDecision> {
     const c = await this.current();
-    return c ? chatDecision(c.config.budget, c.usage) : OK;
+    return c ? chatDecision(c.config.budget, c.usage, Spending.context(c.config, "chat")) : OK;
   }
 
   /** The worker, before the team's first run: the task's own budget, or the refusal. */
   async taskBudget(repo: string, maxBudgetUsd: number): Promise<TaskBudget> {
     const c = await this.current(repo);
-    return c ? taskBudgetFor(c.config.budget, c.usage, repo, maxBudgetUsd) : { ok: true, budgetUsd: maxBudgetUsd };
+    return c ? taskBudgetFor(c.config.budget, c.usage, repo, maxBudgetUsd, Spending.context(c.config, "task")) : { ok: true, budgetUsd: maxBudgetUsd };
+  }
+
+  /** The worker, before the team is built: the agents a monthly cap leaves out of this task. Never throws. */
+  async leftOut(team: Team): Promise<LeftOutAgent[]> {
+    const c = await this.current();
+    return c ? agentsLeftOut(c.config.budget, c.usage, team.agents) : [];
   }
 
   async view(): Promise<UsageView> {
-    const now = this.now();
-    const [config, usage] = await Promise.all([this.deps.config(), this.deps.usage.month(now)]);
+    const config = await this.deps.config();
+    const usage = await this.month(config);
     const sent = await this.alerts.sent(usage.month).catch(() => ({}));
-    return { ...usage, budget: budgetView(config.budget, usage, sent) };
+    return {
+      ...usage,
+      agents: agentViews(config, usage),
+      providers: providerViews(config, usage),
+      budget: budgetView(config.budget, usage, sent, agentNamer(config.team)),
+    };
   }
 
   /**
@@ -344,12 +639,12 @@ export class Spending implements TaskBudgetCheck {
     const config = await this.deps.config();
     const { budget } = config;
     const token = config.slack.botToken;
-    const hasCap = budget.monthlyUsd > 0 || Object.values(budget.perRepoUsd).some((cap) => cap > 0);
+    const hasCap = budget.monthlyUsd > 0 || anyCap(budget.perRepoUsd) || anyCap(budget.perAgentUsd) || anyCap(budget.perProviderUsd);
     if (!hasCap || !budget.alertChannel || !token || !this.deps.slack) return;
     const now = this.now();
-    const usage = await this.deps.usage.month(now);
+    const usage = await this.month(config);
     const sent = await this.alerts.sent(usage.month);
-    const due = reachedAlerts(budget, usage).filter((a) => !sent[a.key]);
+    const due = reachedAlerts(budget, usage, agentNamer(config.team)).filter((a) => !sent[a.key]);
     if (!due.length) return;
     const slack = this.deps.slack(token);
     const done: string[] = [];

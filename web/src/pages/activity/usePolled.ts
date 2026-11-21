@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, errorMessage } from "../../lib/api";
-import type { MonthUsage, Task } from "../../lib/types";
+import type { UsageView } from "../../../../src/spending/budget.js";
+import type { Task } from "../../lib/types";
 
 export interface Polled<T> {
   /** Undefined until the first answer. */
@@ -65,5 +66,5 @@ export function useTasks(): Polled<Task[]> {
   return { ...polled, data: polled.data?.tasks };
 }
 
-/** GET /api/usage: Claude spend this calendar month (UTC). */
-export const useUsage = (): Polled<MonthUsage> => usePolled<MonthUsage>("/api/usage", USAGE_EVERY_MS);
+/** GET /api/usage: Claude spend this calendar month (UTC), per agent and provider too. */
+export const useUsage = (): Polled<UsageView> => usePolled<UsageView>("/api/usage", USAGE_EVERY_MS);

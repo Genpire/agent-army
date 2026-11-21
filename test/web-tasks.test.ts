@@ -520,7 +520,7 @@ describe("Pointer brain activity", () => {
         if (e.type === "turn") throw new Error("a listener error must not break the answer");
       },
     });
-    expect(reply).toEqual({ text: "Answer.", costUsd: 0.01, isError: false });
+    expect(reply).toEqual({ text: "Answer.", costUsd: 0.01, isError: false, agentCosts: { pointer: { usd: 0.01 } }, provider: "anthropic" });
     expect(seen).toEqual([{ includePartialMessages: true }]);
     expect(events).toEqual([
       { type: "turn" },

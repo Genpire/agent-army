@@ -274,7 +274,7 @@ export class RoutineRunner {
       const reply = await slot(() => this.deps.brain.reply(req, { startRepoTask: NOT_HERE }));
       if (reply.costUsd !== undefined) run.costUsd = reply.costUsd;
       void this.deps.usage
-        ?.recordChat(reply.costUsd)
+        ?.recordChat(reply)
         .then(() => this.deps.spending?.notify())
         .catch((err: unknown) => console.error("[usage] routine cost not recorded:", errorText(err).slice(0, 200)));
 

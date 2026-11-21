@@ -21,8 +21,11 @@
  *   output line capped, and what is kept from the run capped as it arrives);
  * - ends with the CLI's final message and what changed in the checkout
  *   (`git status --porcelain`, `git diff --stat`, through the worker's
- *   hardened git), capped and redacted.
- * Neither CLI reports a dollar cost: token counts are reported when the CLI gives them.
+ *   hardened git), capped and redacted;
+ * - reports its tokens to the worker's spending caps (EngineDeps.spend), and
+ *   is stopped like a timed-out run (its process group killed) once its
+ *   agent's budget for the task is reached.
+ * Neither CLI reports a dollar cost: token counts are reported when the CLI gives them (the worker estimates dollars, prices.ts).
  */
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -66,7 +69,30 @@ export interface EngineDeps {
   geminiSettings?: GeminiSettingsFile;
   /** coreutils `timeout`, which enforces a run's deadline even if the worker dies (tests: a stand-in, or null for none). Default: found on PATH. */
   timeoutCommand?: string | null;
+  /** The spending caps (the worker's): each run's tokens are reported, and a run past its agent's per-task cap is stopped. */
+  spend?: EngineSpend;
 }
+
+/** What the worker tracks of engine runs (attribution.ts, budget.ts). */
+export interface EngineSpend {
+  /** A run of `engine` is starting for this tool call (`tool` and its `task`, matched to the agent that made it); undefined: not tracked. */
+  begin(o: { engine: EngineId; tool: string; task: string; model: string }): EngineRunSpend | undefined;
+}
+
+/** One tracked run. */
+export interface EngineRunSpend {
+  /**
+   * The run's tokens so far: the CLI's own report once it gives one, else an
+   * estimate from what it streamed. True = its agent's budget for this task
+   * is reached, and the run is stopped.
+   */
+  update(usage: TokenUsage, model: string): boolean;
+  /** The run ended (its tokens, as reported or estimated). */
+  end(usage: TokenUsage | undefined, model: string): void;
+}
+
+/** Characters per token, for the estimate from a run's output before the CLI reports its tokens (a lower bound: each step reads more than it writes). */
+const CHARS_PER_TOKEN = 4;
 
 /** Where Gemini CLI's system settings are, and whether to check they are root's (Gemini CLI skips the file otherwise). */
 export interface GeminiSettingsFile {
@@ -413,6 +439,8 @@ interface RunState {
   lastError?: string;
   /** Gemini: a tool call ended the message being streamed; the next text starts a new one. */
   split?: boolean;
+  /** The model the CLI says it runs (Gemini CLI's init event). */
+  model?: string;
 }
 
 /** One stdout line: what it adds to the state, and a progress line for the timeline (if any). */
@@ -479,6 +507,10 @@ function geminiToolText(name: string, params: Record<string, unknown>): string {
 /** `gemini -o stream-json`: init, message (assistant deltas), tool_use, tool_result, error, result. */
 export const parseGeminiEvent: LineParser = (event, state) => {
   const type = str(event.type);
+  if (type === "init") {
+    if (str(event.model)) state.model = keep(str(event.model), 100);
+    return undefined;
+  }
   if (type === "message" && event.role === "assistant") {
     // Deltas: the text between two tool calls is one message.
     if (!state.messages.length || state.split) {
@@ -770,7 +802,7 @@ function redactStrings(value: unknown, redact: (text: string) => string, depth =
  */
 export async function runEngine(
   runner: EngineRunner,
-  o: { task: string; mode: EngineMode; timeoutMin: number; deps: EngineDeps; root: string; signal?: AbortSignal; gitHome: string },
+  o: { task: string; mode: EngineMode; timeoutMin: number; deps: EngineDeps; root: string; signal?: AbortSignal; gitHome: string; spend?: EngineRunSpend },
 ): Promise<{ ok: boolean; text: string }> {
   const { info } = runner;
   const ownKey = makeRedactor([runner.key]);
@@ -783,8 +815,15 @@ export async function runEngine(
   if (refusal) {
     const why = `${info.label} was not started: ${refusal}.`;
     o.deps.note(redact(why).slice(0, NOTE_MAX_CHARS * 2));
+    o.spend?.end(undefined, runner.model);
     return finish(false, `${why} ${o.mode === "read" ? "Do the assignment with your own tools instead." : "Say so in your report, so the work can go to another agent."}`);
   }
+  // Its agent's budget for this task (the worker's caps): the run is stopped, its process group killed, once it is reached.
+  const budgetStop = new AbortController();
+  const signal = o.signal ? AbortSignal.any([o.signal, budgetStop.signal]) : budgetStop.signal;
+  let streamed = 0;
+  let overBudget = false;
+  const tokensSoFar = (s: RunState): TokenUsage => s.usage ?? { input: Math.ceil(streamed / CHARS_PER_TOKEN), output: 0 };
 
   // A fresh home and temp folder for each run (0700, next to the checkout): nothing one run writes there reaches the next.
   const runDir = await mkdtemp(join(o.root, `${info.id}-`));
@@ -811,18 +850,24 @@ export async function runEngine(
       env,
       input: cliPrompt(o.task, o.mode),
       timeoutMs,
-      signal: o.signal,
+      signal,
       backstop: backstop ? { command: backstop, seconds: Math.ceil(timeoutMs / 1000) + BACKSTOP_MARGIN_S } : undefined,
       onDroppedLine: () => {
         if (dropped++ === 0) o.deps.note(`${info.label}: an output line over ${LINE_MAX_CHARS / 1024} KB was left out`);
       },
       onLine: (line) => {
+        streamed += line.length;
         const trimmed = line.trim();
         if (!trimmed.startsWith("{")) return;
         // Redacted as it arrives, once decoded: everything kept from the run (messages, commands, errors) is.
         const event = redactStrings(JSON.parse(trimmed), redact);
         if (event === null || typeof event !== "object" || Array.isArray(event)) return;
         const progress = runner.parse(event as Record<string, unknown>, state);
+        if (o.spend && !overBudget && o.spend.update(tokensSoFar(state), state.model || runner.model)) {
+          overBudget = true;
+          o.deps.note(`${info.label} stopped: its agent's budget for this task is reached`);
+          budgetStop.abort();
+        }
         const now = Date.now();
         if (progress && notes < MAX_PROGRESS_NOTES && now - lastNoteAt >= every) {
           notes++;
@@ -838,7 +883,9 @@ export async function runEngine(
       : run.timedOut
         ? `it timed out after ${o.timeoutMin} min and was stopped`
         : run.aborted
-          ? "the task was stopped"
+          ? overBudget
+            ? "its agent's budget for this task was reached, so it was stopped; wrap up and report what is done"
+            : "the task was stopped"
           : run.code !== 0
             ? state.failure || state.lastError || `it exited with ${run.code === null ? `signal ${run.signal}` : `code ${run.code}`}`
             : state.failure;
@@ -856,6 +903,7 @@ export async function runEngine(
     const final = state.messages.at(-1)?.trim() ?? "";
     // A run that failed before the model answered reports zero tokens: nothing to say.
     const usage = state.usage && state.usage.input + state.usage.output > 0 ? state.usage : undefined;
+    o.spend?.end(usage ?? (streamed ? tokensSoFar(state) : undefined), state.model || runner.model);
     // Its own log lines, without stack frames.
     const errorTail = redact(run.stderrTail)
       .split("\n")
@@ -884,6 +932,7 @@ export async function runEngine(
   } catch (err) {
     const message = `${info.label} failed: ${err instanceof Error ? err.message : String(err)}`;
     o.deps.note(redact(message).slice(0, NOTE_MAX_CHARS));
+    o.spend?.end(streamed ? tokensSoFar(state) : undefined, state.model || runner.model);
     return finish(false, message);
   } finally {
     await rm(runDir, { recursive: true, force: true }).catch(() => {});
@@ -1018,7 +1067,8 @@ export async function repoTaskEngines(config: Config, deps: EngineDeps): Promise
         input,
         async (args, extra) => {
           const signal = (extra as { signal?: AbortSignal } | undefined)?.signal;
-          const result = await runEngine(runner, { task: args.task, mode, timeoutMin: args.timeoutMin ?? DEFAULT_TIMEOUT_MIN, deps, root: engineRoot, gitHome, signal });
+          const spend = deps.spend?.begin({ engine: id, tool: engineToolName(id, mode), task: args.task, model: runner.model });
+          const result = await runEngine(runner, { task: args.task, mode, timeoutMin: args.timeoutMin ?? DEFAULT_TIMEOUT_MIN, deps, root: engineRoot, gitHome, signal, spend });
           return { content: [{ type: "text" as const, text: result.text }], ...(result.ok ? {} : { isError: true }) };
         },
         { annotations: { readOnlyHint: mode === "read", destructiveHint: mode === "write", openWorldHint: true }, alwaysLoad: true },

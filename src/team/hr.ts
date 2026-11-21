@@ -969,7 +969,7 @@ export class HrService {
     // Counted with chat (the web service's own Claude spend), so the monthly cap sees it.
     if (run.costUsd > 0) {
       await this.deps.usage
-        .recordChat(run.costUsd, now)
+        .recordChat({ costUsd: run.costUsd, provider: provider.runtime.provider, agentCosts: { [HR_AGENT_ID]: { usd: run.costUsd } } }, now)
         // Alerts in Slack in the background: the owner is waiting for the review.
         .then(() => void this.deps.spending?.notify())
         .catch((err: unknown) => console.error("[hr] review cost not recorded:", redact(errorText(err)).slice(0, 200)));

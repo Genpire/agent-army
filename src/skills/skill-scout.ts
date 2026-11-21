@@ -227,7 +227,7 @@ export async function findSkills(need: string, deps: ScoutDeps): Promise<ScoutRe
   }
   // What it cost counts with chat, against the monthly cap, whether or not it found anything.
   void deps.usage
-    ?.recordChat(costUsd)
+    ?.recordChat({ costUsd, provider: runtime.provider, ...(costUsd !== undefined ? { agentCosts: { scout: { usd: costUsd } } } : {}) })
     .then(() => deps.spending?.notify())
     .catch((err: unknown) => console.error("[scout] cost not recorded:", err instanceof Error ? err.message : String(err)));
   if (abort.signal.aborted) failure = `The Scout ran out of time (${Math.round((deps.timeoutMs ?? SCOUT_TIMEOUT_MS) / 60_000) || 1} min).`;
