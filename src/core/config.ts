@@ -429,6 +429,11 @@ export const DataSourceSchema = z.object({
         .default({ type: "none" }),
       /** Path prefixes Pointer may read, e.g. "/api/stats"; empty = any path under the base URL. */
       allowedPaths: z.array(z.string().max(300)).max(50).default([]),
+      /**
+       * The API is on a private network (10.x, a VPC, a container name): its
+       * addresses pass the network guard. Off = public addresses only.
+       */
+      internal: z.boolean().default(false),
     })
     .optional(),
   postgres: z.object({ connectionString: z.string().max(2000), schemas: z.array(z.string().max(63)).max(20).default(["public"]) }).optional(),
@@ -655,6 +660,18 @@ export function mask(secret: string | undefined): string | null {
   return secret.length <= 8 ? "••••" : `••••${secret.slice(-4)}`;
 }
 
+/** A Postgres connection string's "user@host:port/database", without its password or options; "" when it is not a URL. */
+export function postgresAddress(connectionString: string): string {
+  try {
+    const u = new URL(connectionString);
+    if (!/^postgres(ql)?:$/.test(u.protocol) || !u.hostname) return "";
+    const user = u.username ? `${decodeURIComponent(u.username)}@` : "";
+    return `${user}${u.hostname}${u.port ? `:${u.port}` : ""}${u.pathname.length > 1 ? decodeURIComponent(u.pathname) : ""}`;
+  } catch {
+    return "";
+  }
+}
+
 /** What the browser is allowed to see. Secrets never leave the server. */
 export function publicView(c: Config) {
   return {
@@ -815,9 +832,20 @@ export function publicView(c: Config) {
         ? {
             baseUrl: d.http.baseUrl,
             allowedPaths: d.http.allowedPaths,
+            internal: d.http.internal,
             auth:
               d.http.auth.type === "login"
-                ? { type: "login" as const, loginUrl: d.http.auth.loginUrl, username: d.http.auth.username, password: mask(d.http.auth.password) }
+                ? {
+                    type: "login" as const,
+                    loginUrl: d.http.auth.loginUrl,
+                    username: d.http.auth.username,
+                    password: mask(d.http.auth.password),
+                    usernameField: d.http.auth.usernameField,
+                    passwordField: d.http.auth.passwordField,
+                    tokenPath: d.http.auth.tokenPath,
+                    headerName: d.http.auth.headerName,
+                    headerPrefix: d.http.auth.headerPrefix,
+                  }
                 : d.http.auth.type === "basic"
                   ? { type: "basic" as const, username: d.http.auth.username, password: mask(d.http.auth.password) }
                   : d.http.auth.type === "bearer"
@@ -827,7 +855,7 @@ export function publicView(c: Config) {
                       : { type: "none" as const },
           }
         : null,
-      postgres: d.postgres ? { configured: true, schemas: d.postgres.schemas } : null,
+      postgres: d.postgres ? { configured: true, address: postgresAddress(d.postgres.connectionString), schemas: d.postgres.schemas } : null,
     })),
     routines: c.routines,
     budget: c.budget,
