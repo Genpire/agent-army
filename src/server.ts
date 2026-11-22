@@ -50,7 +50,7 @@ import { createStore } from "./core/store.js";
 import { detectPublicUrl, publicUrlWarning } from "./core/public-url.js";
 import { readTimeline } from "./tasks/task-events.js";
 import { TaskRepo } from "./tasks/tasks.js";
-import { SKILL_NAME_RE, TeamSchema } from "./team/team.js";
+import { SKILL_NAME_RE, TeamSchema, defaultTeam } from "./team/team.js";
 import { rememberConsoleUrl } from "./integrations/tickets/ticket-sync.js";
 import { checkAnthropic, checkGithub, checkSlack } from "./core/validate.js";
 import { UsageRepo } from "./spending/usage.js";
@@ -977,6 +977,11 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
       c.team = parsed.data;
     });
     res.json({ ok: true });
+  });
+
+  // The built-in agents (the default team's), so the Team page can add one the saved team lacks: a role added since, or a deleted default.
+  app.get("/api/team/builtins", requireAdmin, (_req, res) => {
+    res.json({ agents: defaultTeam().agents });
   });
 
   // ---------- HR: reviews of the team, with proposals the owner applies or dismisses (see hr.ts) ----------

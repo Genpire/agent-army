@@ -17,16 +17,19 @@ import { useConfig } from "../../lib/state";
 import type { AgentSpec, PointerSpec } from "../../lib/types";
 import { AgentDrawer, type AgentTarget } from "./AgentDrawer";
 import { AgentsTable } from "./AgentsTable";
+import { BuiltinAgentsMenu } from "./BuiltinAgentsMenu";
 import { HrSection } from "./HrSection";
 import { PointerSettings, SettingsRow } from "./PointerSettings";
-import { CLAUDE_CHOICES, MAX_AGENTS, providerChoices } from "./team";
+import { CLAUDE_CHOICES, MAX_AGENTS, providerChoices, routeTarget } from "./team";
+import { useMissingBuiltins } from "./useMissingBuiltins";
 import { useTeamSave } from "./useTeamSave";
 import { WorkFlow } from "./WorkFlow";
 
 /**
  * Team: who is on it (the agents), how a repo task moves through it, and
  * Pointer's own settings. An agent opens in a drawer at #/team/agent/<id>;
- * #/team/new-agent opens an empty one.
+ * #/team/new-agent opens an empty one, and #/team/builtin/<id> one prefilled
+ * with a built-in agent the team does not have.
  */
 export default function TeamPage() {
   const { config } = useConfig();
@@ -38,20 +41,20 @@ export default function TeamPage() {
   const canChangeCode = enabled.some((a) => a.access === "write");
   const isFull = team.agents.length >= MAX_AGENTS;
 
+  const takenIds = useMemo(() => new Set(team.agents.map((a) => a.id)), [team.agents]);
+  const missingBuiltins = useMissingBuiltins(takenIds);
+
   // The drawer follows the route; the last target stays while it animates out.
   const [mode, id] = route.rest;
-  const routed: AgentTarget | undefined = useMemo(() => {
-    if (mode === "new-agent") return isFull ? undefined : { kind: "new" };
-    const agent = mode === "agent" ? team.agents.find((a) => a.id === id) : undefined;
-    return agent ? { kind: "edit", agent } : undefined;
-  }, [mode, id, team.agents, isFull]);
+  const routed = useMemo(
+    () => routeTarget([mode ?? "", id ?? ""], { agents: team.agents, builtins: missingBuiltins, isFull }),
+    [mode, id, team.agents, isFull, missingBuiltins],
+  );
   const [target, setTarget] = useState<AgentTarget | undefined>(routed);
   useEffect(() => {
     if (routed) setTarget(routed);
   }, [routed]);
   const close = useCallback(() => navigate("team"), []);
-
-  const takenIds = useMemo(() => new Set(team.agents.map((a) => a.id)), [team.agents]);
 
   // The model pickers list the models of the providers chat and repo tasks run on (each picker loads its list when it opens).
   const onClaude = config.ai.chatProvider === "anthropic" && config.ai.taskProvider === "anthropic";
@@ -84,6 +87,13 @@ export default function TeamPage() {
       tooltip={isFull ? `A team can have at most ${MAX_AGENTS} agents.` : undefined}
     />
   );
+  // A saved team never gets new built-in roles by itself: they are offered here.
+  const addButtons = (
+    <HStack gap={2} wrap="wrap">
+      <BuiltinAgentsMenu agents={missingBuiltins} isFull={isFull} />
+      {addButton}
+    </HStack>
+  );
 
   return (
     <PageFrame title="Team" description={`${team.pointer.name} leads in Slack and hands work to the agents. Only this page changes the team.`}>
@@ -98,7 +108,7 @@ export default function TeamPage() {
                   : `${enabled.length} of ${team.agents.length} enabled. ${team.pointer.name} picks an agent by its “When to use” line; open one to edit it.`}
               </Text>
             </VStack>
-            {team.agents.length > 0 && addButton}
+            {team.agents.length > 0 && addButtons}
           </HStack>
           {!canChangeCode && team.agents.length > 0 && (
             <Banner
@@ -113,7 +123,7 @@ export default function TeamPage() {
                 title="No agents yet"
                 description={`${team.pointer.name} answers on its own until you add an agent. Add one that can change code so repo tasks can run.`}
                 icon={<Icon icon={UserGroupIcon} size="lg" />}
-                actions={addButton}
+                actions={addButtons}
               />
             </Card>
           ) : (

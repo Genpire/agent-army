@@ -183,7 +183,7 @@ describe("evidence", () => {
     const evidence = buildEvidence({ tasks, team: big, chatModel: "claude-sonnet-5-5", budget: BudgetSchema.parse({}), now: NOW });
     const text = evidenceText(evidence);
     expect(text.length).toBeLessThanOrEqual(EVIDENCE_MAX_CHARS);
-    expect(text).toContain("## The team (27 agents");
+    expect(text).toContain("## The team (28 agents");
     expect(text).toContain("(cut; ");
     // A tighter cap leaves older tasks out and says so; the newest stay.
     const short = evidenceText(evidence, 12_000);

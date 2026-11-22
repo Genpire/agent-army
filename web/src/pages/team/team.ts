@@ -220,6 +220,36 @@ export function slugId(name: string, taken: ReadonlySet<string>): string {
   return id;
 }
 
+// ---------- The agent drawer's target ----------
+
+/** What the agent drawer edits: a new agent, a built-in one to add (prefilled, with its own id), or an existing one by id. */
+export type AgentTarget = { kind: "new" } | { kind: "builtin"; agent: AgentSpec } | { kind: "edit"; agent: AgentSpec };
+
+/** The built-in agents (GET /api/team/builtins) that no agent on the team has the id of, in their own order. */
+export const missingBuiltins = (builtins: readonly AgentSpec[], takenIds: ReadonlySet<string>): AgentSpec[] => builtins.filter((a) => !takenIds.has(a.id));
+
+/**
+ * The drawer's target for the Team page's route: #/team/new-agent, #/team/agent/<id>
+ * and #/team/builtin/<id> (a built-in agent the team lacks). Undefined closes the
+ * drawer: an unknown id, a built-in the team already has, or a new one on a full team.
+ */
+export function routeTarget(
+  [mode, id]: readonly string[],
+  { agents, builtins, isFull }: { agents: readonly AgentSpec[]; builtins: readonly AgentSpec[]; isFull: boolean },
+): AgentTarget | undefined {
+  if (mode === "new-agent") return isFull ? undefined : { kind: "new" };
+  if (mode === "builtin") {
+    const builtin = isFull || agents.some((a) => a.id === id) ? undefined : builtins.find((a) => a.id === id);
+    return builtin ? { kind: "builtin", agent: builtin } : undefined;
+  }
+  const agent = mode === "agent" ? agents.find((a) => a.id === id) : undefined;
+  return agent ? { kind: "edit", agent } : undefined;
+}
+
+/** The id the drawer saves its agent under: an existing or built-in agent keeps its own; a new one gets one made from its name. */
+export const targetAgentId = (target: AgentTarget, name: string, taken: ReadonlySet<string>): string =>
+  target.kind === "new" ? slugId(name, taken) : target.agent.id;
+
 /** "robot_face", ":robot_face" and ":robot_face:" all become ":robot_face:". */
 export function normEmoji(value: string): string {
   const code = value.trim().toLowerCase().replace(/^:+|:+$/g, "");
