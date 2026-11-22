@@ -2,9 +2,10 @@
  * The moving parts of the office, drawn like the room (OfficeArt.tsx, whose
  * helpers and token colours this reuses): a person out of their seat (legs,
  * shirt, arms and what they carry: a paddle that swings at each stroke, hands
- * on a pinball's buttons) and the props of what they do (a cup brewing under
- * the coffee machine, the foosball, the ping pong ball flying from paddle to
- * paddle, a pinball game's ball, flippers and lights, water for a plant).
+ * on a pinball's buttons, a controller in the lap) and the props of what they
+ * do (a cup brewing under the coffee machine, the foosball, the ping pong ball
+ * flying from paddle to paddle, a pinball game's ball, flippers and lights,
+ * the video game on the TV, water for a plant).
  *
  * Motion is transform and opacity only, in CSS keyframes or a Web Animation
  * (the ping pong ball, whose path life.ts computes), so it runs on the
@@ -14,9 +15,9 @@
 import { durationVars, easeVars } from "@astryxdesign/core/theme/tokens.stylex";
 import * as stylex from "@stylexjs/stylex";
 import { useEffect, useLayoutEffect, useRef } from "react";
-import { type SceneLayout, project } from "./layout";
+import { type SceneLayout, TV, project } from "./layout";
 import { type Activity, type Pose, type Prop, ballFrames } from "./life";
-import { Box, Poly, SHIRTS, fill, playfieldPoint, r1 } from "./OfficeArt";
+import { Box, Poly, SHIRTS, fill, playfieldPoint, r1, screenTransform, tvScreen } from "./OfficeArt";
 
 // ---------- Motion ----------
 
@@ -99,6 +100,37 @@ const run = stylex.keyframes({
   "100%": { transform: "translate(-11px, 7px)" },
 });
 
+// The video game on the TV, in the screen's units: the city scrolls one tile (the screen's width) per loop, the lane dashes one dash.
+const TILE = 72;
+const DASH = 8;
+const scroll = stylex.keyframes({
+  "0%": { transform: "translateX(0)" },
+  "100%": { transform: `translateX(-${TILE}px)` },
+});
+const rush = stylex.keyframes({
+  "0%": { transform: "translateX(0)" },
+  "100%": { transform: `translateX(-${DASH}px)` },
+});
+const bump = stylex.keyframes({
+  "0%": { transform: "translateY(0)" },
+  "50%": { transform: "translateY(-0.5px)" },
+  "100%": { transform: "translateY(0)" },
+});
+// The other car overtakes and falls back, lap after lap.
+const race = stylex.keyframes({
+  "0%": { transform: "translateX(-9px)" },
+  "50%": { transform: "translateX(8px)" },
+  "100%": { transform: "translateX(-9px)" },
+});
+// The player's dot round the mini-map's block.
+const lap = stylex.keyframes({
+  "0%": { transform: "translate(0, 0)" },
+  "30%": { transform: "translate(8px, 0)" },
+  "50%": { transform: "translate(8px, 4px)" },
+  "80%": { transform: "translate(0, 4px)" },
+  "100%": { transform: "translate(0, 0)" },
+});
+
 const anim = stylex.create({
   leg: { transformBox: "fill-box", transformOrigin: "50% 0%" },
   walking: {
@@ -142,6 +174,14 @@ const anim = stylex.create({
   flipRight: { animationName: { default: flipRight, [REDUCE]: "none" }, animationDuration: "1.3s", animationDelay: "-0.5s", animationIterationCount: "infinite" },
   flash: { opacity: 0.15, animationName: { default: flash, [REDUCE]: "none" }, animationDuration: "0.8s", animationIterationCount: "infinite" },
   run: { animationName: { default: run, [REDUCE]: "none" }, animationDuration: "3.2s", animationTimingFunction: "linear", animationIterationCount: "infinite" },
+  scrollFar: { animationName: { default: scroll, [REDUCE]: "none" }, animationDuration: "12s", animationTimingFunction: "linear", animationIterationCount: "infinite" },
+  scrollNear: { animationName: { default: scroll, [REDUCE]: "none" }, animationDuration: "4s", animationTimingFunction: "linear", animationIterationCount: "infinite" },
+  rush: { animationName: { default: rush, [REDUCE]: "none" }, animationDuration: "0.32s", animationTimingFunction: "linear", animationIterationCount: "infinite" },
+  bump: { animationName: { default: bump, [REDUCE]: "none" }, animationDuration: "0.36s", animationIterationCount: "infinite" },
+  race: { animationName: { default: race, [REDUCE]: "none" }, animationDuration: "5.5s", animationTimingFunction: "ease-in-out", animationIterationCount: "infinite" },
+  lap: { animationName: { default: lap, [REDUCE]: "none" }, animationDuration: "6s", animationTimingFunction: "linear", animationIterationCount: "infinite" },
+  // The TV's picture: clipped to the screen.
+  screen: { overflow: "hidden" },
   /** When an animation starts (ms from now; negative when it started before this was drawn). */
   delay: (ms: number) => ({ animationDelay: `${Math.round(ms)}ms` }),
   paused: { animationPlayState: "paused" },
@@ -202,6 +242,20 @@ export function Figure({ pose, prop, isStretch, isAtPinball, swing, hue, look, s
         <path d="M -19 46 C -20 22 -11 16 0 16 C 11 16 20 22 19 46 Z" {...stylex.props(shirt)} />
         <path d="M -7 18 L 0 26 L 7 18 Z" {...stylex.props(fill.collar)} />
         {prop === "cup" && <Cup x={11} y={30} />}
+        {prop === "controller" && (
+          // Both hands on a controller in the lap, thumbs busy.
+          <>
+            <Arm from={[-13, 30]} to={[-6, 40]} shirt={shirt} />
+            <Arm from={[13, 30]} to={[6, 40]} shirt={shirt} />
+            <rect x={-8} y={37.5} width={16} height={6} rx={3} {...stylex.props(fill.dark)} />
+            <g {...stylex.props(anim.tap, isPaused && anim.paused)}>
+              <circle cx={-4} cy={39.6} r={1.1} {...stylex.props(fill.consoleLight)} />
+            </g>
+            <g {...stylex.props(anim.tap, anim.tapOther, isPaused && anim.paused)}>
+              <circle cx={4} cy={39.6} r={1.1} {...stylex.props(fill.neonPink)} />
+            </g>
+          </>
+        )}
       </svg>
     );
   }
@@ -407,6 +461,123 @@ function PinballPlay({ layout, isPaused }: { layout: SceneLayout; isPaused: bool
   );
 }
 
+/** The city's blocks, one screen wide (drawn twice, so the scroll loops): left, width, height above the street. */
+const FAR_BLOCKS = [
+  [0, 7, 9],
+  [7, 5, 12],
+  [12, 8, 7],
+  [20, 6, 14],
+  [26, 9, 9],
+  [35, 5, 15],
+  [40, 8, 8],
+  [48, 6, 11],
+  [54, 10, 13],
+  [64, 8, 10],
+] as const;
+const NEAR_BLOCKS = [
+  [1, 10, 9],
+  [13, 8, 13],
+  [23, 11, 7],
+  [36, 7, 12],
+  [45, 11, 8],
+  [57, 6, 14],
+  [64, 7, 10],
+] as const;
+/** Where the street starts, from the screen's top. */
+const STREET = 28;
+
+/** One copy of the near blocks, with their lit windows and a neon sign. */
+function NearBlocks({ dx }: { dx: number }) {
+  return (
+    <g>
+      {NEAR_BLOCKS.map(([x, w, h], i) => (
+        <g key={x}>
+          <rect x={dx + x} y={STREET - h} width={w} height={h} {...stylex.props(fill.cityNear)} />
+          {Array.from({ length: Math.floor((h - 3) / 3) }, (_, row) =>
+            Array.from({ length: Math.floor((w - 2) / 2.5) }, (_, col) =>
+              (row * 3 + col + i) % 3 === 0 ? null : (
+                <rect key={`${row}-${col}`} x={dx + x + 1.4 + col * 2.5} y={STREET - h + 2 + row * 3} width={1.1} height={1.3} {...stylex.props((row + col + i) % 4 ? fill.neonYellow : fill.neonTeal)} />
+              ),
+            ),
+          )}
+          {i === 2 && <rect x={dx + x + 2} y={STREET - h - 2.4} width={w - 4} height={1.6} rx={0.8} {...stylex.props(fill.neonPink)} />}
+        </g>
+      ))}
+    </g>
+  );
+}
+
+/** A car seen from the side, heading right: its wheels on `y`. */
+function Car({ x, y, s }: { x: number; y: number; s: stylex.StyleXStyles }) {
+  return (
+    <g>
+      <polygon points={`${x + 13},${y - 3.6} ${x + 21},${y - 5.4} ${x + 21},${y - 1.4} ${x + 13},${y - 2.6}`} {...stylex.props(fill.beam)} />
+      <rect x={x - 5} y={y - 3.4} width={4} height={0.5} {...stylex.props(fill.glassShine)} />
+      <rect x={x - 6} y={y - 2.2} width={4.5} height={0.5} {...stylex.props(fill.glassShine)} />
+      <polygon points={`${x + 3},${y - 4} ${x + 5},${y - 6.4} ${x + 9.6},${y - 6.4} ${x + 11.4},${y - 4}`} {...stylex.props(fill.carGlass)} />
+      <rect x={x} y={y - 4.4} width={13.4} height={3} rx={1.2} {...stylex.props(s)} />
+      <rect x={x - 0.2} y={y - 3.8} width={1} height={1} {...stylex.props(fill.lightRed)} />
+      <rect x={x + 12.6} y={y - 3.8} width={1} height={1} {...stylex.props(fill.neonYellow)} />
+      <circle cx={x + 3.2} cy={y - 1.3} r={1.4} {...stylex.props(fill.dark)} />
+      <circle cx={x + 10.4} cy={y - 1.3} r={1.4} {...stylex.props(fill.dark)} />
+    </g>
+  );
+}
+
+/**
+ * The video game on the TV while people play: an open-world driving game of
+ * our own (no real game, brand or look). A neon city at sunset scrolls by in
+ * two layers, the lane dashes rush past under the player's car (a second car
+ * races it when two play), and a mini-map in the corner shows the player's
+ * dot going round the block. Drawn in the screen's own units, clipped to it.
+ */
+function GameScreen({ layout, isForTwo, isPaused }: { layout: SceneLayout; isForTwo: boolean; isPaused: boolean }) {
+  const { w: W, h: H } = TV.screen;
+  const held = isPaused && anim.paused;
+  return (
+    <g transform={screenTransform(layout.life.gaming)}>
+      <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} {...stylex.props(anim.screen)}>
+        <rect width={W} height={11} {...stylex.props(fill.skyTop)} />
+        <rect y={11} width={W} height={8} {...stylex.props(fill.skyMid)} />
+        <rect y={19} width={W} height={STREET - 19} {...stylex.props(fill.skyLow)} />
+        <circle cx={52} cy={14} r={7} {...stylex.props(fill.sun)} />
+        {[15.5, 17.5, 19.3].map((y) => (
+          <rect key={y} x={44} y={y} width={16} height={0.8} {...stylex.props(fill.skyMid)} />
+        ))}
+        <g {...stylex.props(anim.scrollFar, held)}>
+          {[0, TILE].map((dx) => FAR_BLOCKS.map(([x, w, h]) => <rect key={`${dx}-${x}`} x={dx + x} y={STREET - h} width={w} height={h} {...stylex.props(fill.cityFar)} />))}
+        </g>
+        <g {...stylex.props(anim.scrollNear, held)}>
+          <NearBlocks dx={0} />
+          <NearBlocks dx={TILE} />
+        </g>
+        <rect y={STREET} width={W} height={H - STREET} {...stylex.props(fill.road)} />
+        <rect y={STREET} width={W} height={0.9} {...stylex.props(fill.kerb)} />
+        <g {...stylex.props(anim.rush, held)}>
+          {Array.from({ length: Math.ceil(W / DASH) + 1 }, (_, i) => (
+            <rect key={i} x={i * DASH} y={33.6} width={4.4} height={0.8} {...stylex.props(fill.lane)} />
+          ))}
+        </g>
+        {isForTwo && (
+          <g {...stylex.props(anim.race, held)}>
+            <g {...stylex.props(anim.bump, anim.tapOther, held)}>
+              <Car x={34} y={32.6} s={fill.carB} />
+            </g>
+          </g>
+        )}
+        <g {...stylex.props(anim.bump, held)}>
+          <Car x={16} y={38.6} s={fill.carA} />
+        </g>
+        <rect x={2} y={2} width={13} height={9} rx={1} {...stylex.props(fill.mapBack)} />
+        <path d="M 4 3 V 10 M 12 3 V 10 M 2.5 4.5 H 14.5 M 2.5 8.5 H 14.5" {...stylex.props(fill.mapRoad)} />
+        <g transform="translate(4 4.5)">
+          <circle r={1} {...stylex.props(fill.neonPink, anim.lap, held)} />
+        </g>
+      </svg>
+    </g>
+  );
+}
+
 export interface LifePropsProps {
   layout: SceneLayout;
   activities: Activity[];
@@ -421,8 +592,9 @@ export function LifeProps({ layout, activities, now, isPaused }: LifePropsProps)
   const playing = activities.some((a) => isOn(a, "foosball"));
   const rallies = activities.filter((a) => isOn(a, "pingpong"));
   const pinball = activities.some((a) => isOn(a, "pinball"));
+  const gaming = activities.find((a) => isOn(a, "gaming"));
   const watering = activities.filter((a) => a.water && now >= a.water.t0 && now < a.water.t1);
-  if (!brewing.length && !playing && !rallies.length && !pinball && !watering.length) return null;
+  if (!brewing.length && !playing && !rallies.length && !pinball && !gaming && !watering.length) return null;
   const { view } = layout;
   return (
     <svg viewBox={`${r1(view.x)} ${r1(view.y)} ${r1(view.width)} ${r1(view.height)}`} aria-hidden="true" focusable="false" {...stylex.props(props.root)}>
@@ -434,6 +606,7 @@ export function LifeProps({ layout, activities, now, isPaused }: LifePropsProps)
         <PingPongBall key={a.id} activity={a} layout={layout} isPaused={isPaused} />
       ))}
       {pinball && <PinballPlay layout={layout} isPaused={isPaused} />}
+      {gaming && <GameScreen layout={layout} isForTwo={gaming.people.length > 1} isPaused={isPaused} />}
       {watering.map((a) => (
         <Drops key={a.id} layout={layout} plant={a.water!.plant} isPaused={isPaused} />
       ))}
@@ -449,4 +622,10 @@ export const tableFront = (table: SceneLayout["life"]["foosball"]) => project(ta
 export const pinballDisplay = (layout: SceneLayout) => {
   const m = layout.life.pinball;
   return project(m.x + m.w / 2, m.y + 7, 52);
+};
+
+/** Where a video game's cash or race score is shown: just over the TV, clear of its picture. */
+export const tvDisplay = (layout: SceneLayout) => {
+  const s = tvScreen(layout.life.gaming);
+  return project(s.x, s.y - TV.screen.w * 0.2, s.z + 16);
 };

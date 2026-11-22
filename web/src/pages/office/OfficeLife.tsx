@@ -4,8 +4,8 @@ import * as stylex from "@stylexjs/stylex";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Face, hueOf } from "./Face";
 import { FACE_Z, STAND_Z, type SceneLayout, project, toPercent } from "./layout";
-import { type Activity, type Track, legAt, nextChange, pinballScoreAt, positionAt, sayingAt, scoreAt, trackFrames } from "./life";
-import { Figure, LifeProps, pinballDisplay, tableFront } from "./LifeArt";
+import { type Activity, type Track, legAt, nextChange, pointsAt, positionAt, sayingAt, scoreAt, trackFrames } from "./life";
+import { Figure, LifeProps, pinballDisplay, tableFront, tvDisplay } from "./LifeArt";
 import { type OfficePerson, personSummary } from "./model";
 import { Tag } from "./Tags";
 import type { OfficeLife as Life } from "./useOfficeLife";
@@ -54,8 +54,9 @@ const styles = stylex.create({
   belowFeet: (top: number) => ({ top }),
   say: { position: "absolute", left: 0, transform: "translateX(-50%)", whiteSpace: "nowrap" },
   sayAt: (bottom: number) => ({ bottom }),
-  // A line of real talk wraps: as wide as its words, up to `max` px.
-  sayWrap: (max: number) => ({ whiteSpace: "normal", width: "max-content", maxWidth: max }),
+  // A line of real talk wraps: as wide as its words, up to about 28 characters a line (a little fewer when the drawing is small).
+  sayWrap: { whiteSpace: "normal", width: "max-content", maxWidth: "28ch" },
+  sayWrapCompact: { maxWidth: "22ch" },
   // Away from the one they talk to: from just left of the face to the right, or from just right of it to the left.
   toEnd: { transform: `translateX(calc(-1 * ${spacingVars["--spacing-5"]}))` },
   toStart: { transform: `translateX(calc(-100% + ${spacingVars["--spacing-5"]}))` },
@@ -90,15 +91,11 @@ function useLifeClock(activities: Activity[], isPaused: boolean): number {
 /** Which way a wide bubble grows from the face: "end" (right) or "start" (left), away from the others in the conversation. */
 type BubbleSide = "start" | "end";
 
-/** Real talk wraps to this width at most (px), a little narrower when the drawing is small. */
-const TALK_WIDTH = 210;
-const TALK_WIDTH_COMPACT = 170;
-
 /** A line over someone's head: it pops in and fades out as it ends. A short canned line is a pill; a line of real talk wraps in a rounded bubble. */
 function SayBubble({ text, isTalk, side, bottom, endsIn, isCompact, isPaused }: { text: string; isTalk: boolean; side: BubbleSide | undefined; bottom: number; endsIn: number; isCompact: boolean; isPaused: boolean }) {
   return (
     <StackItem
-      xstyle={[styles.say, styles.sayAt(bottom), isTalk && styles.sayWrap(isCompact ? TALK_WIDTH_COMPACT : TALK_WIDTH), isTalk && side === "end" && styles.toEnd, isTalk && side === "start" && styles.toStart]}
+      xstyle={[styles.say, styles.sayAt(bottom), isTalk && styles.sayWrap, isTalk && isCompact && styles.sayWrapCompact, isTalk && side === "end" && styles.toEnd, isTalk && side === "start" && styles.toStart]}
       aria-hidden>
       <StackItem xstyle={[styles.pop, isPaused && styles.paused]}>
         <StackItem xstyle={[styles.fadeOut, styles.delay(Math.max(0, endsIn - 200)), isPaused && styles.paused]}>
@@ -190,7 +187,7 @@ function Walker({ person, track, layout, scale, isCompact, now, isPaused, note, 
   );
 }
 
-/** A game's score on the picture: on the floor in front of a table, on the pinball machine's back glass. */
+/** A game's score on the picture: on the floor in front of a table, on the pinball machine's back glass, over the TV. */
 function Score({ text, at, layout }: { text: string; at: { x: number; y: number }; layout: SceneLayout }) {
   const pos = toPercent(layout.view, at);
   return (
@@ -205,13 +202,19 @@ function Score({ text, at, layout }: { text: string; at: { x: number; y: number 
 /** How long a game's last score stays up after it ends (the winner's moment). */
 const SCORE_AFTER_MS = 2_000;
 
-/** The scores of the games on now: foosball and ping pong on the floor in front of their tables, pinball on the machine (its high score at the end). */
+/** The scores of the games on now: foosball and ping pong on the floor in front of their tables, pinball on the machine (its high score at the end), a video game on the TV (the cash for one, the races won for two). */
 function scores(activities: Activity[], layout: SceneLayout, now: number): { key: string; text: string; at: { x: number; y: number } }[] {
   return activities.flatMap((a) => {
     if (!a.together || now < a.together.t0 || now >= a.together.t1 + SCORE_AFTER_MS) return [];
     if (a.kind === "pinball") {
-      const score = pinballScoreAt(a, now).toLocaleString();
+      const score = pointsAt(a, now).toLocaleString();
       return [{ key: a.id, text: now < a.together.t1 ? score : `🏆 ${score}`, at: pinballDisplay(layout) }];
+    }
+    if (a.kind === "gaming") {
+      const [x, y] = scoreAt(a, now);
+      const cash = `$${pointsAt(a, now).toLocaleString()}`;
+      const text = a.people.length > 1 ? `🏁 ${x} – ${y}` : now < a.together.t1 ? cash : `🏆 ${cash}`;
+      return [{ key: a.id, text, at: tvDisplay(layout) }];
     }
     if (a.kind !== "foosball" && a.kind !== "pingpong") return [];
     const [x, y] = scoreAt(a, now);
