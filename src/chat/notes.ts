@@ -17,27 +17,34 @@ export interface ProjectNotes {
 export const NOTES_MAX_CHARS = 8000;
 
 /**
- * One flat file per repository, named without letter case:
+ * One flat file per repository in a folder of the store (`folder` ends with
+ * "/"), named without letter case:
  *   owner/repo                → notes/owner__repo.enc (GitHub, as before)
  *   gitlab:group/sub/project  → notes/gitlab~group~sub~project.enc
  *   bitbucket:workspace/repo  → notes/bitbucket~workspace~repo.enc
  * "~" is not allowed in repository ids, so the other hosts' names never clash
  * with GitHub's and read back unambiguously. Ids are checked first (no "." or
- * ".." segments), and no name holds a "/" or ":", so a key never leaves notes/.
+ * ".." segments), and no name holds a "/" or ":", so a key never leaves its
+ * folder. The lessons library (team/lessons.ts) names its files the same way.
  */
-function keyFor(repo: string): string {
+export function repoStoreKey(folder: string, repo: string): string {
   const id = repo.toLowerCase();
   const host = repoHost(id);
   const name = host === "github" ? id.replace("/", "__") : `${host}~${repoPath(id).replaceAll("/", "~")}`;
-  return `notes/${name}.enc`;
+  return `${folder}${name}.enc`;
 }
 
-function repoFromKey(key: string): string {
-  const name = key.slice("notes/".length, -".enc".length);
+/** The repository a key from repoStoreKey names (lower case). */
+export function repoFromStoreKey(folder: string, key: string): string {
+  const name = key.slice(folder.length, -".enc".length);
   const [host, ...path] = name.split("~");
   if (path.length && CODE_HOST_KINDS.includes(host as CodeHostKind)) return repoId(host as CodeHostKind, path.join("/"));
   return name.replace("__", "/");
 }
+
+const NOTES_FOLDER = "notes/";
+const keyFor = (repo: string) => repoStoreKey(NOTES_FOLDER, repo);
+const repoFromKey = (key: string) => repoFromStoreKey(NOTES_FOLDER, key);
 
 export class NotesRepo {
   /** Serialises writes so concurrent appends (Slack, worker, admin page) don't lose each other. */
@@ -92,7 +99,7 @@ export class NotesRepo {
   }
 
   async list(): Promise<{ repo: string; updatedAt: string; chars: number }[]> {
-    const keys = (await this.store.list("notes/")).filter((k) => k.endsWith(".enc"));
+    const keys = (await this.store.list(NOTES_FOLDER)).filter((k) => k.endsWith(".enc"));
     const all = await Promise.all(keys.map((k) => this.get(repoFromKey(k)).catch(() => null)));
     return all
       .filter((n): n is ProjectNotes => n !== null)

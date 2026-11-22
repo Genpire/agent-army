@@ -30,6 +30,7 @@ import { type Config, ConfigRepo, integrationSecrets, resolveMasterKey } from ".
 import { type PrRef, isHumanFeedback } from "../integrations/github/github.js";
 import { checkBashCommand } from "./guard.js";
 import { NOTES_MAX_CHARS, NotesRepo } from "../chat/notes.js";
+import { LessonsRepo, lessonsNote, materializeLessons, saveTaskLessons } from "../team/lessons.js";
 import { formatFeedback } from "./pr-feedback.js";
 import { BYPASS_ENV, type PreviewResult, checkPreview, previewSlackLine } from "./preview.js";
 import { type PlanItem, ProgressTracker, formatProgress } from "./progress.js";
@@ -73,6 +74,7 @@ export function teamQueryOptions(
     ...(attachmentsDir && context.attachments?.length ? [attachmentsDir] : []),
     ...(opts.browser && context.browser ? [context.browser.shotsDir] : []),
     ...(skills && opts.skills ? [opts.skills.pluginDir] : []),
+    ...(context.lessons ? [context.lessons.dir] : []),
   ];
   return {
     ...(skills ?? {}),
@@ -1344,9 +1346,14 @@ export async function main(): Promise<void> {
         },
       );
     const projectNotes = await loadNotes();
+    // The lessons library, written next to the checkout for the team to grep (lessons.ts). Unreadable lessons are skipped, not fatal.
+    const lessonsLibrary = new LessonsRepo(store, masterKey);
+    const lessons = await materializeLessons(lessonsLibrary, task.repo, join(workRoot, "lessons"), redact);
+    if (lessons) timeline.add({ kind: "note", text: lessonsNote(lessons) });
 
     const context: OrchestratorContext = {
       projectNotes,
+      ...(lessons ? { lessons } : {}),
       attachments,
       ...(browser ? { browser: { shotsDir } } : {}),
       ...(setup ? { repoSetup: repoSetupContext(setup, setupResult) } : {}),
@@ -1513,6 +1520,7 @@ export async function main(): Promise<void> {
       task.costUsd = (task.costUsd ?? 0) + run.costUsd;
       task.turns = (task.turns ?? 0) + run.turns;
       if (run.report) await saveProjectNotes(notes, task.repo, notesBefore, run.report.projectNotes, redact);
+      if (run.report) await saveTaskLessons(lessonsLibrary, task.repo, run.report.lessons, task.id, redact);
       return run;
     };
 
@@ -1607,6 +1615,7 @@ export async function main(): Promise<void> {
 
     // Saved before publishing so a failed push doesn't lose what the team learned (blocked reports too).
     if (report) await saveProjectNotes(notes, task.repo, projectNotes, report.projectNotes, redact);
+    if (report) await saveTaskLessons(lessonsLibrary, task.repo, report.lessons, task.id, redact);
 
     // ---------- 4. Publish ----------
     // With the worker's own config back first: no filter or clean driver the agents configured runs in `add`.

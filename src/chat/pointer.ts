@@ -396,6 +396,7 @@ export function createPointerBrain(
         taskStatus: ctx.taskStatus,
         addAttachment: ctx.addAttachment,
         notes: deps.notes,
+        lessons: deps.lessons,
         monday: {
           client: mondayToken ? new MondayClient(mondayToken) : undefined,
           defaultBoardId: config.monday.defaultBoardId,
