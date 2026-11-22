@@ -30,6 +30,7 @@ import { AgentEmoji } from "./AgentEmoji";
 import {
   ACCESS_INFO,
   AGENT_EFFORT_SELECT_OPTIONS,
+  type AgentTarget,
   CLAUDE_CHOICES,
   type ModelChoices,
   accessDescription,
@@ -42,12 +43,14 @@ import {
   hasErrors,
   isAccess,
   isEffort,
-  slugId,
+  targetAgentId,
   toSpec,
 } from "./team";
 
-/** What the drawer edits: a new agent, or an existing one by id. */
-export type AgentTarget = { kind: "new" } | { kind: "edit"; agent: AgentSpec };
+export type { AgentTarget } from "./team";
+
+const targetTitle = (target: AgentTarget | undefined) =>
+  target?.kind === "edit" ? `Edit ${target.agent.name}` : target?.kind === "builtin" ? `Add ${target.agent.name}` : "New agent";
 
 export interface AgentDrawerProps {
   isOpen: boolean;
@@ -67,7 +70,7 @@ export interface AgentDrawerProps {
 
 /** The agent editor: DrawerForm (header, scrolling fields, pinned Cancel and Save). */
 export function AgentDrawer({ isOpen, target, takenIds, lead, models, onClose, onSave, onDelete }: AgentDrawerProps) {
-  const title = target?.kind === "edit" ? `Edit ${target.agent.name}` : "New agent";
+  const title = targetTitle(target);
   return (
     <Drawer
       isOpen={isOpen}
@@ -79,7 +82,7 @@ export function AgentDrawer({ isOpen, target, takenIds, lead, models, onClose, o
       experimental={{ isFullWidthOnMobile: true }}>
       {target && (
         <AgentForm
-          key={target.kind === "edit" ? `edit:${target.agent.id}` : "new"}
+          key={target.kind === "new" ? "new" : `${target.kind}:${target.agent.id}`}
           target={target}
           takenIds={takenIds}
           lead={lead}
@@ -240,7 +243,8 @@ function AppsField({ value, onChange, lead }: { value: string[]; onChange: (apps
 
 function AgentForm({ target, takenIds, lead, models = CLAUDE_CHOICES, onClose, onSave, onDelete }: Omit<AgentDrawerProps, "isOpen" | "target"> & { target: AgentTarget }) {
   const existing = target.kind === "edit" ? target.agent : undefined;
-  const [draft, setDraft] = useState<AgentDraft>(() => (existing ? { ...existing } : { ...NEW_AGENT }));
+  const builtin = target.kind === "builtin" ? target.agent : undefined;
+  const [draft, setDraft] = useState<AgentDraft>(() => ({ ...(existing ?? builtin ?? NEW_AGENT) }));
   const [triedSave, setTriedSave] = useState(false);
   const budget = useAgentBudget(existing?.id);
   const { run, pending } = useAction();
@@ -249,12 +253,15 @@ function AgentForm({ target, takenIds, lead, models = CLAUDE_CHOICES, onClose, o
   const set = <K extends keyof AgentDraft>(key: K) => (value: AgentDraft[K]) => setDraft((d) => ({ ...d, [key]: value }));
   const errors = useMemo(() => agentErrors(draft), [draft]);
   const others = useMemo(() => new Set([...takenIds].filter((id) => id !== existing?.id)), [takenIds, existing]);
-  const id = existing ? existing.id : slugId(draft.name, others);
+  // A built-in agent keeps its own id: the page offers it only while no agent has that id.
+  const id = targetAgentId(target, draft.name, others);
   const status = (key: keyof AgentDraft) => fieldStatus(errors[key], triedSave);
 
   const idNote = existing
     ? `Its id, ${existing.id}, stays the same when you rename it.`
-    : draft.name.trim()
+    : builtin
+      ? `Its id will be ${builtin.id}, the built-in agent's, whatever you name it.`
+      : draft.name.trim()
       ? `Its id will be ${id}, made from the name and fixed once saved.`
       : "The id is made from the name and never changes.";
 
@@ -270,8 +277,14 @@ function AgentForm({ target, takenIds, lead, models = CLAUDE_CHOICES, onClose, o
     <Layout
       header={
         <DrawerHeader
-          title={existing ? `Edit ${existing.name}` : "New agent"}
-          subtitle={existing ? `${existing.role} · ${ACCESS_INFO[existing.access].label}` : `${lead} hands work to it when its “When to use” line fits.`}
+          title={targetTitle(target)}
+          subtitle={
+            existing
+              ? `${existing.role} · ${ACCESS_INFO[existing.access].label}`
+              : builtin
+                ? "A built-in agent, as a fresh deployment has it. Change anything before you add it."
+                : `${lead} hands work to it when its “When to use” line fits.`
+          }
           onOpenChange={(open) => !open && onClose()}
         />
       }
@@ -322,7 +335,7 @@ function AgentForm({ target, takenIds, lead, models = CLAUDE_CHOICES, onClose, o
             </FormSection>
 
             <Divider />
-            <FormSection title="Instructions" description="The agent's own prompt. Platform ground rules (no pushing, no secrets, report facts) are added automatically.">
+            <FormSection title="Instructions" description="The agent's own prompt. Platform ground rules (no pushing, no secrets, confirm the problem first, prove new tests fail without the change, report real output) are added automatically.">
               <TextArea
                 label="Instructions"
                 isLabelHidden

@@ -916,7 +916,7 @@ describe("buildPointerSystemPrompt", () => {
     team.pointer.name = "Pip";
     team.pointer.instructions = "Always answer in British English.";
     team.agents[0]!.name = "Sara";
-    team.agents[4]!.enabled = false; // writer
+    team.agents.find((a) => a.id === "writer")!.enabled = false;
     return { orgName: "Acme Inc", team } as Parameters<typeof buildPointerSystemPrompt>[0]["config"];
   };
 
@@ -1232,7 +1232,7 @@ describe("Pointer brain", () => {
     expect(o.allowedTools).toHaveLength(4 + ALL_TOOLS.length + SLACK_TOOLS.length);
 
     const agentTools = o.agents?.coder?.tools ?? [];
-    expect(Object.keys(o.agents ?? {})).toEqual(["coder", "reviewer", "qa", "researcher", "writer", "hr", "scout"]);
+    expect(Object.keys(o.agents ?? {})).toEqual(["coder", "reviewer", "qa", "failure-reviewer", "researcher", "writer", "hr", "scout"]);
     expect(agentTools.slice(0, 2)).toEqual(["WebSearch", "WebFetch"]);
     expect([...agentTools.slice(2)].sort()).toEqual([...full(READ_ONLY_TOOLS), ...SLACK_READ_TOOLS].sort());
     expect(agentTools).not.toContain("mcp__slack__slack_send_message");

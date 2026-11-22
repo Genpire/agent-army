@@ -148,7 +148,7 @@ describe("office: words", () => {
 describe("office: who is doing what", () => {
   it("shows Pointer and every enabled agent free when nothing runs", () => {
     const view = buildOffice(input());
-    expect(view.people.map((p) => p.id)).toEqual([OFFICE_LEAD_ID, "coder", "reviewer", "qa", "researcher", "hr", "scout"]);
+    expect(view.people.map((p) => p.id)).toEqual([OFFICE_LEAD_ID, "coder", "reviewer", "qa", "failure-reviewer", "researcher", "hr", "scout"]);
     expect(view.people.every((p) => p.state === "free")).toBe(true);
     expect(view.people[0]).toMatchObject({ kind: "lead", name: "Pointer", avatar: "pointer", today: { tasks: 0, minutes: 0 } });
     expect(view.people.find((p) => p.id === "coder")).toMatchObject({ name: "Sara", role: "Coder", avatar: "sara-2", kind: "agent" });
@@ -375,7 +375,7 @@ describe("office: loading", () => {
       const res = await fetch(`${base}/api/office?tz=-120`, { headers: { cookie } });
       expect(res.status).toBe(200);
       const view = (await res.json()) as { people: { id: string; state: string }[]; meetings: unknown[]; updatedAt: string };
-      expect(view.people.map((p) => p.id)).toEqual([OFFICE_LEAD_ID, "coder", "reviewer", "qa", "researcher", "writer", "hr", "scout"]);
+      expect(view.people.map((p) => p.id)).toEqual([OFFICE_LEAD_ID, "coder", "reviewer", "qa", "failure-reviewer", "researcher", "writer", "hr", "scout"]);
       expect(view.people.every((p) => p.state === "free")).toBe(true);
       expect(view.meetings).toEqual([]);
       expect(typeof view.updatedAt).toBe("string");

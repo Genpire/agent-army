@@ -53,7 +53,7 @@ export function WorkFlow({ team }: { team: Team }) {
         <Step
           step={0}
           label={`${lead} plans`}
-          description="Reads the request, the repository and its project notes, writes a plan with acceptance criteria and picks agents by their “When to use” line."
+          description="Reads the request, the repository and its project notes, and checks in the code that the request still holds (or stops and says why). Then writes a plan with acceptance criteria and picks agents by their “When to use” line."
           indicator={<Icon icon={ClipboardDocumentListIcon} size="sm" />}>
           <Roster label="Research help" agents={lookers} />
         </Step>
@@ -71,8 +71,8 @@ export function WorkFlow({ team }: { team: Team }) {
         </Step>
         <Step
           step={2}
-          label="Another agent verifies it"
-          description="A different agent reviews the diff or runs the tests. For changes people can see, it starts the app, checks it in a headless browser and takes screenshots. Up to three rounds."
+          label="Other agents verify it"
+          description="Different agents review the diff, run the tests and check what happens when things go wrong. Each new test is shown to fail without the change and pass with it. For changes people can see, one starts the app, checks it in a headless browser and takes screenshots. Up to three rounds."
           indicator={<Icon icon={ShieldCheckIcon} size="sm" />}>
           <Roster
             label="Can verify"
