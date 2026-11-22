@@ -38,6 +38,7 @@ import {
   webhookIds,
 } from "./integrations/monday/monday-automation.js";
 import { NOTES_MAX_CHARS, NotesRepo } from "./chat/notes.js";
+import { LessonsRepo } from "./team/lessons.js";
 import { loadOffice } from "./team/office.js";
 import { type QueryFn, createPointerBrain } from "./chat/pointer.js";
 import type { PointerBrain, SlackDeps, SlackMessageEvent } from "./chat/pointer-types.js";
@@ -73,6 +74,7 @@ import { chatRoutes } from "./routes/chat.js";
 import { enginesRoutes } from "./routes/engines.js";
 import { gitlabRoutes } from "./routes/gitlab.js";
 import { jiraRoutes } from "./routes/jira.js";
+import { lessonsRoutes } from "./routes/lessons.js";
 import { miroRoutes } from "./routes/miro.js";
 import type { IntegrationRouteDeps } from "./routes/types.js";
 
@@ -208,6 +210,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
   const tasks = new TaskRepo(store);
   const memory = new MemoryRepo(store, masterKey);
   const notes = new NotesRepo(store, masterKey);
+  const lessons = new LessonsRepo(store, masterKey);
   const attachments = new AttachmentRepo(store, masterKey);
   const screenshots = new ScreenshotRepo(store, masterKey);
 
@@ -219,7 +222,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
   let maxParallel = (await configRepo.load()).limits.maxParallel;
   const cap = parallelCap(env, overrides.memoryBytes);
   const runner = overrides.runner ?? createRunner(() => parallelLimit(maxParallel, cap).effective, env);
-  const brain = overrides.brain ?? createPointerBrain({ configRepo, memory, notes, attachments }, { skills: () => skillsPlugin.current() });
+  const brain = overrides.brain ?? createPointerBrain({ configRepo, memory, notes, lessons, attachments }, { skills: () => skillsPlugin.current() });
   const usage = new UsageRepo(store, tasks);
   const slackFactory = overrides.slack ?? slackClient;
   // Spending caps for every start path (Slack, console, GitHub reviews) and chat; alerts in Slack.
@@ -1372,6 +1375,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
   // The Routines page's API, and POST /routines/tick for external schedulers (outside /api: its own secret header, no session).
   app.use(routinesRoutes({ ...routeDeps, routines }));
   app.use(chatRoutes({ ...routeDeps, conversations }));
+  app.use(lessonsRoutes({ ...routeDeps, lessons }));
 
   app.use(express.static(fileURLToPath(new URL("../public", import.meta.url)), { index: "index.html" }));
 

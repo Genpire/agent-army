@@ -7,6 +7,7 @@ import type { AttachmentInfo, AttachmentRepo, NewAttachment } from "./attachment
 import type { ConfigRepo } from "../core/config.js";
 import type { MemoryRepo } from "./memory.js";
 import type { NotesRepo } from "./notes.js";
+import type { LessonsRepo } from "../team/lessons.js";
 import type { Runner } from "../tasks/runner.js";
 import type { TaskRepo, ThreadState } from "../tasks/tasks.js";
 import type { UsageRepo } from "../spending/usage.js";
@@ -150,6 +151,8 @@ export interface PointerBrainDeps {
   memory: MemoryRepo;
   /** Per-repo project notes; optional so older callers and tests keep working. */
   notes?: NotesRepo;
+  /** Per-repo lessons library (team/lessons.ts), read with the notes; optional so older callers and tests keep working. */
+  lessons?: LessonsRepo;
   /** Thread attachments; optional so older callers and tests keep working. */
   attachments?: AttachmentRepo;
 }
