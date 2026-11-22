@@ -1,8 +1,10 @@
 /**
  * Office life: what free agents do between tasks. Every now and then one or
- * two of them get up and make coffee, chat at the kitchen table or on the
- * sofa, play foosball, read at the Skills library, water a plant, stretch or
- * look out of the window, then come back to their desk.
+ * two of them get up and make coffee (alone, or one makes two and they sit at
+ * the kitchen table), chat at the kitchen table or on the sofa, play foosball
+ * or ping pong, play pinball (a friend may watch), read at the Skills
+ * library, water a plant, stretch or look out of the window, then come back
+ * to their desk.
  *
  * Purely presentational and derived on the client from the office's state:
  * the server model never changes. Deterministic: time is cut into slots, and
@@ -21,9 +23,13 @@
  * Each person's part is a Track: timed legs (stand up, walk a straight
  * stretch, stay, sit down) through the waypoints (paths.ts), plus the words
  * in their bubble. The scene animates a track with one Web Animation; this
- * file only does the arithmetic.
+ * file only does the arithmetic. The games keep their own: a foosball or ping
+ * pong game's points (and a ping pong rally's every stroke, so the ball flies
+ * from paddle to paddle), a pinball game's score. A chat, a coffee for two, a
+ * game for two and pinball with a friend watching have a window when everyone
+ * is there (`together`): real talk (talk.ts) fills it when the AI answers.
  */
-import { type Floor, type LifeSpot, SEAT_Z, type SceneLayout, STAND_Z, deskSeat, lookFrom, meetingSeat, project, seatsAround } from "./layout";
+import { type Floor, type GameTable, type LifeSpot, PINGPONG, SEAT_Z, type SceneLayout, STAND_Z, deskSeat, lookFrom, meetingSeat, project, seatsAround } from "./layout";
 import type { OfficeView } from "./model";
 import { route } from "./paths";
 
@@ -48,10 +54,20 @@ const BREW_MS = 5_000;
 const SIP_MS = 7_000;
 const LINE_MS = 2_600;
 const SAY_MS = 2_000;
+/** One crossing of the ping pong table, from one paddle to the other. */
+export const STROKE_MS = 760;
+/** After a point, the ball flies past the one who missed and drops this long. */
+export const MISS_MS = 520;
+/** From a point to the next serve. */
+const SERVE_MS = 1_500;
+/** The end of a game: the winner's (or the high score's) moment, before they walk back. */
+const CHEER_MS = 2_400;
+/** A shout during a game ("point!", "jackpot!"). */
+const SHOUT_MS = 1_600;
 
-export type ActivityKind = "coffee" | "chat" | "foosball" | "read" | "water" | "stretch" | "window" | "return" | "commute";
+export type ActivityKind = "coffee" | "chat" | "foosball" | "pingpong" | "pinball" | "read" | "water" | "stretch" | "window" | "return" | "commute";
 export type Pose = "sit" | "stand" | "walk";
-export type Prop = "cup" | "book" | "can";
+export type Prop = "cup" | "book" | "can" | "paddle";
 
 /** A floor point and the height of the face above it. */
 export interface P3 {
@@ -70,12 +86,16 @@ export interface Leg {
   look: 1 | -1;
   prop?: Prop;
   isStretch?: boolean;
+  /** At the pinball machine, hands on the flipper buttons. */
+  isAtPinball?: boolean;
 }
 
 export interface Say {
   t0: number;
   t1: number;
   text: string;
+  /** A line of real talk (talk.ts), not a canned one: its bubble wraps. */
+  isTalk?: boolean;
 }
 
 export interface Track {
@@ -95,16 +115,20 @@ export interface Activity {
   start: number;
   end: number;
   tracks: Track[];
-  /** What it holds while it lasts, so no one else uses it: "coffee", "cafe", "sofa", "foosball", "shelf", "window:1", "plant:2". */
+  /** What it holds while it lasts, so no one else uses it: "coffee", "cafe", "sofa", "foosball", "pingpong", "pinball", "shelf", "window:1", "plant:2". */
   venues: string[];
-  /** A chat or a game: when everyone is there. */
+  /** A chat, a coffee for two or a game: when everyone is there (and the game is on). */
   together?: { t0: number; t1: number };
-  /** Coffee: when the cup brews at the machine. */
+  /** Coffee: when the cup (two cups, for two) brews at the machine. */
   brew?: { t0: number; t1: number };
   /** Watering: which plant, and when. */
   water?: { t0: number; t1: number; plant: number };
-  /** Foosball: each goal, and who scored it (an index into `people`). */
+  /** Foosball and ping pong: each goal or point, and who scored it (an index into `people`). */
   goals?: { at: number; by: number }[];
+  /** Ping pong: each stroke, rally by rally: who hit the ball, and where across the table (-1 to 1). */
+  strokes?: { at: number; by: number; v: number }[];
+  /** Pinball: what the ball scores, now and then. */
+  bumps?: { at: number; points: number }[];
   /** A walk back: true when the person got work (else their outing was cut short). */
   gotWork?: boolean;
 }
@@ -347,7 +371,8 @@ function chat(id: string, a: LifePerson, b: LifePerson, start: number, layout: S
     s.sit(seat);
   }
   const t0 = Math.max(sa.t, sb.t) + 600;
-  const lines = 4 + Math.floor(r() * 3);
+  // Long enough for a real conversation (talk.ts) when the AI answers; canned lines meanwhile.
+  const lines = 7 + Math.floor(r() * 3);
   for (let i = 0; i < lines; i++) (i % 2 ? sb : sa).say(i === 0 ? pick(r, OPENERS) : pick(r, REPLIES), SAY_MS, t0 + i * LINE_MS);
   const t1 = t0 + lines * LINE_MS;
   sa.until(t1);
@@ -363,17 +388,24 @@ function chat(id: string, a: LifePerson, b: LifePerson, start: number, layout: S
   return activity(id, "chat", [{ s: sa, home: a.home.key }, { s: sb, home: b.home.key }], [venue], { together: { t0, t1 } });
 }
 
-/** Two people play a game of foosball: goals now and then, a winner at the end. */
-function foosball(id: string, a: LifePerson, b: LifePerson, start: number, layout: SceneLayout, r: () => number): Activity {
-  const ends = layout.life.foosball.ends;
+/** Walks two players to a game table's ends, one a moment after the other (with what they carry: a paddle). */
+function toTheEnds(a: LifePerson, b: LifePerson, start: number, layout: SceneLayout, ends: [LifeSpot, LifeSpot], r: () => number, extra: Partial<Leg> = {}): [Steps, Steps] {
   const sa = startFrom(a, start);
   const sb = startFrom(b, start);
   sb.stay(600 + Math.floor(r() * 1_200));
-  const steps = [sa, sb];
   [a, b].forEach((p, i) => {
-    steps[i]!.rise();
-    steps[i]!.goTo(layout, ends[i]!, p.home.spot.door);
+    const s = i ? sb : sa;
+    s.rise(extra);
+    s.goTo(layout, ends[i]!, p.home.spot.door, extra);
   });
+  return [sa, sb];
+}
+
+/** Two people play a game of foosball: goals now and then, a winner at the end. */
+function foosball(id: string, a: LifePerson, b: LifePerson, start: number, layout: SceneLayout, r: () => number): Activity {
+  const ends = layout.life.foosball.ends;
+  const steps = toTheEnds(a, b, start, layout, ends, r);
+  const [sa, sb] = steps;
   const t0 = Math.max(sa.t, sb.t) + 500;
   const t1 = t0 + 18_000 + Math.floor(r() * 7_000);
   const goals: { at: number; by: number }[] = [];
@@ -393,6 +425,134 @@ function foosball(id: string, a: LifePerson, b: LifePerson, start: number, layou
     steps[i]!.sit(p.home.spot);
   });
   return activity(id, "foosball", [{ s: sa, home: a.home.key }, { s: sb, home: b.home.key }], ["foosball"], { together: { t0, t1 }, goals });
+}
+
+/**
+ * Two people play ping pong. Rallies of 2 to 8 strokes, each crossing the
+ * table in STROKE_MS; the last one to hit the ball wins the point (the other
+ * misses it), the serve changes every two points, a pause between rallies,
+ * the score on the floor and a winner at the end. Each carries a paddle for
+ * the whole outing (the table's own pair is not drawn meanwhile).
+ */
+function pingpong(id: string, a: LifePerson, b: LifePerson, start: number, layout: SceneLayout, r: () => number): Activity {
+  const table = layout.life.pingpong;
+  const paddle = { prop: "paddle" as const };
+  const steps = toTheEnds(a, b, start, layout, table.ends, r, paddle);
+  const t0 = Math.max(steps[0].t, steps[1].t) + 500;
+  const t1 = t0 + 22_000 + Math.floor(r() * 8_000);
+  const strokes: { at: number; by: number; v: number }[] = [];
+  const goals: { at: number; by: number }[] = [];
+  for (let t = t0 + 900; ; ) {
+    const server = Math.floor(goals.length / 2) % 2;
+    const length = 2 + Math.floor(r() * 7);
+    const point = t + length * STROKE_MS;
+    // The point and its cheer are over before the game ends (the winner's moment is its own).
+    if (point + Math.max(MISS_MS, SHOUT_MS) > t1) break;
+    for (let i = 0; i < length; i++) strokes.push({ at: t + i * STROKE_MS, by: (server + i) % 2, v: Math.round((r() * 1.2 - 0.6) * 100) / 100 });
+    const by = (server + length - 1) % 2;
+    goals.push({ at: point, by });
+    steps[by]!.say(pick(r, ["🏓", "yes!", "nice!", "point!"]), SHOUT_MS, point);
+    t = point + SERVE_MS;
+  }
+  const [x, y] = scoreAt({ goals }, t1);
+  const winner = x === y ? -1 : x > y ? 0 : 1;
+  steps.forEach((s, i) => {
+    s.say(winner === i ? "🏆" : "gg!", CHEER_MS - 200, t1);
+    s.until(t1 + CHEER_MS + i * 500, paddle);
+  });
+  [a, b].forEach((p, i) => {
+    steps[i]!.goTo(layout, p.home.spot, table.ends[i]!.door, paddle);
+    steps[i]!.sit(p.home.spot, paddle);
+  });
+  return activity(id, "pingpong", [{ s: steps[0], home: a.home.key }, { s: steps[1], home: b.home.key }], ["pingpong"], { together: { t0, t1 }, goals, strokes });
+}
+
+const PINBALL_POINTS = [10, 10, 50, 100, 100, 250, 500, 1_000, 5_000] as const;
+
+/**
+ * Someone plays pinball (a friend may stand beside them and watch): the ball
+ * scores now and then, the score counts up, and the game ends on a high
+ * score. The game starts when everyone is there.
+ */
+function pinball(id: string, p: LifePerson, watcher: LifePerson | undefined, start: number, layout: SceneLayout, r: () => number): Activity {
+  const m = layout.life.pinball;
+  const sp = startFrom(p, start);
+  sp.rise();
+  sp.goTo(layout, m.player, p.home.spot.door);
+  const sw = watcher ? startFrom(watcher, start) : undefined;
+  if (sw && watcher) {
+    sw.stay(900 + Math.floor(r() * 1_400));
+    sw.rise();
+    sw.goTo(layout, m.watcher, watcher.home.spot.door);
+  }
+  const t0 = Math.max(sp.t, sw?.t ?? 0) + 400;
+  const t1 = t0 + 18_000 + Math.floor(r() * 8_000);
+  const bumps: { at: number; points: number }[] = [];
+  for (let t = t0 + 500 + Math.floor(r() * 600); t < t1 - 300; t += 450 + Math.floor(r() * 1_300)) {
+    const points = pick(r, PINBALL_POINTS);
+    bumps.push({ at: t, points });
+    // A shout, now and then, that is over before the high score.
+    if (t + SHOUT_MS > t1) continue;
+    if (points >= 1_000 && r() < 0.6) sp.say(pick(r, ["jackpot!", "c'mon!", "multiball!", "yes!"]), SHOUT_MS, t);
+    else if (sw && r() < 0.12) sw.say(pick(r, ["nice!", "👀", "go go go", "wow"]), SHOUT_MS, t);
+  }
+  const atMachine = { isAtPinball: true };
+  sp.say("high score! 🎉", CHEER_MS - 200, t1);
+  sp.until(t1 + CHEER_MS, atMachine);
+  sp.goTo(layout, p.home.spot, m.player.door);
+  sp.sit(p.home.spot);
+  const tracks = [{ s: sp, home: p.home.key }];
+  if (sw && watcher) {
+    sw.say("👏", CHEER_MS - 500, t1 + 300);
+    sw.until(t1 + CHEER_MS + 500);
+    sw.goTo(layout, watcher.home.spot, m.watcher.door);
+    sw.sit(watcher.home.spot);
+    tracks.push({ s: sw, home: watcher.home.key });
+  }
+  return activity(id, "pinball", tracks, ["pinball"], { together: { t0, t1 }, bumps });
+}
+
+const COFFEE_LINES = ["needed this ☕", "so good", "😌", "how's your day?", "busy one", "haha", "same!", "👍", "nice!", "🍪?"] as const;
+
+/**
+ * Coffee for two: the first one makes two cups while the other takes two
+ * seats at the kitchen table; they sit with their cups, talk, and take them
+ * back to their desks.
+ */
+function coffeeForTwo(id: string, a: LifePerson, b: LifePerson, start: number, layout: SceneLayout, r: () => number): Activity {
+  const { coffee: machine, cafe } = layout.life;
+  const sa = startFrom(a, start);
+  const sb = startFrom(b, start);
+  sb.stay(800 + Math.floor(r() * 1_200));
+  sa.rise();
+  sa.goTo(layout, machine, a.home.spot.door);
+  const brew = { t0: sa.t, t1: sa.t + Math.round(BREW_MS * 1.6) };
+  sa.say("☕☕", SAY_MS, sa.t + 200);
+  sa.stay(brew.t1 - brew.t0);
+  const cup = { prop: "cup" as const };
+  sa.goTo(layout, cafe[0]!, machine.door, cup);
+  sa.sit(cafe[0]!, cup);
+  sb.rise();
+  sb.goTo(layout, cafe[1]!, b.home.spot.door);
+  sb.sit(cafe[1]!);
+  // Without a cup until the coffee arrives.
+  sb.until(sa.t);
+  sb.say("thanks! ☕", SAY_MS, Math.max(sa.t, sb.t) + 300);
+  const t0 = Math.max(sa.t, sb.t) + 2_600;
+  const lines = 6 + Math.floor(r() * 3);
+  for (let i = 0; i < lines; i++) (i % 2 ? sb : sa).say(pick(r, COFFEE_LINES), SAY_MS, t0 + i * LINE_MS);
+  const t1 = t0 + lines * LINE_MS;
+  sa.until(t1, cup);
+  sb.until(t1 + 500, cup);
+  for (const [s, p, seat] of [
+    [sa, a, cafe[0]!],
+    [sb, b, cafe[1]!],
+  ] as const) {
+    s.rise(cup);
+    s.goTo(layout, p.home.spot, seat.door, cup);
+    s.sit(p.home.spot, cup);
+  }
+  return activity(id, "coffee", [{ s: sa, home: a.home.key }, { s: sb, home: b.home.key }], ["coffee", "cafe"], { together: { t0, t1 }, brew });
 }
 
 /** A walk back from wherever they are (mid-walk, at the foosball table, on the sofa) to where they belong now. */
@@ -450,7 +610,7 @@ export function trackFrames(track: Pick<Track, "legs" | "start" | "end">, view: 
   return frames;
 }
 
-/** The next moment after `now` when something on the picture changes (a leg, a line, a goal, the brew): the scene redraws then, not every frame. */
+/** The next moment after `now` when something on the picture changes (a leg, a line, a goal, a stroke, a pinball score, the brew): the scene redraws then, not every frame. */
 export function nextChange(activities: Activity[], now: number): number | undefined {
   let next = Number.POSITIVE_INFINITY;
   const see = (t: number) => {
@@ -468,6 +628,8 @@ export function nextChange(activities: Activity[], now: number): number | undefi
       }
     }
     for (const g of a.goals ?? []) see(g.at);
+    for (const s of a.strokes ?? []) see(s.at);
+    for (const b of a.bumps ?? []) see(b.at);
     for (const w of [a.brew, a.water, a.together]) {
       if (w) {
         see(w.t0);
@@ -487,8 +649,9 @@ const CROWD = 80;
  * Venues a meeting closes: any whose people would be drawn on top of the
  * people at the meeting (the foosball and the library next to the big table,
  * the coffee machine next to the kitchen table), the kitchen table when a
- * meeting sits there, and the sofa while one is on at the big table (the
- * lounge is under the meeting's card, and a meeting wants quiet).
+ * meeting sits there, the sofa while one is on at the big table (the lounge
+ * is under the meeting's card, and a meeting wants quiet) and the ping pong
+ * table, between the two tables, while either has a meeting.
  */
 function closedVenues(layout: SceneLayout): Set<string> {
   const closed = new Set<string>();
@@ -508,11 +671,14 @@ function closedVenues(layout: SceneLayout): Set<string> {
   check("cafe", life.cafe);
   check("sofa", life.sofa);
   check("foosball", life.foosball.ends);
+  check("pingpong", life.pingpong.ends);
+  check("pinball", [life.pinball.player, life.pinball.watcher]);
   check("shelf", [life.shelf]);
   life.windows.forEach((w, i) => check(`window:${i}`, [w]));
   life.plants.forEach((p, i) => check(`plant:${i}`, [p]));
   if (layout.meetingSpot.includes(1)) closed.add("cafe");
   if (layout.meetingSpot.includes(0)) closed.add("sofa");
+  closed.add("pingpong");
   return closed;
 }
 
@@ -524,12 +690,17 @@ function openVenues(layout: SceneLayout, activities: Activity[]) {
     cafe: !shut.has("cafe") && life.cafe.length >= 2,
     sofa: !shut.has("sofa") && life.sofa.length >= 2,
     foosball: !shut.has("foosball"),
+    pingpong: !shut.has("pingpong"),
+    pinball: !shut.has("pinball"),
     coffee: !shut.has("coffee"),
     shelf: !shut.has("shelf"),
     windows: life.windows.map((_, i) => i).filter((i) => !shut.has(`window:${i}`)),
     plants: life.plants.map((_, i) => i).filter((i) => !shut.has(`plant:${i}`)),
   };
 }
+
+/** An option for `weighted`, only when it is open. */
+const option = <T>(isOpen: boolean, value: T, weight: number): [T, number][] => (isOpen ? [[value, weight]] : []);
 
 /** Choose by weight: `roll` in [0, 1). */
 function weighted<T>(roll: number, options: [T, number][]): T | undefined {
@@ -556,26 +727,37 @@ function tryStart(prop: Proposal, activities: Activity[], rest: Record<string, n
   const id = `${prop.slot}:${prop.size}`;
   if (prop.size === 2) {
     const [a, b] = [eligible[0]!, eligible[1]!];
-    const kind = weighted<"cafe" | "sofa" | "foosball">(r(), [
-      ...(open.cafe ? [["cafe", 1] as ["cafe", number]] : []),
-      ...(open.sofa ? [["sofa", 1] as ["sofa", number]] : []),
-      ...(open.foosball ? [["foosball", 1.4] as ["foosball", number]] : []),
+    // Ping pong comes up as often as foosball; pinball for two (one plays, one watches) and a coffee for two less often.
+    type Pair = "cafe" | "sofa" | "foosball" | "pingpong" | "pinball" | "coffee";
+    const kind = weighted<Pair>(r(), [
+      ...option<Pair>(open.cafe, "cafe", 1),
+      ...option<Pair>(open.sofa, "sofa", 1),
+      ...option<Pair>(open.foosball, "foosball", 1.4),
+      ...option<Pair>(open.pingpong, "pingpong", 1.4),
+      ...option<Pair>(open.pinball, "pinball", 0.6),
+      ...option<Pair>(open.coffee && open.cafe, "coffee", 0.8),
     ]);
     if (kind === "foosball") return foosball(`foosball:${id}`, a, b, prop.at, layout, r);
+    if (kind === "pingpong") return pingpong(`pingpong:${id}`, a, b, prop.at, layout, r);
+    if (kind === "pinball") return pinball(`pinball:${id}`, a, b, prop.at, layout, r);
+    if (kind === "coffee") return coffeeForTwo(`coffee:${id}`, a, b, prop.at, layout, r);
     if (kind === "cafe") return chat(`chat:${id}`, a, b, prop.at, layout, layout.life.cafe, "cafe", r);
     if (kind === "sofa") return chat(`chat:${id}`, a, b, prop.at, layout, layout.life.sofa, "sofa", r);
     return undefined;
   }
   const p = eligible[0]!;
   const kind = weighted<ActivityKind>(r(), [
-    ...(open.coffee ? [["coffee", 3] as [ActivityKind, number]] : []),
-    ...(open.shelf ? [["read", 2] as [ActivityKind, number]] : []),
-    ...(open.plants.length ? [["water", 1.5] as [ActivityKind, number]] : []),
+    ...option<ActivityKind>(open.coffee, "coffee", 3),
+    ...option<ActivityKind>(open.shelf, "read", 2),
+    ...option<ActivityKind>(open.plants.length > 0, "water", 1.5),
     ["stretch", 1.2],
-    ...(open.windows.length ? [["window", 1.5] as [ActivityKind, number]] : []),
+    ...option<ActivityKind>(open.windows.length > 0, "window", 1.5),
+    ...option<ActivityKind>(open.pinball, "pinball", 1),
   ]);
   const life = layout.life;
   switch (kind) {
+    case "pinball":
+      return pinball(`pinball:${id}`, p, undefined, prop.at, layout, r);
     case "coffee":
       return coffee(`coffee:${id}`, p, prop.at, layout, open.cafe && r() < 0.6 ? life.cafe[r() < 0.5 ? 0 : 1] : undefined);
     case "read": {
@@ -698,12 +880,25 @@ export function lifeNote(a: Activity, personId: string, nameOf: (id: string) => 
   const other = a.people.find((id) => id !== personId);
   const withName = other ? nameOf(other) : undefined;
   switch (a.kind) {
-    case "coffee":
-      return { emoji: "☕", text: a.brew && now < a.brew.t1 ? "Making coffee" : "Having a coffee", short: "coffee break" };
+    case "coffee": {
+      // For two, the first one makes both cups.
+      const isMaking = a.people[0] === personId && a.brew !== undefined && now < a.brew.t1;
+      const text = isMaking ? (withName ? `Making coffee for ${withName}` : "Making coffee") : withName ? `Having a coffee with ${withName}` : "Having a coffee";
+      return { emoji: "☕", text, short: "coffee break" };
+    }
     case "chat":
       return { emoji: "💬", text: withName ? `Chatting with ${withName}` : "Chatting", short: "chatting" };
     case "foosball":
       return { emoji: "⚽", text: withName ? `Playing foosball with ${withName}` : "Playing foosball", short: "foosball" };
+    case "pingpong":
+      return { emoji: "🏓", text: withName ? `Playing ping pong with ${withName}` : "Playing ping pong", short: "ping pong" };
+    case "pinball":
+      // The first one plays; a second one watches.
+      if (a.people[0] !== personId) {
+        const player = nameOf(a.people[0]!);
+        return { emoji: "🕹️", text: player ? `Watching ${player} play pinball` : "Watching a pinball game", short: "watching pinball" };
+      }
+      return { emoji: "🕹️", text: "Playing pinball", short: "pinball" };
     case "read":
       return { emoji: "📖", text: "Reading in the Skills library", short: "reading" };
     case "water":
@@ -717,8 +912,81 @@ export function lifeNote(a: Activity, personId: string, nameOf: (id: string) => 
   }
 }
 
-/** The score of a foosball game at time t. */
+/** The score of a foosball or ping pong game at time t. */
 export function scoreAt(a: Pick<Activity, "goals">, t: number): [number, number] {
   const done = (a.goals ?? []).filter((g) => g.at <= t);
   return [done.filter((g) => g.by === 0).length, done.filter((g) => g.by === 1).length];
+}
+
+/** A pinball game's score at time t: it only counts up. */
+export const pinballScoreAt = (a: Pick<Activity, "bumps">, t: number): number => (a.bumps ?? []).reduce((sum, b) => (b.at <= t ? sum + b.points : sum), 0);
+
+/** The ping pong ball at time t: in flight from one paddle to the other (a bounce on the far half), flying past the one who missed after a point, or nowhere (between rallies). */
+export function ballAt(a: Pick<Activity, "strokes">, table: Pick<GameTable, "x" | "y" | "w" | "d">, t: number): P3 | undefined {
+  const strokes = a.strokes ?? [];
+  let i = -1;
+  while (i + 1 < strokes.length && strokes[i + 1]!.at <= t) i++;
+  if (i < 0) return undefined;
+  const s = strokes[i]!;
+  const next = strokes[i + 1];
+  // The rally's last stroke: nobody hits it back.
+  const isLast = !next || next.at - s.at > STROKE_MS;
+  const k = (t - s.at) / STROKE_MS;
+  const dir = s.by === 0 ? 1 : -1;
+  const at = (u: number, v: number, z: number): P3 => ({ x: table.x + table.w / 2 + u * (table.w / 2 + 6), y: table.y + table.d / 2 + v * (table.d / 2 - 5), z });
+  const top = PINGPONG.h + 2;
+  if (k < 1) {
+    const v = s.v + ((isLast ? s.v : next.v) - s.v) * k;
+    return at(dir * (-1 + 2 * k), v, top + flightHeight(k));
+  }
+  const m = (t - s.at - STROKE_MS) / MISS_MS;
+  if (!isLast || m >= 1) return undefined;
+  // Past the end of the table and down to the floor.
+  return at(dir * (1 + 0.9 * m), s.v, 2 + (top - 2 + HIT_Z) * (1 - m * m));
+}
+
+/** Above the table top, the ball leaves a paddle this high and is met this high on the other side. */
+const HIT_Z = 9;
+/** Where in a crossing the ball bounces: on the far half of the table. */
+export const BOUNCE_K = 0.62;
+
+/** The ball's height above the table top over one crossing (k from 0 to 1): an arc over the net down to the bounce, a smaller one up to the paddle. */
+export function flightHeight(k: number): number {
+  if (k < BOUNCE_K) {
+    const q = k / BOUNCE_K;
+    return HIT_Z * (1 - q) + 48 * q * (1 - q);
+  }
+  const q = (k - BOUNCE_K) / (1 - BOUNCE_K);
+  return HIT_Z * q + 24 * q * (1 - q);
+}
+
+/**
+ * The ping pong ball as Web Animation keyframes for a whole game (an SVG
+ * circle drawn at the origin, moved in drawing units): sampled along every
+ * crossing, hidden between rallies. Undefined without strokes.
+ */
+export function ballFrames(a: Pick<Activity, "strokes">, table: Pick<GameTable, "x" | "y" | "w" | "d">): { start: number; end: number; frames: { offset: number; transform: string; opacity: number }[] } | undefined {
+  const strokes = a.strokes ?? [];
+  if (!strokes.length) return undefined;
+  const start = strokes[0]!.at;
+  const end = strokes.at(-1)!.at + STROKE_MS + MISS_MS;
+  const times: number[] = [];
+  strokes.forEach((s, i) => {
+    for (let j = 0; j < 8; j++) times.push(s.at + (j * STROKE_MS) / 8);
+    const next = strokes[i + 1];
+    if (!next || next.at - s.at > STROKE_MS) {
+      for (let j = 0; j <= 4; j++) times.push(s.at + STROKE_MS + (j * MISS_MS) / 4 - (j === 4 ? 1 : 0));
+      // Hidden from just after the drop until the next serve.
+      times.push(s.at + STROKE_MS + MISS_MS);
+      if (next) times.push(next.at - 1);
+    }
+  });
+  let last: P3 = { x: table.x + table.w / 2, y: table.y + table.d / 2, z: PINGPONG.h };
+  const frames = times.map((t) => {
+    const p = ballAt(a, table, t);
+    if (p) last = p;
+    const s = project(last.x, last.y, last.z);
+    return { offset: Math.max(0, Math.min(1, (t - start) / (end - start))), transform: `translate(${s.x.toFixed(1)}px, ${s.y.toFixed(1)}px)`, opacity: p ? 1 : 0 };
+  });
+  return { start, end, frames };
 }

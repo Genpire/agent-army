@@ -1,27 +1,36 @@
 import { describe, expect, it } from "vitest";
 import type { OfficeMeeting, OfficePerson, OfficeState } from "../src/team/office.js";
 import { type BubbleRequest, TAG_DY, around, fixedRects, overlap, placeBubbles, tagWidth } from "../web/src/pages/office/bubbles.js";
-import { type Floor, type LifeSpot, type SceneLayout, STAND_Z, deskSeat, officeLayout, project } from "../web/src/pages/office/layout.js";
+import { type Floor, type LifeSpot, PINGPONG, type SceneLayout, STAND_Z, deskSeat, officeLayout, project } from "../web/src/pages/office/layout.js";
 import {
   type Activity,
+  BOUNCE_K,
   type LifePerson,
   type LifeState,
   LOOKBACK_MS,
   MAX_AWAY,
+  MISS_MS,
   SLOT_MS,
+  STROKE_MS,
   WALK,
   advance,
+  ballAt,
+  ballFrames,
+  legAt,
   lifeNote,
   lifePeople,
   nextChange,
   nextEvent,
+  pinballScoreAt,
   positionAt,
   proposalsBetween,
+  sayingAt,
   scoreAt,
   slotPlan,
   trackFrames,
 } from "../web/src/pages/office/life.js";
 import { isClear, isInside, pathLength, route } from "../web/src/pages/office/paths.js";
+import { READ_MIN_MS, TALK_TEXT_MAX, type TalkLine, cleanLines, readMs, talkDue, talkRequest, talkSchedule, talksOf, talkTitle, withTalk } from "../web/src/pages/office/talk.js";
 
 const NAMES = ["Sara", "Omar", "Lina", "Kenji", "Maya", "Noor", "Diego", "Ada", "Ravi", "Iris", "Tomas", "Yuki", "Zane", "Bea", "Cyd", "Dov", "Eli", "Fay", "Gus", "Hal"];
 
@@ -65,7 +74,7 @@ const away = (s: LifeState) => new Set(s.activities.flatMap((a) => a.people));
 /** Every spot a free agent can go to. */
 function allSpots(layout: SceneLayout): LifeSpot[] {
   const l = layout.life;
-  return [l.coffee, ...l.cafe, ...l.sofa, ...l.foosball.ends, l.shelf, ...l.windows, ...l.plants];
+  return [l.coffee, ...l.cafe, ...l.sofa, ...l.foosball.ends, ...l.pingpong.ends, l.pinball.player, l.pinball.watcher, l.shelf, ...l.windows, ...l.plants];
 }
 
 function expectWalkable(layout: SceneLayout, points: Floor[]) {
@@ -185,15 +194,19 @@ describe("office life: the director", () => {
         kinds.add(a.kind);
         expect(a.people).not.toContain("a2");
         expect(a.people).not.toContain("a5");
-        if (a.kind === "chat" || a.kind === "foosball") {
+        if (a.kind === "chat" || a.kind === "foosball" || a.kind === "pingpong") {
           expect(new Set(a.people).size).toBe(2);
+        } else if (a.kind === "coffee" || a.kind === "pinball") {
+          // Alone, or for two: one makes the coffees, or one plays while the other watches.
+          expect(new Set(a.people).size).toBe(a.people.length);
+          expect(a.people.length).toBeLessThanOrEqual(2);
         } else {
           expect(a.people).toHaveLength(1);
         }
       }
     });
     // Varied: coffee, chats, games and solo moments all happen in two hours.
-    for (const k of ["coffee", "chat", "foosball", "read", "water", "stretch", "window"]) expect(kinds, k).toContain(k);
+    for (const k of ["coffee", "chat", "foosball", "pingpong", "pinball", "read", "water", "stretch", "window"]) expect(kinds, k).toContain(k);
   });
 
   it("does nothing when nobody is free, and pairs only when two are", () => {
@@ -459,5 +472,334 @@ describe("office cards: collision layout", () => {
     });
     expect(spots.x!.height).toBeLessThan(30);
     expect(spots.x!.width).toBeLessThan(150);
+  });
+});
+
+/** Every outing the director starts over `ms` from T0, by id. */
+function outings(n: number, ms: number, step = 2_000) {
+  const { people, layout, life } = setup(n);
+  const byId = new Map<string, Activity>();
+  run(layout, life, T0, T0 + ms, step, (s) => s.activities.forEach((a) => byId.set(a.id, a)));
+  return { people, layout, life, all: [...byId.values()], names: new Map(life.map((p) => [p.id, p.name])) };
+}
+
+describe("office games: ping pong, pinball and coffee for two", () => {
+  const { layout, life, all, names } = outings(7, 6 * 3_600_000);
+  const games = all.filter((a) => a.kind === "pingpong");
+  const pinball = all.filter((a) => a.kind === "pinball");
+
+  it("plays ping pong in rallies: strokes alternate, the last to hit wins the point, the serve changes every two points, a winner at the end", () => {
+    expect(games.length).toBeGreaterThan(2);
+    for (const g of games) {
+      const { t0, t1 } = g.together!;
+      const strokes = g.strokes!;
+      const goals = g.goals!;
+      // Strokes a crossing apart make a rally; a point and a pause come between rallies.
+      const rallies: (typeof strokes)[] = [];
+      for (const s of strokes) {
+        const last = rallies.at(-1);
+        if (last && s.at - last.at(-1)!.at === STROKE_MS) last.push(s);
+        else rallies.push([s]);
+      }
+      expect(goals.length).toBeGreaterThan(0);
+      expect(rallies).toHaveLength(goals.length);
+      rallies.forEach((rally, k) => {
+        expect(rally[0]!.by, `rally ${k}: the server`).toBe(Math.floor(k / 2) % 2);
+        expect(rally.length).toBeGreaterThanOrEqual(2);
+        expect(rally.length).toBeLessThanOrEqual(8);
+        rally.forEach((s, i) => i > 0 && expect(s.by).toBe(1 - rally[i - 1]!.by));
+        const last = rally.at(-1)!;
+        expect(goals[k]).toEqual({ at: last.at + STROKE_MS, by: last.by });
+        expect(rally[0]!.at).toBeGreaterThanOrEqual(t0);
+        expect(goals[k]!.at + MISS_MS).toBeLessThanOrEqual(t1);
+      });
+      const [a, b] = scoreAt(g, t1);
+      expect(a + b).toBe(goals.length);
+      expect(scoreAt(g, t0)).toEqual([0, 0]);
+      const cheers = g.tracks.map((t) => sayingAt(t, t1)?.text);
+      expect(cheers).toEqual(a === b ? ["gg!", "gg!"] : a > b ? ["🏆", "gg!"] : ["gg!", "🏆"]);
+    }
+  });
+
+  it("keeps each ping pong player at their end of the table, paddle in hand from leaving their desk to sitting back down", () => {
+    for (const g of games) {
+      g.tracks.forEach((t, i) => {
+        const end = layout.life.pingpong.ends[i]!;
+        expect(legAt(t, g.together!.t0 + 1)!.to).toEqual({ x: end.at.x, y: end.at.y, z: STAND_Z });
+        for (const leg of t.legs.filter((l) => l.pose !== "sit")) expect(leg.prop).toBe("paddle");
+      });
+    }
+  });
+
+  it("flies the ball from paddle to paddle: at the hitter's end on each stroke, over the net, a bounce on the far half, past the one who missed, hidden between rallies", () => {
+    const table = layout.life.pingpong;
+    const cx = table.x + table.w / 2;
+    const reach = table.w / 2 + 6;
+    const top = PINGPONG.h + 2;
+    for (const g of games) {
+      expect(ballAt(g, table, g.strokes![0]!.at - 1)).toBeUndefined();
+      for (const s of g.strokes!) {
+        const toward = s.by === 0 ? 1 : -1;
+        expect(ballAt(g, table, s.at)!.x).toBeCloseTo(cx - toward * reach, 6);
+        expect(ballAt(g, table, s.at + STROKE_MS / 2)!.z).toBeGreaterThan(PINGPONG.h + 6);
+        const bounce = ballAt(g, table, s.at + STROKE_MS * BOUNCE_K)!;
+        expect(bounce.z).toBeCloseTo(top, 3);
+        expect(Math.sign(bounce.x - cx)).toBe(toward);
+      }
+      for (const goal of g.goals!) {
+        const dropped = ballAt(g, table, goal.at + MISS_MS - 1)!;
+        expect(Math.abs(dropped.x - cx)).toBeGreaterThan(reach);
+        expect(dropped.z).toBeLessThan(5);
+        expect(ballAt(g, table, goal.at + MISS_MS + 10)).toBeUndefined();
+      }
+      // The scene's one Web Animation for the game: in order, hidden between rallies.
+      const path = ballFrames(g, table)!;
+      expect(path.start).toBe(g.strokes![0]!.at);
+      expect(path.frames[0]!.offset).toBe(0);
+      for (let i = 1; i < path.frames.length; i++) expect(path.frames[i]!.offset).toBeGreaterThanOrEqual(path.frames[i - 1]!.offset);
+      expect(path.frames.filter((f) => f.opacity === 0).length).toBeGreaterThanOrEqual(g.goals!.length);
+      for (const f of path.frames) expect(f.transform).toMatch(/^translate\(-?[\d.]+px, -?[\d.]+px\)$/);
+    }
+  });
+
+  it("plays pinball: the score counts up to what the ball scored, hands on the buttons, a friend beside the player, a high score at the end", () => {
+    expect(pinball.some((g) => g.people.length === 1)).toBe(true);
+    expect(pinball.some((g) => g.people.length === 2)).toBe(true);
+    const m = layout.life.pinball;
+    for (const g of pinball) {
+      const { t0, t1 } = g.together!;
+      const bumps = g.bumps!;
+      expect(bumps.length).toBeGreaterThan(5);
+      for (const b of bumps) {
+        expect(b.at).toBeGreaterThan(t0);
+        expect(b.at).toBeLessThan(t1);
+      }
+      expect(pinballScoreAt(g, t0)).toBe(0);
+      let last = 0;
+      for (let t = t0; t <= t1 + 3_000; t += 250) {
+        const score = pinballScoreAt(g, t);
+        expect(score).toBeGreaterThanOrEqual(last);
+        last = score;
+      }
+      expect(last).toBe(bumps.reduce((sum, b) => sum + b.points, 0));
+      const [player, watcher] = g.tracks;
+      const playing = legAt(player!, t0 + 1)!;
+      expect(playing.isAtPinball).toBe(true);
+      expect(playing.to).toEqual({ x: m.player.at.x, y: m.player.at.y, z: STAND_Z });
+      expect(sayingAt(player!, t1)?.text).toBe("high score! 🎉");
+      if (watcher) {
+        const watching = legAt(watcher, t0 + 1)!;
+        expect(watching.to).toEqual({ x: m.watcher.at.x, y: m.watcher.at.y, z: STAND_Z });
+        expect(watching.isAtPinball).toBeUndefined();
+        expect(lifeNote(g, watcher.personId, (id) => names.get(id), t0)?.text).toBe(`Watching ${names.get(player!.personId)} play pinball`);
+      }
+      expect(lifeNote(g, player!.personId, (id) => names.get(id), t0)?.text).toBe("Playing pinball");
+    }
+    const g = games[0]!;
+    expect(lifeNote(g, g.people[0]!, (id) => names.get(id), g.start)?.text).toBe(`Playing ping pong with ${names.get(g.people[1]!)}`);
+  });
+
+  it("makes coffee for two: the first one brews both cups, the other waits at the kitchen table without one until it comes", () => {
+    const two = all.filter((a) => a.kind === "coffee" && a.people.length === 2);
+    expect(two.length).toBeGreaterThan(0);
+    for (const c of two) {
+      expect(c.venues).toEqual(["coffee", "cafe"]);
+      expect(c.brew!.t1 - c.brew!.t0).toBe(8_000);
+      const [maker, friend] = c.tracks;
+      const served = maker!.legs.find((l) => l.pose === "sit" && l.prop === "cup")!.t1;
+      for (const leg of friend!.legs.filter((l) => l.t1 <= served)) expect(leg.prop).toBeUndefined();
+      expect(legAt(friend!, c.together!.t0 + 1)!.prop).toBe("cup");
+      const [a, b] = c.people as [string, string];
+      expect(lifeNote(c, a, (id) => names.get(id), c.brew!.t0 + 1)?.text).toBe(`Making coffee for ${names.get(b)}`);
+      expect(lifeNote(c, a, (id) => names.get(id), c.together!.t0)?.text).toBe(`Having a coffee with ${names.get(b)}`);
+      expect(lifeNote(c, b, (id) => names.get(id), c.brew!.t0 + 1)?.text).toBe(`Having a coffee with ${names.get(a)}`);
+    }
+  });
+
+  it("holds the ping pong table and the pinball machine while they are in use: nobody else starts a game there", () => {
+    // Someone (unseen) holds both for two hours: no game starts at either.
+    const start = advance(undefined, life, layout, T0);
+    const holder: Activity = { id: "held", kind: "pingpong", people: [], start: T0, end: T0 + 2 * 3_600_000, tracks: [], venues: ["pingpong", "pinball"] };
+    const kinds = new Set<string>();
+    run(
+      layout,
+      life,
+      T0,
+      T0 + 2 * 3_600_000 - 1_000,
+      2_000,
+      (s) => {
+        for (const a of s.activities) {
+          kinds.add(a.kind);
+          if (a === holder) continue;
+          expect(a.venues).not.toContain("pingpong");
+          expect(a.venues).not.toContain("pinball");
+        }
+      },
+      { ...start, activities: [...start.activities, holder] },
+    );
+    expect(kinds).toContain("foosball");
+    // Left alone, the machine is never played twice at once (a game for one and one with a friend could otherwise overlap).
+    run(layout, life, T0, T0 + 6 * 3_600_000, 1_000, (s) => {
+      for (const venue of ["pingpong", "pinball", "foosball"]) expect(s.activities.filter((a) => a.venues.includes(venue)).length, venue).toBeLessThanOrEqual(1);
+    });
+  });
+
+  it("puts every game's players clear of the seated people's faces and name tags, for any team size", () => {
+    const FACE = 28;
+    const STANDING = 24;
+    for (const n of [0, 1, 3, 6, 7, 9, 12, 16, 20]) {
+      const { people, layout: l } = setup(n);
+      const byId = new Map(people.map((p) => [p.id, p]));
+      const seated = l.placements.flatMap((p) => {
+        const who = byId.get(p.personId)!;
+        return [
+          { what: `${p.personId}'s face`, r: around(p.at, FACE * 2, FACE * 2) },
+          { what: `${p.personId}'s name`, r: around({ x: p.at.x, y: p.at.y + TAG_DY }, tagWidth(`${who.name} · ${who.role}`), 26) },
+        ];
+      });
+      const g = l.life;
+      for (const [name, spot] of [
+        ["ping pong 1", g.pingpong.ends[0]],
+        ["ping pong 2", g.pingpong.ends[1]],
+        ["pinball", g.pinball.player],
+        ["watcher", g.pinball.watcher],
+      ] as const) {
+        const face = around(project(spot.at.x, spot.at.y, STAND_Z), STANDING * 2, STANDING * 2);
+        const feet = project(spot.at.x, spot.at.y, 3);
+        const tag = around({ x: feet.x, y: feet.y + 13 }, tagWidth("Kenji"), 26);
+        for (const s of seated) {
+          expect(overlap(face, s.r), `${n} agents: the ${name} player's face on ${s.what}`).toBe(0);
+          if (s.what.endsWith("face")) expect(overlap(tag, s.r), `${n} agents: the ${name} player's name on ${s.what}`).toBe(0);
+        }
+      }
+    }
+  });
+});
+
+describe("office talk: real lines in the bubbles", () => {
+  const { all, names } = outings(7, 6 * 3_600_000);
+  const chat = all.find((a) => a.kind === "chat")!;
+  const game = all.find((a) => a.kind === "pingpong")!;
+  const lines = (a: Activity, texts: string[]): TalkLine[] => texts.map((text, i) => ({ speaker: a.people[i % a.people.length]!, text }));
+
+  it("asks only for a chat, a coffee for two, a game for two or pinball with a friend, by an id made of the slot and the people", () => {
+    const asked = new Set<string>();
+    for (const a of all) {
+      const r = talkRequest(a);
+      const isSocial = a.together !== undefined && a.people.length >= 2 && ["chat", "coffee", "foosball", "pingpong", "pinball"].includes(a.kind);
+      expect(Boolean(r), `${a.kind} for ${a.people.length}`).toBe(isSocial);
+      if (!r) continue;
+      expect(r).toEqual({ activityId: `${a.id}:${a.people.join(".")}`, kind: a.kind, people: a.people });
+      expect(r.activityId).toMatch(/^[A-Za-z0-9:._-]{1,120}$/);
+      asked.add(r.activityId);
+    }
+    for (const kind of ["chat", "coffee", "foosball", "pingpong", "pinball"]) expect([...asked].some((id) => id.startsWith(`${kind}:`)), kind).toBe(true);
+    expect(talkRequest({ ...chat, people: [chat.people[0]!] })).toBeUndefined();
+    expect(talkRequest({ ...chat, together: undefined })).toBeUndefined();
+  });
+
+  it("asks once per conversation, and never for one whose talk is over (an outing replayed from the past)", () => {
+    const now = chat.together!.t0;
+    const due = talkDue([chat], now, new Set());
+    expect(due).toEqual([{ request: talkRequest(chat), window: chat.together }]);
+    expect(talkDue([chat], now, new Set([talkRequest(chat)!.activityId]))).toEqual([]);
+    expect(talkDue([chat], chat.together!.t1, new Set())).toEqual([]);
+    expect(talkDue([chat], chat.together!.t1 - 1, new Set())).toHaveLength(1);
+    expect(talkDue(all.filter((a) => a.people.length === 1), 0, new Set())).toEqual([]);
+  });
+
+  it("keeps only lines said by the people, as one plain line of at most 140 characters, at most eight, and needs two", () => {
+    const [a, b] = chat.people as [string, string];
+    const long = "word ".repeat(60);
+    const cleaned = cleanLines(
+      [{ speaker: a, text: "  hi\n there  " }, { speaker: "mallory", text: "not here" }, { speaker: b, text: 42 }, null, { speaker: b, text: long }, { speaker: a, text: "   " }],
+      [a, b],
+    );
+    expect(cleaned).toHaveLength(2);
+    expect(cleaned[0]).toEqual({ speaker: a, text: "hi there" });
+    expect(cleaned[1]!.speaker).toBe(b);
+    expect(cleaned[1]!.text.length).toBeLessThanOrEqual(TALK_TEXT_MAX);
+    expect(cleaned[1]!.text.endsWith("…")).toBe(true);
+    expect(cleanLines([{ speaker: a, text: "alone" }], [a, b])).toEqual([]);
+    expect(cleanLines("nope", [a, b])).toEqual([]);
+    expect(cleanLines(Array.from({ length: 12 }, (_, i) => ({ speaker: i % 2 ? a : b, text: `line ${i}` })), [a, b])).toHaveLength(8);
+  });
+
+  it("gives each line time to read by its length, in turn, and squeezes or ends the talk to fit its window", () => {
+    expect(readMs("ok")).toBe(READ_MIN_MS);
+    expect(readMs("x".repeat(60))).toBeGreaterThan(readMs("x".repeat(30)));
+    const said = lines(chat, ["Morning! Coffee first?", "Always. Did the deploy go out?", "It did, all green.", "Nice work."]);
+    const roomy = talkSchedule(said, { t0: 1_000, t1: 200_000 });
+    expect(roomy.map((l) => l.speaker)).toEqual(said.map((l) => l.speaker));
+    expect(roomy[0]!.t0).toBe(1_000);
+    roomy.forEach((l, i) => {
+      expect(l.t1 - l.t0).toBe(readMs(l.text));
+      if (i) expect(l.t0).toBe(roomy[i - 1]!.t1 + 350);
+    });
+    // A short window: every line shorter alike, all of them in.
+    const total = roomy.at(-1)!.t1 - roomy[0]!.t0;
+    const tight = talkSchedule(said, { t0: 0, t1: Math.round(total * 0.75) });
+    expect(tight).toHaveLength(said.length);
+    tight.forEach((l, i) => expect(l.t1 - l.t0).toBeLessThan(roomy[i]!.t1 - roomy[i]!.t0));
+    expect(tight.at(-1)!.t1).toBeLessThanOrEqual(Math.round(total * 0.75));
+    // Far too short: never below a readable minimum; the talk ends before the first line that does not fit.
+    const cut = talkSchedule(said, { t0: 0, t1: 4_000 });
+    expect(cut.map((l) => l.text)).toEqual(said.slice(0, cut.length).map((l) => l.text));
+    expect(cut.length).toBeLessThan(said.length);
+    for (const l of cut) expect(l.t1 - l.t0).toBeGreaterThanOrEqual(1_600);
+  });
+
+  it("shows the talk in the bubbles instead of the canned lines, from the moment it arrives, without touching the walk or the lines outside the window", () => {
+    const said = lines(game, ["Your serve. Did the deploy go out?", "It did! Lina fixed the flaky test.", "3-1 me, by the way.", "Not for long."]);
+    const { t0, t1 } = game.together!;
+    const talked = withTalk(game, said, t0 - 5_000);
+    const schedule = talkSchedule(said, game.together!);
+    talked.tracks.forEach((track, i) => {
+      const before = game.tracks[i]!;
+      // The same legs: the scene keeps animating the walk as it was.
+      expect(track.legs).toBe(before.legs);
+      const inWindow = track.says.filter((s) => s.t0 >= t0 && s.t0 < t1);
+      expect(inWindow.every((s) => s.isTalk)).toBe(true);
+      expect(inWindow.map((s) => s.text)).toEqual(schedule.filter((l) => l.speaker === track.personId).map((l) => l.text));
+      // The game's end ("🏆", "gg!") stays.
+      expect(track.says.filter((s) => s.t0 >= t1)).toEqual(before.says.filter((s) => s.t0 >= t1));
+    });
+    // Each line in its time, on the right person.
+    for (const l of schedule) expect(sayingAt(talked.tracks.find((t) => t.personId === l.speaker)!, l.t0 + 1)?.text).toBe(l.text);
+    // The scene redraws when a line starts.
+    expect(nextChange([talked], schedule[1]!.t0 - 1)).toBe(schedule[1]!.t0);
+  });
+
+  it("keeps the canned lines already said when the talk arrives late, and plays the canned ones when there is no talk", () => {
+    const said = lines(chat, ["Hey, how was the planning call?", "Long, but we have a plan.", "Good. Lunch later?", "Yes, at one."]);
+    const schedule = talkSchedule(said, chat.together!);
+    const late = schedule[1]!.t0 + 1_000;
+    const talked = withTalk(chat, said, late);
+    const says = talked.tracks.flatMap((t) => t.says).sort((p, q) => p.t0 - q.t0);
+    // What was said before stays (cut where the talk starts); the first talk line still readable shows from its arrival.
+    for (const s of chat.tracks.flatMap((t) => t.says).filter((x) => x.t0 < late)) {
+      expect(says.some((x) => !x.isTalk && x.t0 === s.t0 && x.text === s.text && x.t1 === Math.min(s.t1, late))).toBe(true);
+    }
+    const shown = says.filter((s) => s.isTalk);
+    expect(shown[0]).toMatchObject({ text: schedule[1]!.text, t0: late });
+    expect(shown.map((s) => s.text)).toEqual(schedule.slice(1).map((l) => l.text));
+    expect(says.filter((s) => !s.isTalk && s.t0 >= late && s.t0 < chat.together!.t1)).toEqual([]);
+    // No lines, or too late for any: the activity as planned.
+    expect(withTalk(chat, [], chat.start)).toBe(chat);
+    expect(withTalk(chat, said, chat.together!.t1)).toBe(chat);
+  });
+
+  it("lists what a person said in the office, newest first, with the lines said so far", () => {
+    const a = chat.people[0]!;
+    const entry = (id: string, at: number) => ({ activityId: id, kind: "chat" as const, people: chat.people, lines: talkSchedule(lines(chat, ["one", "two", "three"]), { t0: at, t1: at + 60_000 }) });
+    const older = entry("chat:1:2", 1_000);
+    const newer = entry("chat:2:2", 100_000);
+    const later = entry("chat:3:2", 900_000);
+    const log = talksOf([older, newer, later], a, newer.lines[1]!.t0);
+    expect(log.map((e) => e.activityId)).toEqual(["chat:2:2", "chat:1:2"]);
+    expect(log[0]!.lines.map((l) => l.text)).toEqual(["one", "two"]);
+    expect(talksOf([older], "nobody", 1e12)).toEqual([]);
+    expect(talkTitle({ kind: "pingpong", people: game.people }, game.people[0]!, (id) => names.get(id)!)).toBe(`Ping pong with ${names.get(game.people[1]!)}`);
+    expect(talkTitle({ kind: "chat", people: ["a", "b", "c"] }, "a", (id) => id.toUpperCase())).toBe("Chat with B and C");
   });
 });

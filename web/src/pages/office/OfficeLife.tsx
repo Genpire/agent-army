@@ -4,8 +4,8 @@ import * as stylex from "@stylexjs/stylex";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Face, hueOf } from "./Face";
 import { FACE_Z, STAND_Z, type SceneLayout, project, toPercent } from "./layout";
-import { type Activity, type Track, legAt, nextChange, sayingAt, scoreAt, trackFrames } from "./life";
-import { Figure, LifeProps, foosballFront } from "./LifeArt";
+import { type Activity, type Track, legAt, nextChange, pinballScoreAt, positionAt, sayingAt, scoreAt, trackFrames } from "./life";
+import { Figure, LifeProps, pinballDisplay, tableFront } from "./LifeArt";
 import { type OfficePerson, personSummary } from "./model";
 import { Tag } from "./Tags";
 import type { OfficeLife as Life } from "./useOfficeLife";
@@ -54,6 +54,11 @@ const styles = stylex.create({
   belowFeet: (top: number) => ({ top }),
   say: { position: "absolute", left: 0, transform: "translateX(-50%)", whiteSpace: "nowrap" },
   sayAt: (bottom: number) => ({ bottom }),
+  // A line of real talk wraps: as wide as its words, up to `max` px.
+  sayWrap: (max: number) => ({ whiteSpace: "normal", width: "max-content", maxWidth: max }),
+  // Away from the one they talk to: from just left of the face to the right, or from just right of it to the left.
+  toEnd: { transform: `translateX(calc(-1 * ${spacingVars["--spacing-5"]}))` },
+  toStart: { transform: `translateX(calc(-100% + ${spacingVars["--spacing-5"]}))` },
   pop: {
     transformOrigin: "50% 100%",
     animationName: pop,
@@ -82,13 +87,22 @@ function useLifeClock(activities: Activity[], isPaused: boolean): number {
   return now;
 }
 
-/** A short line over someone's head: it pops in and fades out as it ends. */
-function SayBubble({ text, bottom, endsIn, isPaused }: { text: string; bottom: number; endsIn: number; isPaused: boolean }) {
+/** Which way a wide bubble grows from the face: "end" (right) or "start" (left), away from the others in the conversation. */
+type BubbleSide = "start" | "end";
+
+/** Real talk wraps to this width at most (px), a little narrower when the drawing is small. */
+const TALK_WIDTH = 210;
+const TALK_WIDTH_COMPACT = 170;
+
+/** A line over someone's head: it pops in and fades out as it ends. A short canned line is a pill; a line of real talk wraps in a rounded bubble. */
+function SayBubble({ text, isTalk, side, bottom, endsIn, isCompact, isPaused }: { text: string; isTalk: boolean; side: BubbleSide | undefined; bottom: number; endsIn: number; isCompact: boolean; isPaused: boolean }) {
   return (
-    <StackItem xstyle={[styles.say, styles.sayAt(bottom)]} aria-hidden>
+    <StackItem
+      xstyle={[styles.say, styles.sayAt(bottom), isTalk && styles.sayWrap(isCompact ? TALK_WIDTH_COMPACT : TALK_WIDTH), isTalk && side === "end" && styles.toEnd, isTalk && side === "start" && styles.toStart]}
+      aria-hidden>
       <StackItem xstyle={[styles.pop, isPaused && styles.paused]}>
         <StackItem xstyle={[styles.fadeOut, styles.delay(Math.max(0, endsIn - 200)), isPaused && styles.paused]}>
-          <Tag text={text} />
+          <Tag text={text} isBold={!isTalk} maxLines={isTalk ? 5 : 1} />
         </StackItem>
       </StackItem>
     </StackItem>
@@ -105,6 +119,10 @@ interface WalkerProps {
   isPaused: boolean;
   /** Their outing, in words, for the face's name ("… Making coffee."). */
   note: string | undefined;
+  /** Their paddle's last stroke, at ping pong. */
+  swing: { at: number; since: number } | undefined;
+  /** Which way their talk bubble grows, so it never covers the one they talk to. */
+  side: BubbleSide | undefined;
   onOpen: (id: string) => void;
 }
 
@@ -114,22 +132,24 @@ interface WalkerProps {
  * when the leg changes (walking, standing, sitting, what they hold, which way
  * they look). The face stays a button that opens their drawer.
  */
-function Walker({ person, track, layout, scale, isCompact, now, isPaused, note, onOpen }: WalkerProps) {
+function Walker({ person, track, layout, scale, isCompact, now, isPaused, note, swing, side, onOpen }: WalkerProps) {
   const layerRef = useRef<HTMLElement>(null);
   const animation = useRef<Animation | undefined>(undefined);
   const { x, y, width, height } = layout.view;
+  // Real talk arriving gives the track new words, not new legs: the walk goes on as it is.
+  const { legs, start, end } = track;
 
   useLayoutEffect(() => {
     const el = layerRef.current;
     if (!el || typeof el.animate !== "function") return;
-    const a = el.animate(trackFrames(track, { x, y, width, height }), { duration: Math.max(1, track.end - track.start), fill: "both" });
-    a.currentTime = Date.now() - track.start;
+    const a = el.animate(trackFrames({ legs, start, end }, { x, y, width, height }), { duration: Math.max(1, end - start), fill: "both" });
+    a.currentTime = Date.now() - start;
     animation.current = a;
     return () => {
       a.cancel();
       animation.current = undefined;
     };
-  }, [track, x, y, width, height]);
+  }, [legs, start, end, x, y, width, height]);
 
   // A hidden tab holds the walk; back in view it catches up with the clock.
   useEffect(() => {
@@ -137,10 +157,10 @@ function Walker({ person, track, layout, scale, isCompact, now, isPaused, note, 
     if (!a) return;
     if (isPaused) a.pause();
     else {
-      a.currentTime = Date.now() - track.start;
+      a.currentTime = Date.now() - start;
       a.play();
     }
-  }, [isPaused, track]);
+  }, [isPaused, legs, start]);
 
   const leg = legAt(track, now);
   const pose = leg?.pose ?? "sit";
@@ -157,30 +177,66 @@ function Walker({ person, track, layout, scale, isCompact, now, isPaused, note, 
   return (
     <StackItem ref={layerRef} xstyle={[styles.layer, styles.z(Math.round(depth + 1000))]} data-walker={person.id}>
       <StackItem xstyle={[styles.origin, pose === "walk" && styles.bobbing, isPaused && styles.paused]}>
-        <Figure pose={pose} prop={leg?.prop} isStretch={leg?.isStretch} hue={hueOf(person.avatar)} look={look} scale={scale} isPaused={isPaused} />
+        <Figure pose={pose} prop={leg?.prop} isStretch={leg?.isStretch} isAtPinball={leg?.isAtPinball} swing={swing} hue={hueOf(person.avatar)} look={look} scale={scale} isPaused={isPaused} />
         <StackItem xstyle={[styles.face, pose === "stand" && styles.up, pose === "walk" && (look > 0 ? styles.leanRight : styles.leanLeft)]}>
           <Face seed={person.avatar} name={person.name} state={person.state} size={size} label={label} onClick={() => onOpen(person.id)} />
         </StackItem>
         <StackItem xstyle={[styles.below, isUp && styles.belowFeet(Math.round((STAND_Z + 3) * scale))]}>
           <Tag text={person.name} />
         </StackItem>
-        {say && <SayBubble key={say.t0} text={say.text} bottom={Math.round(faceHalf + 6)} endsIn={say.t1 - now} isPaused={isPaused} />}
+        {say && <SayBubble key={say.t0} text={say.text} isTalk={Boolean(say.isTalk)} side={side} bottom={Math.round(faceHalf + 6)} endsIn={say.t1 - now} isCompact={isCompact} isPaused={isPaused} />}
       </StackItem>
     </StackItem>
   );
 }
 
-/** The foosball score, on the floor in front of the table while a game is on. */
-function Score({ activity, layout, now }: { activity: Activity; layout: SceneLayout; now: number }) {
-  const [a, b] = scoreAt(activity, now);
-  const pos = toPercent(layout.view, foosballFront(layout));
+/** A game's score on the picture: on the floor in front of a table, on the pinball machine's back glass. */
+function Score({ text, at, layout }: { text: string; at: { x: number; y: number }; layout: SceneLayout }) {
+  const pos = toPercent(layout.view, at);
   return (
     <StackItem xstyle={[styles.anchor, styles.at(pos.left, pos.top), styles.z(990)]}>
       <StackItem xstyle={styles.centred}>
-        <Tag text={`⚽ ${a} – ${b}`} />
+        <Tag text={text} />
       </StackItem>
     </StackItem>
   );
+}
+
+/** How long a game's last score stays up after it ends (the winner's moment). */
+const SCORE_AFTER_MS = 2_000;
+
+/** The scores of the games on now: foosball and ping pong on the floor in front of their tables, pinball on the machine (its high score at the end). */
+function scores(activities: Activity[], layout: SceneLayout, now: number): { key: string; text: string; at: { x: number; y: number } }[] {
+  return activities.flatMap((a) => {
+    if (!a.together || now < a.together.t0 || now >= a.together.t1 + SCORE_AFTER_MS) return [];
+    if (a.kind === "pinball") {
+      const score = pinballScoreAt(a, now).toLocaleString();
+      return [{ key: a.id, text: now < a.together.t1 ? score : `🏆 ${score}`, at: pinballDisplay(layout) }];
+    }
+    if (a.kind !== "foosball" && a.kind !== "pingpong") return [];
+    const [x, y] = scoreAt(a, now);
+    const table = a.kind === "foosball" ? layout.life.foosball : layout.life.pingpong;
+    return [{ key: a.id, text: `${a.kind === "foosball" ? "⚽" : "🏓"} ${x} – ${y}`, at: tableFront(table) }];
+  });
+}
+
+/** In a conversation, which side of the others someone is on the picture now: their bubble grows that way. */
+function sideOf(activity: Activity, track: Track, now: number): BubbleSide | undefined {
+  const others = activity.tracks.filter((t) => t !== track);
+  if (!others.length) return undefined;
+  const screenX = (t: Track) => {
+    const p = positionAt(t, now);
+    return project(p.x, p.y, p.z).x;
+  };
+  const theirs = others.reduce((sum, t) => sum + screenX(t), 0) / others.length;
+  return screenX(track) >= theirs ? "end" : "start";
+}
+
+/** A ping pong player's last stroke, while their paddle still swings. */
+function swingOf(activity: Activity, personId: string, now: number): { at: number; since: number } | undefined {
+  const by = activity.people.indexOf(personId);
+  const last = activity.strokes?.filter((s) => s.by === by && s.at <= now).at(-1);
+  return last && now - last.at < 450 ? { at: last.at, since: now - last.at } : undefined;
 }
 
 export interface OfficeLifeProps {
@@ -196,14 +252,13 @@ export interface OfficeLifeProps {
 /** Everyone out of their seat, and the props of what they do, over the room. */
 export function OfficeLife({ life, layout, people, scale, isCompact, onOpen }: OfficeLifeProps) {
   const now = useLifeClock(life.activities, life.isPaused);
-  const games = life.activities.filter((a) => a.kind === "foosball" && a.together && now >= a.together.t0 && now < a.together.t1 + 2_000);
   return (
     <>
       <LifeProps layout={layout} activities={life.activities} now={now} isPaused={life.isPaused} />
-      {games.map((g) => (
-        <Score key={g.id} activity={g} layout={layout} now={now} />
+      {scores(life.activities, layout, now).map((s) => (
+        <Score key={s.key} text={s.text} at={s.at} layout={layout} />
       ))}
-      {[...life.parts.values()].map(({ track }) => {
+      {[...life.parts.values()].map(({ activity, track }) => {
         const person = people.get(track.personId);
         if (!person) return null;
         return (
@@ -217,6 +272,8 @@ export function OfficeLife({ life, layout, people, scale, isCompact, onOpen }: O
             now={now}
             isPaused={life.isPaused}
             note={life.noteOf(person.id, now)?.text}
+            swing={activity.kind === "pingpong" ? swingOf(activity, person.id, now) : undefined}
+            side={sideOf(activity, track, now)}
             onOpen={onOpen}
           />
         );

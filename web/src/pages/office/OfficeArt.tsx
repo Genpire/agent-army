@@ -11,12 +11,13 @@
  * and type only while their owner works, and every animation stops under
  * prefers-reduced-motion. Decorative: the page describes everyone in text.
  * What moves with the office's life (people walking, a cup brewing, the
- * foosball) is drawn by LifeArt.tsx with the same helpers and colours.
+ * foosball, a ping pong rally, a pinball game) is drawn by LifeArt.tsx with
+ * the same helpers and colours.
  */
 import { colorVars } from "@astryxdesign/core/theme/tokens.stylex";
 import * as stylex from "@stylexjs/stylex";
 import type { ReactNode } from "react";
-import { DESK, type Desk, FLOOR_T, type MeetingSpot, type Pt, type SceneLayout, WALL_H, project, seatsAround } from "./layout";
+import { DESK, type Desk, FLOOR_T, type MeetingSpot, PINGPONG, type Pt, type SceneLayout, WALL_H, project, seatsAround } from "./layout";
 
 // ---------- Colours: Astryx tokens only ----------
 
@@ -132,6 +133,27 @@ export const fill = stylex.create({
   // Coffee pouring and water drops.
   coffee: { stroke: `color-mix(in oklab, ${ORANGE} 40%, ${K})`, strokeWidth: 1.6, strokeLinecap: "round" },
   drop: { fill: `color-mix(in oklab, ${BLUE} 70%, ${W})` },
+  // The ping pong table: a blue top with white lines, the net, the paddles and the ball.
+  pongTop: { fill: `light-dark(color-mix(in oklab, ${BLUE} 62%, ${W}), color-mix(in oklab, ${BLUE} 50%, ${S}))` },
+  pongL: { fill: `light-dark(color-mix(in oklab, ${BLUE} 72%, ${K}), color-mix(in oklab, ${BLUE} 40%, ${K}))` },
+  pongR: { fill: `light-dark(color-mix(in oklab, ${BLUE} 60%, ${K}), color-mix(in oklab, ${BLUE} 32%, ${K}))` },
+  pongLine: { stroke: W, strokeOpacity: 0.9, strokeWidth: 1, fill: "none" },
+  net: { fill: K, fillOpacity: 0.32 },
+  netTop: { stroke: W, strokeWidth: 1.2, strokeLinecap: "round" },
+  paddleRed: { fill: RED },
+  paddleBlack: { fill: DARK },
+  pongBall: { fill: `color-mix(in oklab, ${ORANGE} 30%, ${W})`, stroke: `color-mix(in oklab, ${ORANGE} 70%, ${K})`, strokeWidth: 0.5 },
+  // The pinball machine: the playfield under glass, its bumpers and lights, the head's back glass.
+  playfield: { fill: `light-dark(color-mix(in oklab, ${BLUE} 42%, ${K}), color-mix(in oklab, ${BLUE} 34%, ${K}))` },
+  backglass: { fill: `color-mix(in oklab, ${PINK} 55%, ${PURPLE})` },
+  backglassArt: { fill: `color-mix(in oklab, ${YELLOW} 80%, ${ORANGE})` },
+  display: { fill: `color-mix(in oklab, ${K} 85%, ${ORANGE})` },
+  flipper: { stroke: W, strokeWidth: 1.6, strokeLinecap: "round" },
+  steel: { fill: `light-dark(color-mix(in oklab, ${GRAY} 35%, ${W}), color-mix(in oklab, ${W} 70%, ${GRAY}))` },
+  lightRed: { fill: RED },
+  lightYellow: { fill: YELLOW },
+  lightBlue: { fill: `color-mix(in oklab, ${BLUE} 60%, ${W})` },
+  lightGreen: { fill: GREEN },
 });
 
 const BOOKS = [fill.b0, fill.b1, fill.b2, fill.b3, fill.b4, fill.b5, fill.b6, fill.b7];
@@ -201,6 +223,7 @@ export const DARK_M: Material = { top: fill.dark, left: fill.darkSide, right: fi
 export const TEAL_M: Material = { top: fill.tealTop, left: fill.tealL, right: fill.tealR };
 export const PURPLE_M: Material = { top: fill.purpleTop, left: fill.purpleL, right: fill.purpleR };
 export const LEG_M: Material = { top: fill.leg, left: fill.leg, right: fill.leg };
+export const PONG_M: Material = { top: fill.pongTop, left: fill.pongL, right: fill.pongR };
 
 export function Poly({ points, s }: { points: Pt[]; s: Style | Style[] }) {
   return <polygon points={pts(points)} {...stylex.props(s)} />;
@@ -585,6 +608,83 @@ function Foosball({ x, y, w, d }: { x: number; y: number; w: number; d: number }
   );
 }
 
+/** A paddle lying on the ping pong table, in world units. */
+function Paddle({ x, y, z, s }: { x: number; y: number; z: number; s: Style }) {
+  return (
+    <g>
+      <line {...lineProps(project(x, y, z), project(x + 7, y + 3, z))} {...stylex.props(fill.rod)} />
+      <Poly points={ring(x - 1, y, 4.2, 4.2, z, 14)} s={s} />
+    </g>
+  );
+}
+
+/** The ping pong table: a blue top on legs, white lines, the net across the middle and, while nobody plays, two paddles on it. */
+function PingPong({ x, y, w, d, isInUse }: { x: number; y: number; w: number; d: number; isInUse: boolean }) {
+  const h = PINGPONG.h;
+  const cx = x + w / 2;
+  const top = (u: number, v: number, dz = 0) => project(u, v, h + dz);
+  return (
+    <g>
+      <Shadow cx={cx} cy={y + d / 2} r={w / 2 + 2} />
+      {[x + 6, x + w - 9].flatMap((lx) => [y + 4, y + d - 7].map((ly) => <Box key={`${lx}-${ly}`} x={lx} y={ly} w={3} d={3} h={h - 3} m={LEG_M} />))}
+      <Box x={x} y={y} z={h - 3} w={w} d={d} h={3} m={PONG_M} />
+      <Poly points={[top(x + 1.5, y + 1.5, 0.2), top(x + w - 1.5, y + 1.5, 0.2), top(x + w - 1.5, y + d - 1.5, 0.2), top(x + 1.5, y + d - 1.5, 0.2)]} s={fill.pongLine} />
+      <line {...lineProps(top(x + 1.5, y + d / 2, 0.3), top(x + w - 1.5, y + d / 2, 0.3))} {...stylex.props(fill.pongLine)} />
+      {/* The net, a little wider than the table, with its posts. */}
+      <Poly points={[top(cx, y - 2), top(cx, y + d + 2), top(cx, y + d + 2, 6), top(cx, y - 2, 6)]} s={fill.net} />
+      <line {...lineProps(top(cx, y - 2, 6), top(cx, y + d + 2, 6))} {...stylex.props(fill.netTop)} />
+      <Box x={cx - 1} y={y - 3} z={h} w={2} d={2} h={6} m={DARK_M} />
+      <Box x={cx - 1} y={y + d + 1} z={h} w={2} d={2} h={6} m={DARK_M} />
+      {!isInUse && (
+        <>
+          <Paddle x={x + 12} y={y + d - 11} z={h + 0.4} s={fill.paddleRed} />
+          <Paddle x={x + w - 16} y={y + 10} z={h + 0.4} s={fill.paddleBlack} />
+        </>
+      )}
+    </g>
+  );
+}
+
+/** A point on the pinball's playfield: `u` across it (0 left, 1 right), `v` from the flippers (0) up to the head (1); it slopes up towards the head. */
+export function playfieldPoint(m: { x: number; y: number; w: number; d: number }, u: number, v: number, dz = 0): Pt {
+  return project(m.x + 2 + u * (m.w - 4), m.y + m.d - 2 - v * (m.d - 11), 31 + 4 * v + dz);
+}
+
+/** The pinball machine: a cabinet on legs, the sloping playfield under glass with its bumpers and flippers, and the head with its back glass and score display. */
+function Pinball({ x, y, w, d }: { x: number; y: number; w: number; d: number }) {
+  const head = 7;
+  const P = project;
+  const at = (u: number, v: number, dz = 0) => playfieldPoint({ x, y, w, d }, u, v, dz);
+  const bumpers = [
+    [0.3, 0.74, fill.lightRed],
+    [0.7, 0.74, fill.lightYellow],
+    [0.5, 0.56, fill.lightBlue],
+  ] as const;
+  return (
+    <g>
+      <Shadow cx={x + w / 2} cy={y + d / 2} r={d / 2} />
+      {[x + 1, x + w - 4].flatMap((lx) => [y + head + 1, y + d - 4].map((ly) => <Box key={`${lx}-${ly}`} x={lx} y={ly} w={3} d={3} h={20} m={LEG_M} />))}
+      <Box x={x} y={y + head} z={18} w={w} d={d - head} h={13} m={PURPLE_M} />
+      {/* The sloping playfield, and the side's wedge under it. */}
+      <Poly points={[P(x + w, y + head, 31), P(x + w, y + d, 31), P(x + w, y + head, 35)]} s={fill.purpleR} />
+      <Poly points={[P(x, y + head, 35), P(x + w, y + head, 35), P(x + w, y + d, 31), P(x, y + d, 31)]} s={fill.purpleTop} />
+      <Poly points={[at(0, 0, 0.2), at(1, 0, 0.2), at(1, 1, 0.2), at(0, 1, 0.2)]} s={fill.playfield} />
+      {bumpers.map(([u, v, s]) => {
+        const c = at(u, v, 0.6);
+        return <ellipse key={`${u}-${v}`} cx={r1(c.x)} cy={r1(c.y)} rx={2.6} ry={1.6} {...stylex.props(s)} />;
+      })}
+      <line {...lineProps(at(0.18, 0.14, 0.6), at(0.4, 0.07, 0.6))} {...stylex.props(fill.flipper)} />
+      <line {...lineProps(at(0.82, 0.14, 0.6), at(0.6, 0.07, 0.6))} {...stylex.props(fill.flipper)} />
+      <Poly points={[at(0.05, 0.35, 0.8), at(0.2, 0.35, 0.8), at(0.2, 0.9, 0.8), at(0.05, 0.9, 0.8)]} s={fill.glassShine} />
+      {/* The head: its back glass faces the player, the score display under the art. */}
+      <Box x={x - 1} y={y} z={31} w={w + 2} d={head} h={40} m={DARK_M} />
+      <Poly points={[P(x + 1, y + head, 50), P(x + w - 1, y + head, 50), P(x + w - 1, y + head, 69), P(x + 1, y + head, 69)]} s={fill.backglass} />
+      <Poly points={[P(x + 5, y + head, 54), P(x + w - 5, y + head, 54), P(x + w / 2, y + head, 66)]} s={fill.backglassArt} />
+      <Poly points={[P(x + 2, y + head, 40), P(x + w - 2, y + head, 40), P(x + w - 2, y + head, 47), P(x + 2, y + head, 47)]} s={fill.display} />
+    </g>
+  );
+}
+
 function Sofa({ x, y }: { x: number; y: number }) {
   return (
     <g>
@@ -617,9 +717,11 @@ export interface OfficeArtProps {
   away?: ReadonlySet<string>;
   /** The tab is hidden: the monitors' and the table's loops hold. */
   isPaused?: boolean;
+  /** Someone plays ping pong: the paddles are in their hands, not on the table. */
+  isPingPongOn?: boolean;
 }
 
-export function OfficeArt({ layout, screens, seated, activeSpots, workingAt, links, now, away, isPaused }: OfficeArtProps) {
+export function OfficeArt({ layout, screens, seated, activeSpots, workingAt, links, now, away, isPaused, isPingPongOn = false }: OfficeArtProps) {
   const { a, b, view } = layout;
   const items: { depth: number; node: ReactNode }[] = [];
   const add = (depth: number, node: ReactNode) => items.push({ depth, node });
@@ -666,11 +768,13 @@ export function OfficeArt({ layout, screens, seated, activeSpots, workingAt, lin
     });
   });
 
-  // Plants, the lounge and its foosball table.
+  // Plants, the lounge, the foosball and ping pong tables and the pinball machine.
   layout.plants.forEach((p, i) => add(p.x + p.y, <Plant key={`pl${i}`} x={p.x} y={p.y} size={p.size} />));
   if (layout.hasLounge) add(30 + 270, <Sofa key="sofa" x={10} y={226} />);
-  const foos = layout.life.foosball;
+  const { foosball: foos, pingpong: pong, pinball: pin } = layout.life;
   add(foos.x + foos.y + foos.w / 2 + foos.d, <Foosball key="foosball" x={foos.x} y={foos.y} w={foos.w} d={foos.d} />);
+  add(pong.x + pong.y + pong.w / 2 + pong.d, <PingPong key="pingpong" x={pong.x} y={pong.y} w={pong.w} d={pong.d} isInUse={isPingPongOn} />);
+  add(pin.x + pin.y + pin.w / 2 + pin.d, <Pinball key="pinball" x={pin.x} y={pin.y} w={pin.w} d={pin.d} />);
 
   items.sort((p, q) => p.depth - q.depth);
 
