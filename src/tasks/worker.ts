@@ -4,7 +4,7 @@ import { lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:f
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
-import { type HookCallback, type Options, query } from "@anthropic-ai/claude-agent-sdk";
+import { type Options, query } from "@anthropic-ai/claude-agent-sdk";
 import {
   type OrchestratorContext,
   REPORT_SCHEMA,
@@ -28,7 +28,7 @@ import type { CodeHost } from "../integrations/code-hosts/code-host.js";
 import { allHostSecrets, codeHostFor } from "../integrations/code-hosts/code-host-factory.js";
 import { type Config, ConfigRepo, integrationSecrets, resolveMasterKey } from "../core/config.js";
 import { type PrRef, isHumanFeedback } from "../integrations/github/github.js";
-import { checkBashCommand } from "./guard.js";
+import { bashGuardHook } from "./guard.js";
 import { NOTES_MAX_CHARS, NotesRepo } from "../chat/notes.js";
 import { LessonsRepo, lessonsNote, materializeLessons, saveTaskLessons } from "../team/lessons.js";
 import { formatFeedback } from "./pr-feedback.js";
@@ -1369,15 +1369,7 @@ export async function main(): Promise<void> {
     }
 
     const dataDir = process.env.DATA_DIR ? resolve(process.env.DATA_DIR) : "";
-    const bashGuard: HookCallback = async (input) => {
-      if (input.hook_event_name !== "PreToolUse" || input.tool_name !== "Bash") return {};
-      const command = String((input.tool_input as { command?: unknown })?.command ?? "");
-      const reason = checkBashCommand(command, [dataDir]);
-      if (!reason) return {};
-      return {
-        hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason },
-      };
-    };
+    const bashGuard = bashGuardHook([dataDir]);
 
     // Designs and screenshots shared in the thread (Slack or monday.com). Unreadable files are skipped, not fatal.
     const attachments = await materializeAttachments(

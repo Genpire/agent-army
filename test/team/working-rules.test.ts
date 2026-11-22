@@ -53,10 +53,32 @@ describe("the lead's verify step", () => {
     expect(proof).toContain("every test added or changed for the request must be shown to catch the problem");
     expect(proof).toContain("with the product change undone (it fails), then with the change (it passes)");
     expect(proof).toContain("A test that passes both ways proves nothing: have it fixed.");
-    expect(proof).toContain("`git stash push -- <product files only>`");
-    expect(proof).toContain("`git stash pop`");
-    expect(proof).toContain("`git diff --stat` is back to what it was");
-    expect(proof).toContain("never leave the change undone and never commit in between");
+    // -u, so a product file the change added is undone too; both views of the checkout are back after.
+    expect(proof).toContain("Safe undo: `git stash push -u -- <product files only>` (-u undoes a new product file too), run the test, `git stash pop`");
+    expect(proof).not.toContain("`git stash push -- ");
+    expect(proof).toContain("then check `git diff --stat` and `git status --short` are back to what they were.");
+    expect(proof).toContain("Never leave the change undone and never commit in between.");
+  });
+
+  it("undoes work that is already committed with git checkout, keeping uncommitted edits", () => {
+    const proof = line(prompt(), "- Test proof:");
+    expect(proof).toContain(
+      "If the change is already committed (a later round), undo it for the run with `git checkout <base> -- <the changed product files>` (deleting the ones it added) and put it back with `git checkout HEAD -- <those files>`, stashing any uncommitted edits to them first and popping them after.",
+    );
+  });
+
+  it("runs the proof on its own, after the other verifiers", () => {
+    const proof = line(prompt(), "- Test proof:");
+    expect(proof).toContain(
+      "The proof runs on its own: have it done after the other verifiers have reported, and let no other agent work in or run the checkout while the change is undone.",
+    );
+  });
+
+  it("leaves the work uncommitted, so the proof's undo works on it", () => {
+    const leave = step(prompt(), 5);
+    expect(leave).toContain("Leave the work uncommitted in the working tree: do not commit it, so the test proof's undo works on it.");
+    expect(leave).toContain("The platform commits it, pushes the branch");
+    expect(leave).not.toContain("commits are optional");
   });
 
   it("asks for tests of any check the work adds, with bad and good input", () => {
@@ -140,6 +162,15 @@ describe("the ground rules every repo agent gets", () => {
     expect(REPO_RULES).toContain("Show that a test you add or change fails without the change and passes with it. A test that passes both ways proves nothing.");
     expect(REPO_RULES).toContain("When you add or change a check (a validator, guard, permission check, lint rule or CI step), test it with bad input (it fails) and good input (it passes).");
     expect(REPO_RULES).toContain("the exact commands you ran and their real output. A run that showed no result (no tests found, no output, cut off) is not a pass.");
+  });
+
+  it("lets agents read the shared files and lessons folders, and write throwaway files outside the checkout", () => {
+    const where = line(REPO_RULES, "- Work only inside the repository checkout.");
+    expect(where).toContain("You may also read the shared files folder and the lessons folder Pointer points you to");
+    expect(where).toContain("write throwaway files (a script, scratch output) in a temporary folder outside the checkout, removed when you are done.");
+    // What the Failure Reviewer is told about its scripts agrees with it.
+    const fr = defaultTeam().agents.find((a) => a.id === "failure-reviewer")!.instructions;
+    expect(fr).toContain("Write a throwaway script only in a temporary folder outside the checkout, and remove it when you are done.");
   });
 
   it("keeps the rules it had", () => {

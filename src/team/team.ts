@@ -197,7 +197,7 @@ export type Team = z.infer<typeof TeamSchema>;
 /** Rules appended to every agent working inside a repository checkout (worker). */
 export const REPO_RULES = `
 Ground rules for every role:
-- Work only inside the repository checkout (you may also read the shared files folder Pointer points you to). Follow the project's own conventions (CLAUDE.md, README, linters, existing patterns) over your habits.
+- Work only inside the repository checkout. You may also read the shared files folder and the lessons folder Pointer points you to, and write throwaway files (a script, scratch output) in a temporary folder outside the checkout, removed when you are done. Follow the project's own conventions (CLAUDE.md, README, linters, existing patterns) over your habits.
 - Never push, open pull requests, change git remotes or touch credentials. The platform publishes the branch when the team is done.
 - Never add secrets, tokens or .env values to the code. Never weaken tests, CI or security checks to make something pass.
 - If the project needs a tool or dependency that is missing, install it the way the project documents; if you cannot, say so plainly instead of guessing.
@@ -285,7 +285,7 @@ export function defaultTeam(): Team {
 - Discover how this project builds and tests (package scripts, Makefile, CI workflows) and run the relevant suites.
 - For a bug fix, reproduce the bug first where practical, then confirm the fix. For a feature, exercise the acceptance criteria.
 - Add or update focused automated tests for the new behaviour, in the project's existing test style. Only touch test files and test fixtures; report product bugs to Pointer instead of fixing them.
-- Prove each new or changed test catches the problem. Note \`git diff --stat\`, undo the product change with \`git stash push -- <product files only>\` (never the tests), run the test and see it fail, restore it with \`git stash pop\`, run the test again and see it pass, then check \`git diff --stat\` is what it was. Never leave the change undone and never commit in between. A test that passes both ways proves nothing: fix the test.
+- Prove each new or changed test catches the problem. Note \`git diff --stat\` and \`git status --short\`, undo the product change with \`git stash push -u -- <product files only>\` (never the tests; -u undoes a new product file too), run the test and see it fail, restore it with \`git stash pop\`, run the test again and see it pass, then check \`git diff --stat\` and \`git status --short\` are what they were. If the change is already committed (a later round), undo it with \`git checkout <base> -- <the changed product files>\` (deleting the ones it added) and put it back with \`git checkout HEAD -- <those files>\`, stashing any uncommitted edits to them first and popping them after. The proof runs on its own: Pointer has it done after the other verifiers have reported, so that nobody else works in or runs the checkout while the change is undone. Never leave the change undone and never commit in between. A test that passes both ways proves nothing: fix the test.
 - A run that showed no result (no tests found, nothing printed, cut off) is not a pass: say so and find out why.
 - Reply with "RESULT: pass" or "RESULT: fail", the exact commands run with pass/fail counts, the proof for each test (its command, failing without the change and passing with it), and any failing output that matters.`,
       },
@@ -316,7 +316,7 @@ export function defaultTeam(): Team {
   6. Permissions revoked or sessions expired between steps.
   7. Invalid or stale state: old records, missing fields, events out of order.
   8. Limits: empty, missing or huge inputs.
-- Confirm a finding where you can: read the code path, or run a targeted test or check. Do not modify files in the checkout. Write a throwaway script only outside the repository, or not at all.
+- Confirm a finding where you can: read the code path, or run a targeted test or check. Do not modify files in the checkout. Write a throwaway script only in a temporary folder outside the checkout, and remove it when you are done.
 - Report real failures someone can reach, not style. Do not fix them.
 - Reply with a verdict line, "VERDICT: approve" or "VERDICT: changes requested", followed by a numbered list of findings, each with file, line, the failure scenario (what happens, step by step), severity (blocker / should-fix / nit) and a concrete fix.`,
       },
