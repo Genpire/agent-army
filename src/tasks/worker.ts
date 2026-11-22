@@ -38,6 +38,7 @@ import {
   type CommandRunner,
   type RecheckResult,
   type RecheckRun,
+  codeSpan,
   needsFix,
   planRecheck,
   recheckBudgetMs,
@@ -436,6 +437,8 @@ const continueHint = (where: TaskSurface) =>
 /** The body of the draft pull request that keeps a stopped task's work. */
 export function draftPrBody(o: {
   reason: string;
+  /** What the draft may lack (a change left in `git stash`), right after the reason. */
+  warning?: string;
   plan: PlanItem[];
   filesChanged: number;
   screenshots: number;
@@ -444,6 +447,7 @@ export function draftPrBody(o: {
 }): string {
   return [
     `**Stopped early:** ${o.reason}`,
+    o.warning ? `⚠️ ${o.warning}` : "",
     "The team did not finish this task; this draft keeps its work so far.",
     o.plan.length ? `### Plan\n${planChecklist(o.plan)}` : "",
     `${plural(o.filesChanged, "file")} changed.`,
@@ -1018,6 +1022,7 @@ export async function followPrChecks(d: FollowChecksDeps): Promise<{ outcome: Ci
     await d.onStage(`Fixing the failing checks (${round})`);
     await d.progress(`:wrench: Checks failed (${truncate(last.names.join(", "), 200)}): the team is fixing them (${round})…`);
     const details = await ciFailureDetails(d.host, d.repo, wait, d.redact);
+    const stashed = await stashEntries(d.git);
     const run = await d.runRound(
       ciFixPrompt(details, { round: fixRounds, rounds, base: d.base, branch: d.branch, request: d.request, host: d.host.kind }),
       { budgetUsd, runMs: fixMs, since: sha, phaseLabel: `Fixing the failing checks (${round})` },
@@ -1030,6 +1035,9 @@ export async function followPrChecks(d: FollowChecksDeps): Promise<{ outcome: Ci
       // Markdown; the Slack result converts it.
       return { outcome: last, note: `**Checks blocked: ${run.report.title}** ${truncate(run.report.summary, 800)}` };
     }
+    // Only what this round left in `git stash` goes back (popStashes); a fix that lacks part of its change is not pushed.
+    const unstashed = await popStashes(d.git, stashed);
+    if (unstashed.stuck) return { outcome: last, note: `Fixing the checks stopped early: ${unstashed.stuck}` };
     await d.git(["add", "-A"]);
     if ((await d.git(["status", "--porcelain"])) !== "") await d.git(commitArgs(`Fix failing checks: ${run.report.title}`));
     if (Number(await d.git(["rev-list", "--count", `${sha}..HEAD`])) === 0) {
@@ -1137,6 +1145,8 @@ export async function followRecheck(d: RecheckDeps): Promise<RecheckRun> {
   await d.onStage(label);
   await d.progress(`:wrench: Checked again: ${truncate(failing.join(", "), 200)} did not pass: the team is fixing it…`);
   const sha = await d.git(["rev-parse", "HEAD"]);
+  // What a check run left there stays there: only what the round leaves goes back (popStashes).
+  const stashed = await stashEntries(d.git);
   const run = await d.runRound(recheckFixPrompt(first, { source: plan.source, base: d.base, branch: d.branch, request: d.request }), {
     budgetUsd,
     runMs: fixMs,
@@ -1154,12 +1164,99 @@ export async function followRecheck(d: RecheckDeps): Promise<RecheckRun> {
     // Markdown; the Slack result converts it.
     return ended({ fixRounds: 1, note: `**The team on the checks: ${run.report.title}** ${truncate(run.report.summary, 800)}` });
   }
+  const unstashed = await popStashes(d.git, stashed);
+  if (unstashed.stuck) {
+    await restoreWorkTree(d.git, sha);
+    return ended({ fixRounds: 1, note: `Fixing them stopped early: ${unstashed.stuck}` });
+  }
   await d.git(["add", "-A"]);
   if ((await d.git(["status", "--porcelain"])) !== "") await d.git(commitArgs(`Fix the checks run again: ${run.report.title}`));
   if (Number(await d.git(["rev-list", "--count", `${sha}..HEAD`])) === 0) return ended({ fixRounds: 1, note: "The team changed nothing for them." });
   d.timeline.add({ kind: "note", text: `Committed the fix: ${run.report.title}` });
   const final = await runAll("Running the checks again after the fix");
   return { ...kept, first, final, fixRounds: 1 };
+}
+
+/**
+ * HEAD back on `sha`, the team's committed work, after the platform's run of
+ * the checks broke off: a check may have committed before the checkout could
+ * be put back (`git reset` fails on an index.lock a killed check left), and
+ * publishBranch pushes HEAD. Only the ref moves (update-ref), never the index
+ * or the files. Returns why HEAD could not be put back, or undefined when it
+ * is on `sha`. `git` is the worker's own git on what the agents left.
+ */
+export async function headBackTo(git: GitRun, sha: string): Promise<string | undefined> {
+  try {
+    if ((await git(["rev-parse", "HEAD"]).catch(() => "")) !== sha) await git(["update-ref", "HEAD", sha]);
+    const head = await git(["rev-parse", "HEAD"]);
+    return head === sha ? undefined : `HEAD is on ${head.slice(0, 12)}, not on ${sha.slice(0, 12)}`;
+  } catch (err) {
+    return plainLine(errorText(err), 300);
+  }
+}
+
+/** The entries in `git stash`, newest first (their commits). */
+export async function stashEntries(git: GitRun): Promise<string[]> {
+  return (await git(["stash", "list", "--format=%H"])).split("\n").filter(Boolean);
+}
+
+/** What popStashes put back, and why it stopped when an entry would not go back. */
+export interface Unstashed {
+  popped: number;
+  /** Why an entry was left (one sentence, Markdown): for the result (Slack, the console) and the pull request's risks. */
+  stuck?: string;
+}
+
+/**
+ * Puts back what the team left in `git stash`, newest first. A run stopped
+ * between the test proof's `git stash push` and its `git stash pop` leaves the
+ * product change only there, and the worker's `git add -A` would commit and
+ * publish the tree without it. Entries in `before` (there before the round)
+ * stay. A pop that does not apply cleanly is undone, its entry is left and no
+ * other is tried: the files go back as they were before it (everything
+ * staged), and `stuck` says so. `git` is the worker's own git on what the
+ * agents left (gitAfterAgents).
+ */
+export async function popStashes(git: GitRun, before: readonly string[] = []): Promise<Unstashed> {
+  let popped = 0;
+  for (let tries = (await stashEntries(git)).length; tries > 0; tries -= 1) {
+    const at = (await stashEntries(git)).findIndex((entry) => !before.includes(entry));
+    if (at < 0) break;
+    // Everything staged first: what a pop that does not apply is undone to.
+    await git(["add", "-A"]);
+    const tree = await git(["write-tree"]);
+    try {
+      await git(["stash", "pop", "--quiet", `stash@{${at}}`]);
+      popped += 1;
+    } catch (err) {
+      // The files it conflicts with, when it got that far; otherwise git's own error (an untracked file in the way).
+      const conflicts = (await git(["diff", "--no-ext-diff", "--no-textconv", "--name-only", "--diff-filter=U"]).catch(() => "")).split("\n").filter(Boolean);
+      await git(["read-tree", "--reset", "-u", tree]);
+      await git(["clean", "-f", "-f", "-d", "--quiet"]);
+      const why = conflicts.length
+        ? `it conflicts with later changes to ${conflicts.slice(0, 5).map(codeSpan).join(", ")}${conflicts.length > 5 ? ` and ${plural(conflicts.length - 5, "more file")}` : ""}`
+        : plainLine(errorText(err), 300);
+      return {
+        popped,
+        stuck: `Part of the team's change was left in \`git stash\` (a run stopped between \`git stash push\` and \`git stash pop\`) and could not be put back (${why}).`,
+      };
+    }
+  }
+  return { popped };
+}
+
+/**
+ * The worker's commit of the team's work before publishing: what the team left
+ * in `git stash` put back first (popStashes), then everything committed with
+ * `message` when anything changed. Returns how many commits HEAD is ahead of
+ * `since`, and what was put back.
+ */
+export async function commitTeamWork(git: GitRun, o: { message: string; since: string }): Promise<{ ahead: number; unstashed: Unstashed }> {
+  // The checkout is a fresh clone: every entry in `git stash` is the team's.
+  const unstashed = await popStashes(git);
+  await git(["add", "-A"]);
+  if ((await git(["status", "--porcelain"])) !== "") await git(commitArgs(o.message));
+  return { ahead: Number(await git(["rev-list", "--count", `${o.since}..HEAD`])), unstashed };
 }
 
 /** Runs the task in TASK_B64 to the end. The entry point (src/worker.ts) calls it. */
@@ -1780,17 +1877,22 @@ export async function main(): Promise<void> {
 
     // ---------- 4. Publish ----------
     // With the worker's own config back first: no filter or clean driver the agents configured runs in `add`.
-    await gitAfterAgents(["add", "-A"]);
-    const dirty = (await gitAfterAgents(["status", "--porcelain"])) !== "";
-    if (dirty) await gitAfterAgents(commitArgs(failure || !report ? `Work in progress (stopped early): ${failure}` : report.title));
-    const ahead = Number(await gitAfterAgents(["rev-list", "--count", `${startSha}..HEAD`]));
+    // What the team left in `git stash` goes back before anything is committed (commitTeamWork).
+    const { ahead, unstashed } = await commitTeamWork(gitAfterAgents, {
+      message: failure || !report ? `Work in progress (stopped early): ${failure}` : report.title,
+      since: startSha,
+    });
+    if (unstashed.popped) timeline.add({ kind: "note", text: "Put back what the team had left in git stash" });
+    // Said in the result and in the pull request: the published work may lack part of the change.
+    const stashWarning = unstashed.stuck && redact(`${unstashed.stuck} The published work may lack it.`);
+    if (stashWarning) timeline.add({ kind: "error", text: stashWarning }, true);
 
     // Screenshots go up first, so the pull request can point to them: into the store
     // (the console shows them, for every task) and, for Slack tasks, into the thread.
     const seenShots = new Set<string>();
     const posted = new Set<string>();
     let storedShots = 0;
-    const resultNotes: string[] = [];
+    const resultNotes: string[] = stashWarning ? [stashWarning] : [];
     const postScreenshots = async (comment: (count: number) => string) => {
       const shots = newScreenshots(await collectScreenshots(shotsDir), seenShots);
       if (!shots.length) return;
@@ -1825,6 +1927,8 @@ export async function main(): Promise<void> {
     // On the committed change, before it is published; the checkout goes back to the team's work after each run.
     let recheck: RecheckRun | undefined;
     if (!failure && report?.kind === "change" && ahead > 0 && config.limits.recheckMin > 0) {
+      // The team's committed work: what is published if the run breaks off (headBackTo).
+      const teamHead = await gitAfterAgents(["rev-parse", "HEAD"]);
       try {
         recheck = await followRecheck({
           report,
@@ -1845,7 +1949,7 @@ export async function main(): Promise<void> {
           progress: (text) => progress(text, true),
           redact,
         });
-        task.recheck = recheckSummary(recheck);
+        task.recheck = recheckSummary(recheck, redact);
         await tasks.save(task).catch((err: unknown) => console.error("[worker] task not saved:", redact(String(err))));
       } catch (err) {
         // The team's work is committed and is published as it is; nothing commits from the checkout after this.
@@ -1854,6 +1958,11 @@ export async function main(): Promise<void> {
         console.error(`[worker] checks not run again: ${message}`);
         timeline.add({ kind: "error", text: `The checks could not be run again: ${message}` }, true);
         resultNotes.push(`The platform could not run the checks again: ${truncate(message, 300)}`);
+        // A check may have committed before the checkout could be put back: never publish that commit.
+        const stuck = await headBackTo(gitAfterAgents, teamHead);
+        if (stuck) {
+          throw new Error(`Nothing was published: the checks run again broke off (${truncate(message, 300)}) and the branch could not be put back on the team's work (${redact(stuck)}).`);
+        }
       }
     } else if (!failure && report?.kind === "change" && ahead > 0) {
       timeline.add({ kind: "note", text: "Running the team's checks again is turned off" });
@@ -1910,7 +2019,7 @@ export async function main(): Promise<void> {
               const filesChanged = (await gitAfterAgents(["diff", "--no-ext-diff", "--no-textconv", "--name-only", startSha, "HEAD"]))
                 .split("\n")
                 .filter(Boolean).length;
-              return redact(draftPrBody({ reason, plan: first.plan, filesChanged, screenshots: shotsForPr(), footer, where }));
+              return redact(draftPrBody({ reason, warning: stashWarning, plan: first.plan, filesChanged, screenshots: shotsForPr(), footer, where }));
             },
             comment: redact(stoppedComment(reason, first.plan, where)),
           });
@@ -1954,7 +2063,9 @@ export async function main(): Promise<void> {
         await progress(`:rocket: Publishing the branch and opening the ${prWord}…`, true);
         await push();
         timeline.add({ kind: "push", text: `Pushed branch ${branch}` });
-        const body = redact(prBody(report, { recheck, screenshots: shotsForPr(), where, footer }));
+        // A change left in `git stash` that could not be put back leads the risks.
+        const risks = [stashWarning, report.risks].filter(Boolean).join("\n\n");
+        const body = redact(prBody({ ...report, risks }, { recheck, screenshots: shotsForPr(), where, footer }));
         const published = await publishPr({ host, repo: task.repo, branch, base, title: redact(report.title), body, redact });
         pr = published.pr;
         const updated = published.updated;

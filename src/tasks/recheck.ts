@@ -137,11 +137,12 @@ export function recheckBudgetMs(recheckMin: number, deadline: number | undefined
 
 /**
  * Lines that say no tests ran: Jest and Vitest ("No tests found", "No test
- * files found"), Go ("[no test files]", "no tests to run"), pytest ("collected
- * 0 items", "no tests ran"), unittest ("Ran 0 tests"), Cargo ("running 0
- * tests"), Mocha ("0 passing"), RSpec ("0 examples"), PHPUnit ("No tests
- * executed"), Jest's "Tests: 0 total" and node:test's "tests 0". A count is
- * never part of a larger number ("10 passing"), and "0 tests failed" is a result.
+ * files found"), Go ("[no test files]", "no tests to run", also on its "ok …"
+ * line), pytest ("collected 0 items", "no tests ran"), unittest ("Ran 0
+ * tests"), Cargo ("running 0 tests"), Mocha ("0 passing"), RSpec ("0
+ * examples"), PHPUnit ("No tests executed"), Maven's Surefire ("Tests run: 0"),
+ * Jest's "Tests: 0 total" and node:test's "tests 0". A count is never part of a
+ * larger number ("10 passing"), and "0 tests failed" is a result.
  */
 const NO_TESTS: readonly RegExp[] = [
   /\bno tests? (?:were )?found\b/i,
@@ -151,23 +152,44 @@ const NO_TESTS: readonly RegExp[] = [
   /\bcollected 0 items\b/i,
   /(?<![\w.,])0 passing\b/i,
   /(?<![\w.,])0 examples?\b/i,
+  /\bTests run: 0\b/i,
   /\bTests:\s+0 total\b/i,
   /\btests 0\s*$/i,
 ];
 
 /**
  * Output that shows tests did run ("12 passed", "Ran 3 tests", "collected 4
- * items", Go's and TAP's "ok …" lines, node:test's "tests 3"). It outweighs a
- * line that says some did not: `go test ./...` lists every package without
- * tests, and a monorepo's runner prints "No test files found" for a package
- * without any.
+ * items", Go's and TAP's "ok …" lines, node:test's "tests 3", Surefire's "Tests
+ * run: 3"). It outweighs a line that says some did not: `go test ./...` lists
+ * every package without tests, and a monorepo's runner prints "No test files
+ * found" for a package without any. Go's "ok …" line for a package where no
+ * test matched (`ok  example.com/pkg 0.01s [no tests to run]`) is not one.
  */
 const RAN_TESTS: readonly RegExp[] = [
   /(?<![\w.,])[1-9][\d,]* (?:tests?|passed|passing|examples?|specs?)\b/i,
   /\bcollected [1-9]/i,
-  /^ok\s+\S+/m,
+  /^ok\s+\S+(?!.*\[no tests to run\])/m,
   /\btests [1-9]\d*\s*$/im,
+  /\bTests run: [1-9]/i,
 ];
+
+/**
+ * Output that says tests failed, from a command that exited 0 all the same
+ * (`npm test || true`, `pytest; echo done`, a runner told to ignore failures):
+ * "3 failed", "1 failing", "2 tests failed", "2 failures", unittest's "FAILED
+ * (failures=2)" and Surefire's "Tests run: 5, Failures: 2". Never "0 failed",
+ * a count inside quotes or a larger number, or a passing test's own line
+ * (PASSED_LINE), whose name may say "2 failed".
+ */
+const FAILED_TESTS: readonly RegExp[] = [
+  // A comma only between digits ("1,024 failed"): "Tests run: 5, Failures: 0" is no count of failures.
+  /(?<![\w.,'"`‘“])[1-9](?:\d|,(?=\d))* (?:tests? )?(?:failed|failing|failures?)\b/i,
+  /\bFAILED \([^)]*\b(?:failures|errors)=[1-9]/,
+  /\bTests run: [\d,]+, Failures: [1-9]/i,
+];
+
+/** A passing test's own line (✓ …, TAP's "ok …"): what it says is its name, not a result. */
+const PASSED_LINE = /^\s*(?:[✓✔√]|ok\b)/;
 
 /** Commands that run tests. A type check or a linter that prints nothing has passed; a test run that prints nothing showed no result. */
 const TEST_COMMAND = /\b(?:test|tests|vitest|jest|mocha|pytest|rspec|phpunit|unittest|ava|cargo\s+test|go\s+test)\b/i;
@@ -188,6 +210,14 @@ export function noResultReason(command: string, output: string): string | undefi
   if (RAN_TESTS.some((p) => p.test(text))) return undefined;
   const line = text.split("\n").find((l) => NO_TESTS.some((p) => p.test(l)));
   return line === undefined ? undefined : `no tests ran: “${clipLine(line, 120)}”`;
+}
+
+/** Why a command that exited 0 failed all the same (its output says tests failed), or undefined. */
+export function reportedFailure(output: string): string | undefined {
+  const line = cleanOutput(output)
+    .split("\n")
+    .find((l) => !PASSED_LINE.test(l) && FAILED_TESTS.some((p) => p.test(l)));
+  return line === undefined ? undefined : `exit code 0, but the output says tests failed: “${clipLine(line, 120)}”`;
 }
 
 // ---------- Running ----------
@@ -248,7 +278,8 @@ async function runOne(
   const run = await o.run({
     command: "bash",
     // stderr joins stdout first, so the output keeps its order: test runners print their summary on either.
-    args: ["-c", `exec 2>&1\n${command}`],
+    // pipefail: `npm test 2>&1 | tail -50` fails when the tests do, not only when tail does.
+    args: ["-c", `exec 2>&1\nset -o pipefail\n${command}`],
     cwd: o.cwd,
     env: o.env,
     input: "",
@@ -262,6 +293,8 @@ async function runOne(
   if (run.spawnError) return { outcome: "not-started", note: `could not start: ${clipLine(o.redact(run.spawnError), 200)}`, ms, output };
   if (run.timedOut) return { outcome: "timed-out", note: `stopped after ${took(ms)}: the time for running the checks again ran out`, ms, output };
   if (run.code === 0) {
+    const failed = reportedFailure(text);
+    if (failed) return { outcome: "failed", note: o.redact(failed), ms, output };
     const why = noResultReason(command, text);
     return why ? { outcome: "no-result", note: o.redact(why), ms, output } : { outcome: "passed", ms, output };
   }
@@ -292,14 +325,18 @@ export const isMismatch = (r: Pick<RecheckItem, "claimed" | "outcome">) => r.cla
 /** A fix round is worth it: a check failed or showed no result (not when the platform's own time ran out). */
 export const needsFix = (results: Pick<RecheckItem, "outcome">[]) => results.some((r) => r.outcome === "failed" || r.outcome === "no-result");
 
-/** What the task record keeps (no output): for the console and Pointer. */
-export function recheckSummary(run: RecheckRun): RecheckSummary {
+/**
+ * What the task record keeps (no output): for the console and Pointer. The
+ * commands and notes are the team's text, so they are redacted (the worker's
+ * redact) like everything else the record keeps.
+ */
+export function recheckSummary(run: RecheckRun, redact: (text: string) => string): RecheckSummary {
   const checks: RecheckItem[] = run.final.map((r) => ({
-    command: r.command,
+    command: redact(r.command),
     outcome: r.outcome,
     ...(r.claimed ? { claimed: r.claimed } : {}),
     ...(r.ms !== undefined ? { ms: r.ms } : {}),
-    ...(r.note ? { note: r.note } : {}),
+    ...(r.note ? { note: redact(r.note) } : {}),
   }));
   const state: RecheckSummary["state"] = !checks.length
     ? "none"
@@ -314,7 +351,7 @@ export function recheckSummary(run: RecheckRun): RecheckSummary {
     checks,
     fixRounds: run.fixRounds,
     ...(run.final !== run.first ? { afterFix: true } : {}),
-    mismatches: [...new Set(run.first.filter(isMismatch).map((r) => r.command))],
+    mismatches: [...new Set(run.first.filter(isMismatch).map((r) => redact(r.command)))],
     notRechecked: run.notRechecked,
   };
 }
@@ -480,6 +517,7 @@ export function recheckSection(recheck: RecheckContext | undefined): string {
   return `
 Checks run again by the platform: after the team finishes a change, the platform itself runs ${what} again on the final state of the work, and puts the real results next to your report in the published description. Every check you reported as passing that fails or shows no result there is marked as not as reported.
 - In checks, give each command exactly as it was run, runnable as it is from the repository root: non-interactive and ending on its own (no watch mode, no dev servers, no prompts; for example \`npx vitest run\`, not \`npx vitest\`).
+- Report each check without output filters (no \`| tail\`, \`| head\` or \`| grep\`): the platform runs it as written, and needs its whole output and its own exit code.
 - Report what really happened: a check that could not be run, failed, was cut off or ran no tests is not "pass". Report it as "fail" or "no-result", with why in its summary.
 `;
 }
