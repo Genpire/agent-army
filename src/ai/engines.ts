@@ -799,11 +799,13 @@ export function cliPrompt(task: string, mode: EngineMode): string {
 }
 
 /**
- * Every string in a parsed event, redacted. Decoded, so a secret the JSON line
- * escaped (quotes, backslashes, newlines) is caught too, and whole, before any
- * of it is cut. Anything nested deeper than the parsers look is left out.
+ * Every string in a parsed value (an engine's event, the team's report),
+ * redacted, in arrays and objects at any depth the parsers look. Decoded, so
+ * a secret the JSON line escaped (quotes, backslashes, newlines) is caught
+ * too, and whole, before any of it is cut. Anything nested deeper than the
+ * parsers look is left out.
  */
-function redactStrings(value: unknown, redact: (text: string) => string, depth = 0): unknown {
+export function redactStrings(value: unknown, redact: (text: string) => string, depth = 0): unknown {
   if (typeof value === "string") return redact(value);
   if (value === null || typeof value !== "object") return value;
   if (depth >= 16) return undefined;

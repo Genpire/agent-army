@@ -117,6 +117,29 @@ describe("the lessons store", () => {
     expect(lessonMatchKey("Use npm ci")).not.toBe(lessonMatchKey("Use pnpm ci"));
   });
 
+  it("counts a lesson the same task reports again (each of its rounds reports its lessons) once, but notes when it was last seen", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const { lessons } = await setup();
+    const refunds = { area: "", lesson: "Refunds are in cents." };
+    at("2026-11-01T10:00:00Z");
+    await lessons.add("acme/web", [refunds], { source: "task", taskId: "t-1" });
+    // The task's fix round and its preview round report it again, the preview round under an area.
+    at("2026-11-01T10:30:00Z");
+    const fixRound = await lessons.add("acme/web", [refunds], { source: "task", taskId: "t-1" });
+    at("2026-11-01T11:00:00Z");
+    await lessons.add("acme/web", [{ ...refunds, area: "billing" }], { source: "task", taskId: "t-1" });
+    expect(fixRound.ok && fixRound.repeated.map((l) => l.seen)).toEqual([1]);
+    expect((await lessons.get("acme/web"))!.lessons).toMatchObject([
+      { area: "billing", seen: 1, createdAt: "2026-11-01T10:00:00.000Z", lastSeenAt: "2026-11-01T11:00:00.000Z", taskId: "t-1" },
+    ]);
+
+    // Another task, then the owner: each is a sighting of its own.
+    at("2026-11-02T10:00:00Z");
+    await lessons.add("acme/web", [refunds], { source: "task", taskId: "t-2" });
+    await lessons.add("acme/web", [refunds], { source: "owner" });
+    expect((await lessons.get("acme/web"))!.lessons[0]).toMatchObject({ seen: 3, taskId: "t-2" });
+  });
+
   it("files lessons under normalised areas: lower case, one line, bounded, general when empty", async () => {
     const { lessons } = await setup();
     expect(normaliseArea("  Billing\n\tAPI ")).toBe("billing api");
@@ -375,7 +398,7 @@ describe("saving a report's lessons", () => {
       { area: "billing", lesson: "Refunds are in cents.", source: "task", taskId: "t-1", seen: 1 },
       { area: "general", lesson: "Run npm ci, not npm install.", source: "task", taskId: "t-1", seen: 1 },
     ]);
-    // A later round reporting one again: seen twice, by that task.
+    // A later task reporting one again: seen twice, by that task.
     expect(await saveTaskLessons(lessons, "acme/web", [reported[0]!], "t-2")).toBe(1);
     expect((await lessons.get("acme/web"))!.lessons[0]).toMatchObject({ seen: 2, taskId: "t-2" });
   });
