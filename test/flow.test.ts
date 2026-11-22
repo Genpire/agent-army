@@ -215,21 +215,21 @@ describe("admin API and Slack events", () => {
   describe("settings", () => {
     it("merges partial limits field by field", async () => {
       expect((await post("/api/settings", { limits: { maxParallel: 5 } })).status).toBe(200);
-      expect((await state()).config.limits).toEqual({ maxTurns: 200, maxBudgetUsd: 15, maxParallel: 5, progressEveryMin: 5, ciWaitMin: 15, ciFixRounds: 2, previewCheck: "visible" });
+      expect((await state()).config.limits).toEqual({ maxTurns: 200, maxBudgetUsd: 15, maxParallel: 5, progressEveryMin: 5, ciWaitMin: 15, ciFixRounds: 2, recheckMin: 10, previewCheck: "visible" });
 
       expect((await post("/api/settings", { limits: { maxBudgetUsd: 20, progressEveryMin: 0 } })).status).toBe(200);
-      expect((await state()).config.limits).toEqual({ maxTurns: 200, maxBudgetUsd: 20, maxParallel: 5, progressEveryMin: 0, ciWaitMin: 15, ciFixRounds: 2, previewCheck: "visible" });
+      expect((await state()).config.limits).toEqual({ maxTurns: 200, maxBudgetUsd: 20, maxParallel: 5, progressEveryMin: 0, ciWaitMin: 15, ciFixRounds: 2, recheckMin: 10, previewCheck: "visible" });
 
       expect((await post("/api/settings", { limits: { maxParallel: 0 } })).status).toBe(400);
       expect((await post("/api/settings", { limits: { maxTurns: "lots" } })).status).toBe(400);
       expect((await post("/api/settings", { limits: { progressEveryMin: 61 } })).status).toBe(400);
       expect((await post("/api/settings", { limits: { progressEveryMin: 2.5 } })).status).toBe(400);
-      expect((await state()).config.limits).toEqual({ maxTurns: 200, maxBudgetUsd: 20, maxParallel: 5, progressEveryMin: 0, ciWaitMin: 15, ciFixRounds: 2, previewCheck: "visible" });
+      expect((await state()).config.limits).toEqual({ maxTurns: 200, maxBudgetUsd: 20, maxParallel: 5, progressEveryMin: 0, ciWaitMin: 15, ciFixRounds: 2, recheckMin: 10, previewCheck: "visible" });
     });
 
     it("merges and validates the CI wait and fix rounds", async () => {
       expect((await post("/api/settings", { limits: { ciWaitMin: 30 } })).status).toBe(200);
-      expect((await state()).config.limits).toEqual({ maxTurns: 200, maxBudgetUsd: 20, maxParallel: 5, progressEveryMin: 0, ciWaitMin: 30, ciFixRounds: 2, previewCheck: "visible" });
+      expect((await state()).config.limits).toEqual({ maxTurns: 200, maxBudgetUsd: 20, maxParallel: 5, progressEveryMin: 0, ciWaitMin: 30, ciFixRounds: 2, recheckMin: 10, previewCheck: "visible" });
       expect((await post("/api/settings", { limits: { ciWaitMin: 0, ciFixRounds: 5 } })).status).toBe(200);
       expect((await state()).config.limits).toMatchObject({ maxParallel: 5, ciWaitMin: 0, ciFixRounds: 5, previewCheck: "visible" });
 
@@ -247,7 +247,23 @@ describe("admin API and Slack events", () => {
       expect((await state()).config.limits).toMatchObject({ ciWaitMin: 0, ciFixRounds: 5, previewCheck: "visible" });
 
       expect((await post("/api/settings", { limits: { ciWaitMin: 15, ciFixRounds: 2 } })).status).toBe(200);
-      expect((await state()).config.limits).toEqual({ maxTurns: 200, maxBudgetUsd: 20, maxParallel: 5, progressEveryMin: 0, ciWaitMin: 15, ciFixRounds: 2, previewCheck: "visible" });
+      expect((await state()).config.limits).toEqual({ maxTurns: 200, maxBudgetUsd: 20, maxParallel: 5, progressEveryMin: 0, ciWaitMin: 15, ciFixRounds: 2, recheckMin: 10, previewCheck: "visible" });
+    });
+
+    it("merges and validates the time for running the team's checks again", async () => {
+      expect((await post("/api/settings", { limits: { recheckMin: 0 } })).status).toBe(200);
+      expect((await state()).config.limits).toMatchObject({ recheckMin: 0, ciWaitMin: 15, ciFixRounds: 2 });
+      expect((await post("/api/settings", { limits: { recheckMin: 60 } })).status).toBe(200);
+      expect((await state()).config.limits).toMatchObject({ recheckMin: 60 });
+      for (const limits of [{ recheckMin: 61 }, { recheckMin: -1 }, { recheckMin: 2.5 }]) {
+        const res = await post("/api/settings", { limits });
+        expect(res.status).toBe(400);
+        expect(await res.json()).toEqual({ error: "The time to run the checks again is a whole number of minutes from 0 to 60." });
+      }
+      expect((await post("/api/settings", { limits: { recheckMin: "10" } })).status).toBe(400);
+      expect((await state()).config.limits).toMatchObject({ recheckMin: 60 });
+      expect((await post("/api/settings", { limits: { recheckMin: 10 } })).status).toBe(200);
+      expect((await state()).config.limits).toEqual({ maxTurns: 200, maxBudgetUsd: 20, maxParallel: 5, progressEveryMin: 0, ciWaitMin: 15, ciFixRounds: 2, recheckMin: 10, previewCheck: "visible" });
     });
 
     it("saves Pointer channels and validates them", async () => {
@@ -491,6 +507,7 @@ describe("admin API and Slack events", () => {
       const created = await save({
         repo: "Acme/Web",
         setupCommand: " npm ci ",
+        testCommand: " npm test ",
         startCommand: "npm run dev",
         appUrl: "http://localhost:3000",
         env: { STRIPE_KEY: SECRET_VALUE, DATABASE_URL: "postgres://localhost/dev" },
@@ -499,11 +516,17 @@ describe("admin API and Slack events", () => {
         status: 200,
         json: {
           ok: true,
-          repoSetup: { setupCommand: "npm ci", startCommand: "npm run dev", appUrl: "http://localhost:3000", envKeys: ["DATABASE_URL", "STRIPE_KEY"] },
+          repoSetup: {
+            setupCommand: "npm ci",
+            testCommand: "npm test",
+            startCommand: "npm run dev",
+            appUrl: "http://localhost:3000",
+            envKeys: ["DATABASE_URL", "STRIPE_KEY"],
+          },
         },
       });
       expect(await setups()).toEqual({
-        "Acme/Web": { setupCommand: "npm ci", startCommand: "npm run dev", appUrl: "http://localhost:3000", envKeys: ["DATABASE_URL", "STRIPE_KEY"] },
+        "Acme/Web": { setupCommand: "npm ci", testCommand: "npm test", startCommand: "npm run dev", appUrl: "http://localhost:3000", envKeys: ["DATABASE_URL", "STRIPE_KEY"] },
       });
       expect(JSON.stringify(await state())).not.toContain(SECRET_VALUE);
     });
@@ -512,6 +535,7 @@ describe("admin API and Slack events", () => {
       const merged = await save({ repo: "Acme/Web", startCommand: "npm start", env: { DATABASE_URL: null, NODE_ENV: "test" } });
       expect(merged.json.repoSetup).toEqual({
         setupCommand: "npm ci",
+        testCommand: "npm test",
         startCommand: "npm start",
         appUrl: "http://localhost:3000",
         envKeys: ["NODE_ENV", "STRIPE_KEY"],
@@ -519,7 +543,10 @@ describe("admin API and Slack events", () => {
 
       // Another letter case is the same repo, stored under the name as given now.
       const recased = await save({ repo: "acme/web", appUrl: "" });
-      expect(recased.json.repoSetup).toEqual({ setupCommand: "npm ci", startCommand: "npm start", appUrl: "", envKeys: ["NODE_ENV", "STRIPE_KEY"] });
+      expect(recased.json.repoSetup).toEqual({ setupCommand: "npm ci", testCommand: "npm test", startCommand: "npm start", appUrl: "", envKeys: ["NODE_ENV", "STRIPE_KEY"] });
+      // An empty test command clears it: the team's passing checks are run again instead.
+      expect((await save({ repo: "acme/web", testCommand: "" })).json.repoSetup.testCommand).toBe("");
+      expect((await save({ repo: "acme/web", testCommand: "npm test" })).json.repoSetup.testCommand).toBe("npm test");
       expect(Object.keys(await setups())).toEqual(["acme/web"]);
 
       // Deleting a variable that is not there changes nothing.
@@ -570,6 +597,11 @@ describe("admin API and Slack events", () => {
         error: "The setup command is limited to 2000 characters.",
       });
       expect(await error({ repo: "acme/web", startCommand: 42 })).toMatchObject({ status: 400 });
+      expect(await error({ repo: "acme/web", testCommand: "x".repeat(1001) })).toEqual({
+        status: 400,
+        error: "The test command is limited to 1000 characters.",
+      });
+      expect(await error({ repo: "acme/web", testCommand: ["npm", "test"] })).toMatchObject({ status: 400 });
 
       // At most 100 variables in all, counting the ones already saved.
       const many = Object.fromEntries(Array.from({ length: 99 }, (_, i) => [`VAR_${i}`, "v"]));

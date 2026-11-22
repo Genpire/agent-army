@@ -17,6 +17,7 @@ import { REPO_RULES, type AgentSpec, defaultTeam, rosterText } from "../../src/t
 import { type CheckInfo, GitHub, type PrRef, type StatusInfo } from "../../src/integrations/github/github.js";
 import { BROWSER_SERVER, BROWSER_TOOLS, browserServer } from "../../src/tasks/browser.js";
 import type { PlanItem } from "../../src/tasks/progress.js";
+import { recheckLine, recheckSummary } from "../../src/tasks/recheck.js";
 import type { Task, ThreadState } from "../../src/tasks/tasks.js";
 import {
   type ExecFile,
@@ -25,6 +26,7 @@ import {
   type FollowChecksDeps,
   GIT_SAFETY_ARGS,
   type GitRun,
+  type RecheckDeps,
   checkoutRepo,
   commitArgs,
   commitIdentity,
@@ -34,6 +36,7 @@ import {
   fixComment,
   fixRunTimeoutMs,
   followPrChecks,
+  followRecheck,
   gitEnv,
   gitRunner,
   jobDeadline,
@@ -41,6 +44,7 @@ import {
   materializeAttachments,
   notesToSave,
   planChecklist,
+  prBody,
   prFooter,
   prLabel,
   prRef,
@@ -1149,6 +1153,197 @@ describe("following the checks through the code host", () => {
     expect((await followPrChecks(poor.d))?.note).toBe("Not enough of the task's budget was left to fix them.");
     expect(poor.runRound).not.toHaveBeenCalled();
     expect(poor.host.commentOnPr).not.toHaveBeenCalled();
+  });
+});
+
+describe("the platform runs the team's checks again (real git and shell)", () => {
+  const plainGit = promisify(execFile);
+  const CHECK = "sh check.sh";
+  // Fails until the team adds fixed.txt; like a real test run it also writes files of its own.
+  const CHECK_SCRIPT = [
+    "echo run >> coverage.txt",
+    "echo touched >> app.txt",
+    'if [ -f fixed.txt ]; then echo "Tests: 1 passed, 1 total"; else echo "FAIL sum.test.ts: expected 3, got 4"; exit 1; fi',
+    "",
+  ].join("\n");
+  const claimed: Report = {
+    kind: "change",
+    title: "Fix the sum",
+    summary: "Fixed the sum.",
+    verification: "sh check.sh: 1 passed",
+    testProof: "Without the fix: 1 failed. With it: 1 passed.",
+    checks: [{ command: CHECK, outcome: "pass", summary: "1 passed" }],
+    risks: "None known.",
+    projectNotes: "",
+    lessons: [],
+  };
+
+  async function setup(o: { fix?: (repoDir: string) => Promise<{ report?: Report; failure?: string }>; budget?: number; ciFixRounds?: number; testCommand?: string; report?: Report } = {}) {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "army-recheck-worker-")));
+    const repoDir = join(root, "repo");
+    const home = join(root, "git-home");
+    await mkdir(repoDir);
+    await mkdir(home);
+    const env = { PATH: process.env.PATH ?? "", HOME: home, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
+    const sh = async (...args: string[]) =>
+      (await plainGit("git", ["-c", "user.name=Test", "-c", "user.email=test@example.com", ...args], { cwd: repoDir, env })).stdout.trim();
+    await sh("init", "--quiet", "-b", "main");
+    await sh("config", "user.name", "Pointer");
+    await sh("config", "user.email", "pointer@example.com");
+    await writeFile(join(repoDir, "app.txt"), "the team's change\n");
+    await writeFile(join(repoDir, "check.sh"), CHECK_SCRIPT);
+    await sh("add", "-A");
+    await sh("commit", "--quiet", "-m", "Fix the sum");
+    const sha = await sh("rev-parse", "HEAD");
+
+    // The worker's git on what the agents left: its own config back before each command.
+    const restore = await snapshotGitConfig(repoDir);
+    const base = gitRunner({ host: fakeHost(), cwd: repoDir, home, redact: (t) => t });
+    const git: GitRun = async (args, opts) => {
+      await restore();
+      return base(args, opts);
+    };
+    const events: { kind: string; text: string; ok?: boolean }[] = [];
+    const stages: string[] = [];
+    const runRound = vi.fn(async (_prompt: string, _o: { budgetUsd: number; runMs: number; since: string; phaseLabel: string }) =>
+      o.fix ? o.fix(repoDir) : { report: { ...claimed, kind: "answer" as const, title: "The check is right", summary: "Nothing to change." } },
+    );
+    const d: RecheckDeps = {
+      report: o.report ?? claimed,
+      testCommand: o.testCommand ?? "",
+      limits: { recheckMin: 1, ciFixRounds: o.ciFixRounds ?? 2 },
+      deadline: undefined,
+      repoDir,
+      env: { PATH: process.env.PATH ?? "", HOME: home, LANG: "C.UTF-8" },
+      protectedPaths: ["/srv/data"],
+      base: "main",
+      branch: "army/fix-the-sum-1a2b3c",
+      request: "Fix the sum",
+      budgetLeft: () => o.budget ?? 10,
+      git,
+      runRound,
+      timeline: { add: (e) => void events.push({ kind: e.kind, text: e.text, ...(e.ok !== undefined ? { ok: e.ok } : {}) }) },
+      onStage: async (text) => void stages.push(text),
+      progress: async () => {},
+      redact: (t) => t,
+    };
+    const clean = async () => expect(await sh("status", "--porcelain", "--untracked-files=all")).toBe("");
+    return { root, repoDir, sha, sh, d, runRound, events, stages, clean };
+  }
+
+  const teams: string[] = [];
+  afterEach(async () => {
+    for (const root of teams.splice(0)) await rm(root, { recursive: true, force: true });
+  });
+
+  it("marks a claimed pass that fails in the pull request, gives the team a fix round and commits nothing the check wrote", { timeout: 30_000 }, async () => {
+    const t = await setup();
+    teams.push(t.root);
+    const run = await followRecheck(t.d);
+
+    expect(run.first.map((r) => [r.command, r.outcome, r.claimed])).toEqual([[CHECK, "failed", "pass"]]);
+    expect(run.final).toBe(run.first);
+    expect(run.fixRounds).toBe(1);
+    // The fix round got the command and its real output, as data.
+    expect(t.runRound).toHaveBeenCalledTimes(1);
+    const [prompt, opts] = t.runRound.mock.calls[0]!;
+    expect(prompt).toContain("### `sh check.sh`: failed (exit code 1)\nThe team said: passed (“1 passed”).");
+    expect(prompt).toContain("FAIL sum.test.ts: expected 3, got 4");
+    expect(opts).toMatchObject({ budgetUsd: 10, since: t.sha, phaseLabel: "Fixing what the checks run again found" });
+    expect(run.note).toBe("**The team on the checks: The check is right** Nothing to change.");
+
+    const body = prBody(claimed, { recheck: run, screenshots: 0, footer: "---\nfooter" });
+    expect(body).toContain("- ⚠️ **Not as the team reported:** `sh check.sh`: **failed** (exit code 1");
+    expect(body).toContain("The team said: passed (“1 passed”).");
+    expect(body).toContain("FAIL sum.test.ts: expected 3, got 4");
+    // Next to the team's claims: after its verification and test proof, before its risks.
+    const at = (s: string) => body.indexOf(s);
+    expect(at("### Verification")).toBeLessThan(at("### How the tests were shown to catch the problem"));
+    expect(at("### How the tests were shown to catch the problem")).toBeLessThan(at("### Checked again by the platform"));
+    expect(at("### Checked again by the platform")).toBeLessThan(at("### Risks and follow-ups"));
+    expect(recheckLine(recheckSummary(run), "slack")).toBe("*Checked again:* :warning: 0 of 1 passed: `sh check.sh` failed, though the team said it passed.");
+
+    // The team's commit is what is published; what the check wrote is gone.
+    expect(await t.sh("rev-parse", "HEAD")).toBe(t.sha);
+    expect(await readFile(join(t.repoDir, "app.txt"), "utf8")).toBe("the team's change\n");
+    await t.clean();
+    expect(t.events.map((e) => e.kind)).toEqual(["recheck", "fix-round"]);
+    expect(t.events[0]).toEqual({ kind: "recheck", text: "sh check.sh: failed (exit code 1); the team said passed", ok: false });
+    expect(t.stages).toEqual(["Running the team's checks again", "Fixing what the checks run again found"]);
+  });
+
+  it("commits the fix round's change and runs the checks again on it", { timeout: 30_000 }, async () => {
+    const t = await setup({
+      fix: async (repoDir) => {
+        await writeFile(join(repoDir, "fixed.txt"), "the real fix\n");
+        return { report: { ...claimed, title: "Correct the sum" } };
+      },
+    });
+    teams.push(t.root);
+    const run = await followRecheck(t.d);
+
+    expect(run.first[0]!.outcome).toBe("failed");
+    expect(run.final.map((r) => r.outcome)).toEqual(["passed"]);
+    expect(run.fixRounds).toBe(1);
+    expect(await t.sh("log", "--format=%s", "-2")).toBe("Fix the checks run again: Correct the sum\nFix the sum");
+    // The fix is committed, never what the checks wrote.
+    expect(await t.sh("show", "--name-only", "--format=", "HEAD")).toBe("fixed.txt");
+    await t.clean();
+    const summary = recheckSummary(run);
+    expect(summary).toMatchObject({ state: "passed", mismatches: [CHECK], fixRounds: 1 });
+    expect(recheckLine(summary)).toBe("**Checked again:** 1 of 1 passed after a fix round. Before the fix round, `sh check.sh` did not pass, though the team said it did.");
+    expect(prBody(claimed, { recheck: run, screenshots: 0, footer: "" })).toContain("The first time, `sh check.sh` failed (the team said it passed).");
+    expect(t.stages).toEqual(["Running the team's checks again", "Fixing what the checks run again found", "Running the checks again after the fix"]);
+  });
+
+  it("drops an unfinished fix and runs no fix round without rounds, budget or need", { timeout: 30_000 }, async () => {
+    const stopped = await setup({
+      fix: async (repoDir) => {
+        await writeFile(join(repoDir, "half-done.txt"), "half a fix\n");
+        return { failure: "Timed out after 25 minutes." };
+      },
+    });
+    teams.push(stopped.root);
+    const run = await followRecheck(stopped.d);
+    expect(run).toMatchObject({ fixRounds: 1, note: "Fixing them stopped early: Timed out after 25 minutes." });
+    expect(await stopped.sh("rev-parse", "HEAD")).toBe(stopped.sha);
+    await stopped.clean();
+
+    const off = await setup({ ciFixRounds: 0 });
+    teams.push(off.root);
+    expect((await followRecheck(off.d)).note).toBe("No fix round: fix rounds are turned off (Settings).");
+    expect(off.runRound).not.toHaveBeenCalled();
+
+    const poor = await setup({ budget: 0.5 });
+    teams.push(poor.root);
+    expect((await followRecheck(poor.d)).note).toBe("Not enough of the task's budget was left to fix them.");
+    expect(poor.runRound).not.toHaveBeenCalled();
+
+    const fine = await setup({ report: { ...claimed, checks: [{ command: "echo 'Tests: 2 passed'", outcome: "pass", summary: "" }] } });
+    teams.push(fine.root);
+    const ok = await followRecheck(fine.d);
+    expect(ok.final.map((r) => r.outcome)).toEqual(["passed"]);
+    expect(ok.note).toBeUndefined();
+    expect(fine.runRound).not.toHaveBeenCalled();
+  });
+
+  it("runs the owner's test command instead of the team's checks, and says when there is nothing to run", { timeout: 30_000 }, async () => {
+    const owner = await setup({ testCommand: CHECK, report: { ...claimed, checks: [{ command: "echo ok", outcome: "pass", summary: "" }] }, ciFixRounds: 0 });
+    teams.push(owner.root);
+    const run = await followRecheck(owner.d);
+    expect(run.source).toBe("owner");
+    expect(run.first.map((r) => [r.command, r.outcome, r.claimed])).toEqual([[CHECK, "failed", undefined]]);
+    expect(owner.stages[0]).toBe("Running the owner's test command on the team's work");
+    expect(prBody(claimed, { recheck: run, screenshots: 0, footer: "" })).toContain("- `sh check.sh`: **failed** (exit code 1");
+
+    const none = await setup({ report: { ...claimed, checks: [] } });
+    teams.push(none.root);
+    const nothing = await followRecheck(none.d);
+    expect(nothing).toMatchObject({ first: [], final: [], fixRounds: 0 });
+    expect(none.events).toEqual([{ kind: "recheck", text: "Nothing to check again: no test command is set and the team reported no passing check" }]);
+    expect(none.stages).toEqual([]);
+    expect(prBody(claimed, { recheck: nothing, screenshots: 0, footer: "" })).toContain("Nothing was run again");
+    expect(prBody(claimed, { screenshots: 0, footer: "" })).not.toContain("Checked again");
   });
 });
 

@@ -1,4 +1,5 @@
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import { recheckLine } from "./recheck.js";
 import type { Task } from "./tasks.js";
 
 /**
@@ -423,6 +424,7 @@ export function describeTask(t: Task, now = Date.now()): string {
   if ((t.status === "running" || t.status === "queued") && t.stage) lines.push(`Stage: ${t.stage.text}`);
   if (t.status === "running" && t.prUrl) lines.push(`Pull request (open, checks pending): ${t.prUrl}`);
   if (t.ci) lines.push(`Checks: ${t.ci.state}${t.ci.names.length ? ` (${t.ci.names.join(", ")})` : ""}${t.ci.fixRounds ? `, after ${t.ci.fixRounds} fix round(s)` : ""}`);
+  if (t.recheck) lines.push(recheckLine(t.recheck, "plain"));
   const p = t.progress;
   if (p && (t.status === "running" || t.status === "queued")) {
     lines.push(`Progress (saved ${minutesSince(p.updatedAt, now)} min ago): ${p.now}`);

@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import type { CheckOutcome } from "../team/agents.js";
 import type { ProgressSnapshot } from "./progress.js";
 import type { AgentCosts } from "../spending/attribution.js";
 import type { Store } from "../core/store.js";
@@ -78,6 +79,46 @@ export interface Task {
   estimateUsd?: { low: number; high: number };
   /** The check of the pull request's preview deployment. */
   preview?: PreviewResult;
+  /** The platform's own run of the team's checks after it finished (see recheck.ts). */
+  recheck?: RecheckSummary;
+}
+
+/**
+ * What one check run again by the platform did: passed (exit 0), failed (another exit code or a signal),
+ * no-result (exit 0 without a result: no output from a test command, or no tests ran), timed-out (the
+ * platform's time for the checks ran out), not-started (it could not start) or not-run (refused by the
+ * shell guard, or no time was left).
+ */
+export type RecheckOutcome = "passed" | "failed" | "no-result" | "timed-out" | "not-started" | "not-run";
+
+/** One check the platform ran again, next to what the team said about it. */
+export interface RecheckItem {
+  command: string;
+  outcome: RecheckOutcome;
+  /** The team's own outcome for the same command; absent when the team did not report it (the owner's test command). */
+  claimed?: CheckOutcome;
+  /** How long it ran. */
+  ms?: number;
+  /** One line: the exit code, why it was not run or what showed no result. */
+  note?: string;
+}
+
+/** The platform's run of the team's checks, for the console and Pointer. */
+export interface RecheckSummary {
+  /** passed: every check run passed; failed: at least one did not; not-run: none could be run; none: there was nothing to run. */
+  state: "passed" | "failed" | "not-run" | "none";
+  /** Whose commands: the owner's test command (Repo setup), or the checks the team reported as passing. */
+  source: "owner" | "team";
+  /** The results on the work as published (after the fix round, when one changed the code). */
+  checks: RecheckItem[];
+  /** Rounds the team had to fix what the platform found: 0 or 1. */
+  fixRounds: number;
+  /** The checks ran again after the fix round's change: `checks` are those results. */
+  afterFix?: boolean;
+  /** Commands the team reported as passing that failed or showed no result when the platform ran them, before any fix round. */
+  mismatches: string[];
+  /** Passing checks the team reported beyond the ones run again. */
+  notRechecked: number;
 }
 
 /** Outcome of waiting for a pull request's checks. */

@@ -224,6 +224,16 @@ function limitFields(runner: string | undefined, capNote: string | undefined): L
       isInteger: true,
       description: "How many times the team tries to fix failing checks, within the task's budget. 0 only reports them. From 0 to 5.",
     },
+    {
+      key: "recheckMin",
+      label: "Run the team's checks again",
+      units: "min",
+      min: 0,
+      max: 60,
+      isInteger: true,
+      description:
+        "After the team finishes, the platform runs the repo's test command (Repo setup), or the checks the team says passed, for up to this long and shows the real results in the pull request. 0 turns it off. From 0 to 60.",
+    },
   ];
 }
 

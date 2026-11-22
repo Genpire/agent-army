@@ -60,6 +60,8 @@ export type TaskEventKind =
   | "checks"
   /** A round of fixing failing checks started. */
   | "fix-round"
+  /** The platform ran one of the team's checks again after it finished (ok: passed; ms; text: the command and its result). */
+  | "recheck"
   /** The task ended (ok; text: the outcome). */
   | "end"
   /** Anything else worth showing. */

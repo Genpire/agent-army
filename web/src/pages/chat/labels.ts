@@ -47,6 +47,39 @@ export function checksStatus(t: Task): { label: string; tone: StatusTone } | nul
   return { label: "Checks still running", tone: "warning" };
 }
 
+type Recheck = NonNullable<Task["recheck"]>;
+type RecheckOutcome = Recheck["checks"][number]["outcome"];
+
+const RECHECK_OUTCOME: Record<RecheckOutcome, { label: string; tone: StatusTone }> = {
+  passed: { label: "Passed", tone: "success" },
+  failed: { label: "Failed", tone: "error" },
+  "no-result": { label: "No result", tone: "warning" },
+  "timed-out": { label: "Timed out", tone: "warning" },
+  "not-started": { label: "Could not start", tone: "error" },
+  "not-run": { label: "Not run", tone: "neutral" },
+};
+const CLAIM_LABEL = { pass: "passed", fail: "failed", "no-result": "no result" } as const;
+
+/**
+ * The checks the platform ran again after the team (src/tasks/recheck.ts), one
+ * row each: its real result, and what the team said about it, with a warning
+ * when the team said it passed and the platform's run did not confirm it.
+ */
+export function recheckRows(r: Recheck): { command: string; label: string; tone: StatusTone; description: string }[] {
+  return r.checks.map((c) => {
+    const claim = c.claimed ? `The team said: ${CLAIM_LABEL[c.claimed]}` : "The team did not report it";
+    const doubted = r.mismatches.includes(c.command);
+    const held = !doubted ? "" : c.outcome === "passed" ? " · did not pass before the fix round" : " · not as the team reported";
+    const outcome = RECHECK_OUTCOME[c.outcome];
+    return {
+      command: c.command,
+      label: outcome.label,
+      tone: doubted && c.outcome !== "passed" ? "error" : outcome.tone,
+      description: [`${claim}${held}`, c.note, c.ms !== undefined && c.outcome !== "not-run" ? formatMs(c.ms) : ""].filter(Boolean).join(" · "),
+    };
+  });
+}
+
 /** What the preview check found, in a few words; null when there is no result (not run yet, or an older task). */
 export function previewStatus(t: Pick<Task, "preview">): { label: string; tone: StatusTone; note?: string; url?: string } | null {
   const p = t.preview;
@@ -235,6 +268,7 @@ export const EVENT_VERB: Record<TaskEvent["kind"], string> = {
   pr: "Pull request",
   checks: "Checks",
   "fix-round": "Fix round",
+  recheck: "Checked again",
   end: "Ended",
   note: "Note",
   error: "Problem",

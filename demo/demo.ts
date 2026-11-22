@@ -272,11 +272,12 @@ async function seedConfig(): Promise<void> {
     c.repoSetup = {
       "acme/web": {
         setupCommand: "npm ci",
+        testCommand: "npm test",
         startCommand: "npm run dev",
         appUrl: "http://localhost:3000",
         env: { DATABASE_URL: "postgres://demo:demo@localhost:5432/acme", STRIPE_SECRET_KEY: "sk_test_demo_not_real" },
       },
-      "acme/api": { setupCommand: "pip install -r requirements.txt", startCommand: "", appUrl: "", env: {} },
+      "acme/api": { setupCommand: "pip install -r requirements.txt", testCommand: "", startCommand: "", appUrl: "", env: {} },
     };
   });
 }

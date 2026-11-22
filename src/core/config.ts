@@ -66,6 +66,8 @@ export const REPO_SETUP_MAX_ENV = 100;
  */
 export const StoredRepoSetupSchema = z.object({
   setupCommand: z.string().max(2000).default(""),
+  /** The owner's test command (e.g. npm test): the platform runs it after the team finishes (recheck.ts). Empty = the team's passing checks. */
+  testCommand: z.string().max(1000).default(""),
   startCommand: z.string().max(500).default(""),
   /** Where the started app answers, e.g. http://localhost:3000. Empty = unknown. */
   appUrl: z
@@ -84,8 +86,8 @@ export const StoredRepoSetupSchema = z.object({
 
 /**
  * How the team prepares and runs one repository in repo tasks: a setup
- * command run once after the checkout, how to start the app (for browser
- * checks), and environment variables given to the agents' shell (stored
+ * command run once after the checkout, the test command the platform runs
+ * after the team, how to start the app (for browser checks), and environment variables given to the agents' shell (stored
  * encrypted with the config; values are never sent to the browser). Reserved
  * names (RESERVED_ENV_KEYS) are refused, saying why.
  */
@@ -608,13 +610,15 @@ export const ConfigSchema = z.object({
       ciWaitMin: z.number().int().min(0).max(60).default(15),
       /** How many times the team tries to fix failing checks, within the task's budget; 0 = only report them. */
       ciFixRounds: z.number().int().min(0).max(5).default(2),
+      /** Minutes the platform may spend running the team's checks again after it finishes (recheck.ts); 0 = do not. */
+      recheckMin: z.number().int().min(0).max(60).default(10),
       /**
        * After the checks, open the pull request's preview deployment (Vercel, Netlify… via GitHub
        * deployments) in the browser: off, only when the change touches what people see, or always.
        */
       previewCheck: z.enum(["off", "visible", "always"]).default("visible"),
     })
-    .default({ maxTurns: 200, maxBudgetUsd: 15, maxParallel: 3, progressEveryMin: 5, ciWaitMin: 15, ciFixRounds: 2, previewCheck: "visible" }),
+    .default({ maxTurns: 200, maxBudgetUsd: 15, maxParallel: 3, progressEveryMin: 5, ciWaitMin: 15, ciFixRounds: 2, recheckMin: 10, previewCheck: "visible" }),
   budget: BudgetSchema.default(DEFAULT_BUDGET),
   /** "owner/repo" -> how repo tasks set up and run that repository. */
   repoSetup: z.record(z.string().regex(REPO_RE), StoredRepoSetupSchema).default({}),
@@ -725,7 +729,7 @@ export function publicView(c: Config) {
     repoSetup: Object.fromEntries(
       Object.entries(c.repoSetup).map(([repo, s]) => [
         repo,
-        { setupCommand: s.setupCommand, startCommand: s.startCommand, appUrl: s.appUrl, envKeys: Object.keys(s.env).sort() },
+        { setupCommand: s.setupCommand, testCommand: s.testCommand, startCommand: s.startCommand, appUrl: s.appUrl, envKeys: Object.keys(s.env).sort() },
       ]),
     ),
     monday: {
