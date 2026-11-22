@@ -37,6 +37,33 @@ describe("parseReport: the kind and the title", () => {
   });
 });
 
+describe("parseReport: text fields that are not text", () => {
+  const NOT_TEXT = [42, true, null, { text: "x" }, ["a title"]];
+
+  it("falls back for a title, verification or risks that is not a string, as when it is missing", () => {
+    for (const value of NOT_TEXT) {
+      const report = parseReport({ ...base, title: value, verification: value, risks: value }, "");
+      expect(report, JSON.stringify(value)).toMatchObject({ title: "Pointer update", verification: "", risks: "", summary: "s", kind: "change" });
+    }
+    const { title: _t, verification: _v, risks: _r, ...missing } = base;
+    expect(parseReport(missing, "")).toMatchObject({ title: "Pointer update", verification: "", risks: "" });
+  });
+
+  it("uses the fallback text for a summary that is not a string", () => {
+    for (const value of NOT_TEXT) {
+      expect(parseReport({ ...base, summary: value }, "plain answer"), JSON.stringify(value)).toMatchObject({ kind: "answer", summary: "plain answer" });
+    }
+  });
+
+  it("keeps the strings it is given", () => {
+    expect(parseReport({ ...base, verification: "npm test: 12 passed", risks: "None known." }, "")).toMatchObject({
+      title: "Fix the login redirect",
+      verification: "npm test: 12 passed",
+      risks: "None known.",
+    });
+  });
+});
+
 describe("parseReport: checks and lessons at their limits", () => {
   it("clips a check's summary to one line of at most the limit", () => {
     const [check] = parseReportedChecks([{ command: "npm test", outcome: "pass", summary: `${"a".repeat(CHECK_SUMMARY_MAX_CHARS)}\n${"b".repeat(500)}` }]);
