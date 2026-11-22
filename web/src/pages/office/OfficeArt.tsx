@@ -1,8 +1,10 @@
 /**
  * The office, drawn: an isometric room (floor, two walls with windows, a
  * whiteboard and a clock), the meeting table, the kitchen and its table, the
- * skills library shelf, the HR corner, a desk with a monitor for every agent
- * and Pointer's desk at the front. People's bodies sit on their chairs; their
+ * skills library shelf, the HR corner, the games (foosball, ping pong,
+ * pinball, a video game corner with its TV, console and beanbags), a desk
+ * with a monitor for every agent and Pointer's desk at the front. People's
+ * bodies sit on their chairs; their
  * faces, name tags and speech bubbles are HTML on top (OfficeScene).
  *
  * An illustration is the one place this app draws SVG, so its markup stays in
@@ -11,13 +13,13 @@
  * and type only while their owner works, and every animation stops under
  * prefers-reduced-motion. Decorative: the page describes everyone in text.
  * What moves with the office's life (people walking, a cup brewing, the
- * foosball, a ping pong rally, a pinball game) is drawn by LifeArt.tsx with
- * the same helpers and colours.
+ * foosball, a ping pong rally, a pinball game, the video game on the TV) is
+ * drawn by LifeArt.tsx with the same helpers and colours.
  */
 import { colorVars } from "@astryxdesign/core/theme/tokens.stylex";
 import * as stylex from "@stylexjs/stylex";
 import type { ReactNode } from "react";
-import { DESK, type Desk, FLOOR_T, type MeetingSpot, PINGPONG, type Pt, type SceneLayout, WALL_H, project, seatsAround } from "./layout";
+import { BEANBAG_R, DESK, type Desk, FLOOR_T, type GameCorner, type MeetingSpot, PINGPONG, type Pt, type SceneLayout, TV, WALL_H, project, seatsAround } from "./layout";
 
 // ---------- Colours: Astryx tokens only ----------
 
@@ -154,6 +156,29 @@ export const fill = stylex.create({
   lightYellow: { fill: YELLOW },
   lightBlue: { fill: `color-mix(in oklab, ${BLUE} 60%, ${W})` },
   lightGreen: { fill: GREEN },
+  // The video game corner: beanbags, the TV's glass while it is off, the console's light; the game on it (LifeArt): a neon city at sunset.
+  beanTop: { fill: `light-dark(color-mix(in oklab, ${ORANGE} 80%, ${W}), color-mix(in oklab, ${ORANGE} 70%, ${S}))` },
+  beanSide: { fill: `light-dark(color-mix(in oklab, ${ORANGE} 85%, ${K}), color-mix(in oklab, ${ORANGE} 55%, ${K}))` },
+  tvOff: { fill: `color-mix(in oklab, ${K} 88%, ${BLUE})` },
+  consoleLight: { fill: `color-mix(in oklab, ${TEAL} 70%, ${W})` },
+  skyTop: { fill: `color-mix(in oklab, ${PURPLE} 85%, ${K})` },
+  skyMid: { fill: `color-mix(in oklab, ${PINK} 80%, ${PURPLE})` },
+  skyLow: { fill: `color-mix(in oklab, ${ORANGE} 80%, ${PINK})` },
+  sun: { fill: `color-mix(in oklab, ${YELLOW} 70%, ${W})` },
+  cityFar: { fill: `color-mix(in oklab, ${PURPLE} 70%, ${PINK})` },
+  cityNear: { fill: `color-mix(in oklab, ${PURPLE} 50%, ${K})` },
+  neonPink: { fill: `color-mix(in oklab, ${PINK} 80%, ${W})` },
+  neonTeal: { fill: `color-mix(in oklab, ${TEAL} 70%, ${W})` },
+  neonYellow: { fill: `color-mix(in oklab, ${YELLOW} 80%, ${W})` },
+  road: { fill: `color-mix(in oklab, ${K} 82%, ${PURPLE})` },
+  kerb: { fill: `color-mix(in oklab, ${PINK} 45%, ${K})` },
+  lane: { fill: `color-mix(in oklab, ${YELLOW} 60%, ${W})` },
+  carA: { fill: `color-mix(in oklab, ${TEAL} 80%, ${W})` },
+  carB: { fill: `color-mix(in oklab, ${PINK} 85%, ${W})` },
+  carGlass: { fill: `color-mix(in oklab, ${BLUE} 35%, ${K})` },
+  beam: { fill: `color-mix(in oklab, ${YELLOW} 80%, ${W})`, fillOpacity: 0.35 },
+  mapBack: { fill: K, fillOpacity: 0.55 },
+  mapRoad: { stroke: W, strokeOpacity: 0.55, strokeWidth: 0.8, fill: "none" },
 });
 
 const BOOKS = [fill.b0, fill.b1, fill.b2, fill.b3, fill.b4, fill.b5, fill.b6, fill.b7];
@@ -685,6 +710,84 @@ function Pinball({ x, y, w, d }: { x: number; y: number; w: number; d: number })
   );
 }
 
+/** The TV's screen in the video game corner, facing the room (+x): the plane it is on (x), its left end as seen (y, the larger) and its top (z), in world units. */
+export function tvScreen(g: Pick<GameCorner, "x" | "y" | "d">): { x: number; y: number; z: number } {
+  return { x: g.x + 6, y: g.y + (g.d + TV.screen.w) / 2, z: TV.screen.z0 + TV.screen.h };
+}
+
+/** Draws in the TV screen's own units (TV.screen.w wide, TV.screen.h high, from its top-left corner as seen) onto the screen: an SVG transform. */
+export function screenTransform(g: Pick<GameCorner, "x" | "y" | "d">): string {
+  const s = tvScreen(g);
+  return `matrix(1 -0.5 0 1 ${r1(s.x - s.y)} ${r1((s.x + s.y) / 2 - s.z)})`;
+}
+
+/** A controller lying on the TV's stand, in world units. */
+function Controller({ x, y, z }: { x: number; y: number; z: number }) {
+  const c = project(x, y, z);
+  return (
+    <g>
+      <Poly points={ring(x, y, 2.4, 4.4, z, 14)} s={fill.dark} />
+      <circle cx={r1(c.x + 1.2)} cy={r1(c.y - 0.2)} r={0.7} {...stylex.props(fill.consoleLight)} />
+    </g>
+  );
+}
+
+/**
+ * The video game corner's TV: a low wooden stand against the wall with the
+ * console in its open shelf (its light on), and a big TV on it facing the
+ * room, dark while nobody plays (LifeArt draws the game on it). The two
+ * controllers lie on the stand until someone picks them up.
+ */
+function GameCornerTv({ g, isInUse, isPaused }: { g: GameCorner; isInUse: boolean; isPaused?: boolean }) {
+  const { x, y, w, d } = g;
+  const h = TV.h;
+  const s = tvScreen(g);
+  const { w: sw, h: sh, z0 } = TV.screen;
+  // A rectangle on the stand's front, which faces the room: from v0 to v1 along it.
+  const front = (v0: number, v1: number, z0: number, z1: number, dx = 0.2) => [project(x + w + dx, v0, z0), project(x + w + dx, v1, z0), project(x + w + dx, v1, z1), project(x + w + dx, v0, z1)];
+  return (
+    <g>
+      <Poly points={ring(x + w / 2, y + d / 2, w / 2 + 4, d / 2 + 2, 0, 24)} s={fill.shadow} />
+      <Box x={x} y={y} w={w} d={d} h={h} m={WOOD_M} />
+      <Poly points={front(y + 8, y + 36, 3, 11)} s={fill.darkSide} />
+      <Poly points={front(y + 10, y + 32, 4, 8.5, 0.4)} s={fill.dark} />
+      <Poly points={front(y + 12, y + 16, 6, 6.8, 0.6)} s={[fill.consoleLight, motion.glow, isPaused && motion.paused]} />
+      <Box x={x + 2} y={y + d / 2 - 7} z={h} w={4} d={14} h={z0 - h - 2} m={DARK_M} />
+      <Box x={s.x - 3} y={s.y - sw - 2} z={z0 - 2} w={3} d={sw + 4} h={sh + 4} m={DARK_M} />
+      <g transform={screenTransform(g)}>
+        <rect width={sw} height={sh} {...stylex.props(fill.tvOff)} />
+        <polygon points={`${sw * 0.1},0 ${sw * 0.22},0 ${sw * 0.08},${sh} 0,${sh} 0,${sh * 0.7}`} {...stylex.props(fill.glassShine)} />
+      </g>
+      {!isInUse && (
+        <>
+          <Controller x={x + w - 3} y={y + 14} z={h + 0.4} />
+          <Controller x={x + w - 3} y={y + d - 14} z={h + 0.4} />
+        </>
+      )}
+    </g>
+  );
+}
+
+/** A beanbag, squashed where someone sits, its back raised away from the TV. */
+function Beanbag({ x, y, m }: { x: number; y: number; m: { top: Style; side: Style } }) {
+  const R = BEANBAG_R;
+  return (
+    <g>
+      <Shadow cx={x} cy={y} r={R + 2} />
+      <Poly points={ring(x, y, R, R, 3, 24)} s={m.side} />
+      <Poly points={ring(x, y, R - 0.5, R - 0.5, 9, 24)} s={m.side} />
+      <Poly points={ring(x, y, R - 2, R - 2, 12, 24)} s={m.top} />
+      <Poly points={ring(x + 5, y + 1, R - 7, R - 4, 16, 20)} s={m.side} />
+      <Poly points={ring(x + 5, y + 1, R - 8, R - 5, 18, 20)} s={m.top} />
+    </g>
+  );
+}
+
+const BEANBAGS = [
+  { top: fill.beanTop, side: fill.beanSide },
+  { top: fill.tealTop, side: fill.tealR },
+];
+
 function Sofa({ x, y }: { x: number; y: number }) {
   return (
     <g>
@@ -719,9 +822,11 @@ export interface OfficeArtProps {
   isPaused?: boolean;
   /** Someone plays ping pong: the paddles are in their hands, not on the table. */
   isPingPongOn?: boolean;
+  /** Someone plays a video game: the controllers are in their hands, not on the TV's stand. */
+  isGamingOn?: boolean;
 }
 
-export function OfficeArt({ layout, screens, seated, activeSpots, workingAt, links, now, away, isPaused, isPingPongOn = false }: OfficeArtProps) {
+export function OfficeArt({ layout, screens, seated, activeSpots, workingAt, links, now, away, isPaused, isPingPongOn = false, isGamingOn = false }: OfficeArtProps) {
   const { a, b, view } = layout;
   const items: { depth: number; node: ReactNode }[] = [];
   const add = (depth: number, node: ReactNode) => items.push({ depth, node });
@@ -768,13 +873,15 @@ export function OfficeArt({ layout, screens, seated, activeSpots, workingAt, lin
     });
   });
 
-  // Plants, the lounge, the foosball and ping pong tables and the pinball machine.
+  // Plants, the lounge, the foosball and ping pong tables, the pinball machine and the video game corner.
   layout.plants.forEach((p, i) => add(p.x + p.y, <Plant key={`pl${i}`} x={p.x} y={p.y} size={p.size} />));
   if (layout.hasLounge) add(30 + 270, <Sofa key="sofa" x={10} y={226} />);
-  const { foosball: foos, pingpong: pong, pinball: pin } = layout.life;
+  const { foosball: foos, pingpong: pong, pinball: pin, gaming: game } = layout.life;
   add(foos.x + foos.y + foos.w / 2 + foos.d, <Foosball key="foosball" x={foos.x} y={foos.y} w={foos.w} d={foos.d} />);
   add(pong.x + pong.y + pong.w / 2 + pong.d, <PingPong key="pingpong" x={pong.x} y={pong.y} w={pong.w} d={pong.d} isInUse={isPingPongOn} />);
   add(pin.x + pin.y + pin.w / 2 + pin.d, <Pinball key="pinball" x={pin.x} y={pin.y} w={pin.w} d={pin.d} />);
+  add(game.x + game.y + game.w / 2 + game.d, <GameCornerTv key="tv" g={game} isInUse={isGamingOn} isPaused={isPaused} />);
+  game.seats.forEach((s, i) => add(s.at.x + s.at.y, <Beanbag key={`bean${i}`} x={s.at.x} y={s.at.y} m={BEANBAGS[i % BEANBAGS.length]!} />));
 
   items.sort((p, q) => p.depth - q.depth);
 
@@ -789,7 +896,8 @@ export function OfficeArt({ layout, screens, seated, activeSpots, workingAt, lin
       <Floor a={a} b={b} />
       <Walls a={a} b={b} />
       <Windows wall="right" spans={[[196, 262], [292, Math.min(358, a - 262)]]} />
-      <Windows wall="left" spans={layout.hasLounge ? [[340, 410]] : []} />
+      {/* With a lounge, a window over the sofa (the video game corner has the wall below it). */}
+      <Windows wall="left" spans={layout.hasLounge ? [[236, 306]] : []} />
       <Whiteboard isOn={activeSpots.has(0)} />
       <Clock now={now} x={178} />
       <ArtFrame y0={b - 132} y1={b - 64} />

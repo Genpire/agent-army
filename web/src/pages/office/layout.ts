@@ -6,7 +6,8 @@
  * meeting table or the kitchen table when they are in a meeting). It also
  * holds what the office's life needs (life.ts, paths.ts): the spots free
  * agents go to (coffee machine, kitchen table, sofa, foosball, ping pong
- * table, pinball machine, library, windows, plants), the waypoints in the
+ * table, pinball machine, the video game corner's beanbags, library,
+ * windows, plants), the waypoints in the
  * aisles and on the open floor that walks go through, and the furniture they
  * walk round. Pure: the art
  * (OfficeArt) and the people on top of it (OfficeScene) both draw from it.
@@ -73,7 +74,16 @@ export interface GameTable {
   ends: [LifeSpot, LifeSpot];
 }
 
-/** The free agents' places: the coffee machine, the kitchen table, the sofa, the foosball and ping pong tables, the pinball machine, the library, the windows and the plants. */
+/** The video game corner: the TV's low stand against the back-left wall (its footprint; the screen faces the room, along +x) and the two beanbags in front of it. */
+export interface GameCorner {
+  x: number;
+  y: number;
+  w: number;
+  d: number;
+  seats: [LifeSpot, LifeSpot];
+}
+
+/** The free agents' places: the coffee machine, the kitchen table, the sofa, the foosball and ping pong tables, the pinball machine, the video game corner, the library, the windows and the plants. */
 export interface LifeSpots {
   coffee: LifeSpot;
   /** Where a fresh cup appears under the machine's spout (world, with its height). */
@@ -88,6 +98,8 @@ export interface LifeSpots {
   pingpong: GameTable;
   /** The pinball machine, by the lounge (or right of Pointer's desk in a small room): its footprint (the head at the back), where its player stands and where a friend watches. */
   pinball: { x: number; y: number; w: number; d: number; player: LifeSpot; watcher: LifeSpot };
+  /** The video game corner, against the back-left wall: where the lounge would be in a small room, else under the lounge's window. */
+  gaming: GameCorner;
   shelf: LifeSpot;
   windows: LifeSpot[];
   /** One spot beside each plant, in `plants` order. */
@@ -197,6 +209,12 @@ const stand = (x: number, y: number, look: 1 | -1): LifeSpot => ({ at: { x, y },
 export const PINGPONG = { w: 72, d: 40, h: 28 };
 /** The pinball machine: a narrow cabinet, long from its head (at the back) to the flippers (at the front). */
 export const PINBALL = { w: 22, d: 40 };
+/** The video game corner's TV: its low stand (`long` along the wall, `deep` into the room), and the 16:9 screen on it (`z0` up from the floor). */
+export const TV = { long: 80, deep: 12, h: 14, screen: { w: 72, h: 40, z0: 18 } };
+/** On a beanbag, lower still than on the sofa. */
+export const BEANBAG_Z = FACE_Z - 10;
+/** A beanbag's radius on the floor. */
+export const BEANBAG_R = 12;
 
 function lifeSpots(a: number, b: number, spots: MeetingSpot[], plants: Plant[], hasLounge: boolean, lead: Desk): LifeSpots {
   const cafe = spots[1]!;
@@ -214,6 +232,12 @@ function lifeSpots(a: number, b: number, spots: MeetingSpot[], plants: Plant[], 
   const pin = hasLounge ? { x: 150, y: 320, ...PINBALL } : { x: lead.x + lead.w + 40, y: lead.y + 14, ...PINBALL };
   // The friend who watches stands beside the player, on the side with room.
   const watcher = hasLounge ? stand(pin.x - 47, pin.y + pin.d + 24, 1) : stand(pin.x + pin.w + 28, pin.y + pin.d + 6, -1);
+  // Against the back-left wall, the screen towards the room: where the sofa would be in a small room, else under the lounge's window (which moves up over the sofa). The players sit right of it on screen, so their faces leave it in view.
+  const tv = { x: 2, y: hasLounge ? 322 : 222, w: TV.deep, d: TV.long };
+  const beanbag = (y: number): LifeSpot => {
+    const at = { x: tv.x + tv.w + 50, y };
+    return { at, door: { x: at.x + 26, y }, z: BEANBAG_Z, pose: "sit", look: lookFrom(at, { x: tv.x + tv.w, y: tv.y + tv.d / 2 }) };
+  };
   return {
     coffee: stand(a - 161, 52, 1),
     cup: { x: a - 162, y: 21, z: 37 },
@@ -227,8 +251,9 @@ function lifeSpots(a: number, b: number, spots: MeetingSpot[], plants: Plant[], 
     foosball: { ...foos, ends: [stand(foos.x - 18, fy, 1), stand(foos.x + foos.w + 18, fy, -1)] },
     pingpong: { x: pong.x, y: pong.y, w: pong.w, d: pong.d, ends: [stand(pong.x - 18, py, 1), stand(pong.x + pong.w + 18, py, -1)] },
     pinball: { ...pin, player: stand(pin.x + pin.w / 2, pin.y + pin.d + 18, 1), watcher },
+    gaming: { ...tv, seats: [beanbag(tv.y + 18), beanbag(tv.y + tv.d - 22)] },
     shelf: stand(38, 128, -1),
-    windows: [stand(229, 30, 1), ...(hasLounge ? [stand(30, 375, -1)] : [])],
+    windows: [stand(229, 30, 1)],
     plants: plants.map((p) => {
       const isFront = p.y > b / 2;
       const isEast = p.x > a / 2;
@@ -336,8 +361,9 @@ export function officeLayout(people: OfficePerson[], meetings: OfficeMeeting[]):
   ];
   const life = lifeSpots(a, b, spots, plants, hasLounge, desks[0]!);
 
-  // What a walk keeps clear of: desks and their chairs, both tables with their chairs, the kitchen, the shelf, the lounge, the games and the plants.
+  // What a walk keeps clear of: desks and their chairs, both tables with their chairs, the kitchen, the shelf, the lounge, the games (the TV and its beanbags too) and the plants.
   const chairsAt = (s: number) => Math.max(placements.filter((p) => p.spot === s).length, spots[s]!.chairs);
+  const { gaming } = life;
   const obstacles: Obstacle[] = [
     ...desks.flatMap((d) => [box(d.x, d.y, d.x + d.w, d.y + d.d), chairBox(d.chair)]),
     ...spots.flatMap((s, i) => [
@@ -346,7 +372,8 @@ export function officeLayout(people: OfficePerson[], meetings: OfficeMeeting[]):
     ]),
     box(a - 254, 0, a - 20, 34),
     box(0, 30, 24, 158),
-    ...[life.foosball, life.pingpong, life.pinball].map((g) => box(g.x, g.y, g.x + g.w, g.y + g.d)),
+    ...[life.foosball, life.pingpong, life.pinball, gaming].map((g) => box(g.x, g.y, g.x + g.w, g.y + g.d)),
+    ...gaming.seats.map((s) => box(s.at.x - BEANBAG_R, s.at.y - BEANBAG_R, s.at.x + BEANBAG_R, s.at.y + BEANBAG_R)),
     ...(hasLounge ? [box(10, 226, 46, 318), box(64, 252, 94, 292)] : []),
     ...plants.map((p) => box(p.x - 6 * p.size, p.y - 6 * p.size, p.x + 6 * p.size, p.y + 6 * p.size)),
   ];
@@ -367,8 +394,9 @@ export function officeLayout(people: OfficePerson[], meetings: OfficeMeeting[]):
     { x: leadDesk.door.x, y: frontY },
     { x: leadDesk.x + leadDesk.w + 24, y: frontY },
     ...(desks.at(-1)!.kind === "hr" ? [{ x: westX, y: desks.at(-1)!.door.y }] : []),
-    // The open floor round the meeting table, by the lounge and between the table and the kitchen.
+    // The open floor round the meeting table, by the lounge and the video game corner, and between the table and the kitchen.
     { x: 150, y: 232 },
+    { x: 104, y: 248 },
     { x: 60, y: 212 },
     { x: 270, y: 120 },
     { x: 290, y: 46 },

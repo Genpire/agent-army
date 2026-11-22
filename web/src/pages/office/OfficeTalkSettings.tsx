@@ -20,11 +20,11 @@ import type { ModelSource } from "../../lib/models";
 import { href } from "../../lib/router";
 import { useConfig } from "../../lib/state";
 import { useAction } from "../../lib/useAction";
-import { DAILY_MAX_LIMIT, TALK_SETTINGS_PATH, type TalkProvider, type TalkSettings, type TalkSettingsView } from "./talk";
+import { DAILY_MAX_LIMIT, TALK_SETTINGS_PATH, type TalkProvider, type TalkSettings, type TalkSettingsView, picksModel, settingsDraft, withProvider } from "./talk";
 import { resumeOfficeTalk } from "./useOfficeTalk";
 
 const PROVIDER_CHOICES: { value: TalkProvider; label: string; description: string }[] = [
-  { value: "auto", label: "Auto", description: "Gemini when it is connected, else the chat model." },
+  { value: "auto", label: "Auto", description: "Gemini when it is connected, else the chat model, each on its default model." },
   { value: "gemini", label: "Gemini", description: "Google's Gemini, with the key on Integrations → Gemini CLI." },
   { value: "chat", label: "Chat model", description: "The model Pointer answers with (Integrations → AI model)." },
 ];
@@ -63,7 +63,7 @@ function TalkForm({ view, draft, onChange }: { view: TalkSettingsView; draft: Ta
       <RadioList
         label="Model provider"
         value={draft.provider}
-        onChange={(v) => isProvider(v) && onChange({ ...draft, provider: v, model: "" })}
+        onChange={(v) => isProvider(v) && onChange(withProvider(draft, v))}
         isDisabled={!draft.enabled}
         disabledMessage="Turn on Talk with AI first.">
         {PROVIDER_CHOICES.map((c) => {
@@ -79,19 +79,26 @@ function TalkForm({ view, draft, onChange }: { view: TalkSettingsView; draft: Ta
           endContent={<Button label="Integrations" size="sm" href={href("integrations", answering === "gemini" ? "gemini" : "claude")} />}
         />
       )}
-      <ModelPicker
-        key={`${source.kind}:${source.id}`}
-        label="Model"
-        source={source}
-        value={draft.model}
-        onChange={(v) => set("model")(v.trim())}
-        specials={[{ value: "", label: answering === "gemini" ? "Default: a fast Gemini model" : `Default: ${chatName}'s chat model` }]}
-        description={answering === "gemini" ? "From Google's live list. A small, fast model is plenty for a few lines." : `From ${chatName}'s list. A small, fast model is plenty for a few lines.`}
-        maxLength={100}
-        isOptional
-        isDisabled={!draft.enabled}
-        disabledMessage="Turn on Talk with AI first."
-      />
+      {/* A model only for Gemini or the chat model: Auto always uses the default ones. */}
+      {picksModel(draft.provider) ? (
+        <ModelPicker
+          key={`${source.kind}:${source.id}`}
+          label="Model"
+          source={source}
+          value={draft.model}
+          onChange={(v) => set("model")(v.trim())}
+          specials={[{ value: "", label: answering === "gemini" ? "Default: a fast Gemini model" : `Default: ${chatName}'s chat model` }]}
+          description={answering === "gemini" ? "From Google's live list. A small, fast model is plenty for a few lines." : `From ${chatName}'s list. A small, fast model is plenty for a few lines.`}
+          maxLength={100}
+          isOptional
+          isDisabled={!draft.enabled}
+          disabledMessage="Turn on Talk with AI first."
+        />
+      ) : (
+        <Text type="supporting" color="secondary">
+          {`Auto uses the default models: a fast Gemini model, or ${chatName}'s chat model. To choose a model, pick Gemini or Chat model.`}
+        </Text>
+      )}
       <NumberInput
         label="Conversations a day"
         description="One short model call each, shared by everyone who opens the office. Past the limit, the canned lines play until tomorrow."
@@ -115,8 +122,6 @@ function TalkForm({ view, draft, onChange }: { view: TalkSettingsView; draft: Ta
   );
 }
 
-const draftOf = (v: TalkSettingsView): TalkSettings => ({ enabled: v.enabled, provider: v.provider, model: v.model, dailyMax: v.dailyMax });
-
 /** Office talk's settings: on or off, which provider and model, the daily limit and today's use (GET and POST /api/office/talk/settings). */
 function OfficeTalkDialog({ isOpen, onOpenChange }: { isOpen: boolean; onOpenChange: (isOpen: boolean) => void }) {
   const [view, setView] = useState<TalkSettingsView>();
@@ -132,7 +137,7 @@ function OfficeTalkDialog({ isOpen, onOpenChange }: { isOpen: boolean; onOpenCha
       (v) => {
         if (!isCurrent) return;
         setView(v);
-        setDraft(draftOf(v));
+        setDraft(settingsDraft(v));
       },
       (err: unknown) => isCurrent && setError(errorMessage(err)),
     );
@@ -147,7 +152,7 @@ function OfficeTalkDialog({ isOpen, onOpenChange }: { isOpen: boolean; onOpenCha
       async () => {
         const saved = await api.post<TalkSettingsView>(TALK_SETTINGS_PATH, draft);
         setView(saved);
-        setDraft(draftOf(saved));
+        setDraft(settingsDraft(saved));
       },
       { success: "Office talk saved." },
     );

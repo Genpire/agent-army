@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { OfficeMeeting, OfficePerson, OfficeState } from "../src/team/office.js";
 import { type BubbleRequest, TAG_DY, around, fixedRects, overlap, placeBubbles, tagWidth } from "../web/src/pages/office/bubbles.js";
-import { type Floor, type LifeSpot, PINGPONG, type SceneLayout, STAND_Z, deskSeat, officeLayout, project } from "../web/src/pages/office/layout.js";
+import { BEANBAG_Z, type Floor, type LifeSpot, PINGPONG, type SceneLayout, STAND_Z, deskSeat, officeLayout, project } from "../web/src/pages/office/layout.js";
 import {
   type Activity,
   BOUNCE_K,
@@ -21,7 +21,7 @@ import {
   lifePeople,
   nextChange,
   nextEvent,
-  pinballScoreAt,
+  pointsAt,
   positionAt,
   proposalsBetween,
   sayingAt,
@@ -30,7 +30,26 @@ import {
   trackFrames,
 } from "../web/src/pages/office/life.js";
 import { isClear, isInside, pathLength, route } from "../web/src/pages/office/paths.js";
-import { READ_MIN_MS, TALK_TEXT_MAX, type TalkLine, cleanLines, readMs, talkDue, talkRequest, talkSchedule, talksOf, talkTitle, withTalk } from "../web/src/pages/office/talk.js";
+import {
+  MIN_LEFT_MS,
+  READ_MIN_MS,
+  TALK_TEXT_MAX,
+  type TalkLine,
+  cleanLines,
+  leftThePlan,
+  picksModel,
+  plannedTalk,
+  readMs,
+  settingsDraft,
+  shownLines,
+  talkDue,
+  talkRequest,
+  talkSchedule,
+  talksOf,
+  talkTitle,
+  withProvider,
+  withTalk,
+} from "../web/src/pages/office/talk.js";
 
 const NAMES = ["Sara", "Omar", "Lina", "Kenji", "Maya", "Noor", "Diego", "Ada", "Ravi", "Iris", "Tomas", "Yuki", "Zane", "Bea", "Cyd", "Dov", "Eli", "Fay", "Gus", "Hal"];
 
@@ -74,7 +93,7 @@ const away = (s: LifeState) => new Set(s.activities.flatMap((a) => a.people));
 /** Every spot a free agent can go to. */
 function allSpots(layout: SceneLayout): LifeSpot[] {
   const l = layout.life;
-  return [l.coffee, ...l.cafe, ...l.sofa, ...l.foosball.ends, ...l.pingpong.ends, l.pinball.player, l.pinball.watcher, l.shelf, ...l.windows, ...l.plants];
+  return [l.coffee, ...l.cafe, ...l.sofa, ...l.foosball.ends, ...l.pingpong.ends, l.pinball.player, l.pinball.watcher, ...l.gaming.seats, l.shelf, ...l.windows, ...l.plants];
 }
 
 function expectWalkable(layout: SceneLayout, points: Floor[]) {
@@ -196,8 +215,8 @@ describe("office life: the director", () => {
         expect(a.people).not.toContain("a5");
         if (a.kind === "chat" || a.kind === "foosball" || a.kind === "pingpong") {
           expect(new Set(a.people).size).toBe(2);
-        } else if (a.kind === "coffee" || a.kind === "pinball") {
-          // Alone, or for two: one makes the coffees, or one plays while the other watches.
+        } else if (a.kind === "coffee" || a.kind === "pinball" || a.kind === "gaming") {
+          // Alone, or for two: one makes the coffees, one plays pinball while the other watches, or two race on the TV.
           expect(new Set(a.people).size).toBe(a.people.length);
           expect(a.people.length).toBeLessThanOrEqual(2);
         } else {
@@ -206,7 +225,7 @@ describe("office life: the director", () => {
       }
     });
     // Varied: coffee, chats, games and solo moments all happen in two hours.
-    for (const k of ["coffee", "chat", "foosball", "pingpong", "pinball", "read", "water", "stretch", "window"]) expect(kinds, k).toContain(k);
+    for (const k of ["coffee", "chat", "foosball", "pingpong", "pinball", "gaming", "read", "water", "stretch", "window"]) expect(kinds, k).toContain(k);
   });
 
   it("does nothing when nobody is free, and pairs only when two are", () => {
@@ -483,7 +502,7 @@ function outings(n: number, ms: number, step = 2_000) {
   return { people, layout, life, all: [...byId.values()], names: new Map(life.map((p) => [p.id, p.name])) };
 }
 
-describe("office games: ping pong, pinball and coffee for two", () => {
+describe("office games: ping pong, pinball, video games and coffee for two", () => {
   const { layout, life, all, names } = outings(7, 6 * 3_600_000);
   const games = all.filter((a) => a.kind === "pingpong");
   const pinball = all.filter((a) => a.kind === "pinball");
@@ -574,10 +593,10 @@ describe("office games: ping pong, pinball and coffee for two", () => {
         expect(b.at).toBeGreaterThan(t0);
         expect(b.at).toBeLessThan(t1);
       }
-      expect(pinballScoreAt(g, t0)).toBe(0);
+      expect(pointsAt(g, t0)).toBe(0);
       let last = 0;
       for (let t = t0; t <= t1 + 3_000; t += 250) {
-        const score = pinballScoreAt(g, t);
+        const score = pointsAt(g, t);
         expect(score).toBeGreaterThanOrEqual(last);
         last = score;
       }
@@ -616,10 +635,104 @@ describe("office games: ping pong, pinball and coffee for two", () => {
     }
   });
 
-  it("holds the ping pong table and the pinball machine while they are in use: nobody else starts a game there", () => {
-    // Someone (unseen) holds both for two hours: no game starts at either.
+  it("plays video games on the beanbags: alone, the cash climbs to a new record; for two, races and a winner", () => {
+    const gaming = all.filter((a) => a.kind === "gaming");
+    const solo = gaming.filter((g) => g.people.length === 1);
+    const pairs = gaming.filter((g) => g.people.length === 2);
+    expect(solo.length).toBeGreaterThan(0);
+    expect(pairs.length).toBeGreaterThan(0);
+    for (const g of solo) {
+      const { t0, t1 } = g.together!;
+      expect(g.goals).toBeUndefined();
+      expect(g.bumps!.length).toBeGreaterThan(5);
+      for (const b of g.bumps!) {
+        expect(b.at).toBeGreaterThan(t0);
+        expect(b.at).toBeLessThan(t1);
+      }
+      expect(pointsAt(g, t0)).toBe(0);
+      let last = 0;
+      for (let t = t0; t <= t1; t += 250) {
+        expect(pointsAt(g, t)).toBeGreaterThanOrEqual(last);
+        last = pointsAt(g, t);
+      }
+      expect(last).toBe(g.bumps!.reduce((sum, b) => sum + b.points, 0));
+      expect(sayingAt(g.tracks[0]!, t1)?.text).toBe("new record! 🎉");
+      expect(lifeNote(g, g.people[0]!, (id) => names.get(id), t0)).toEqual({ emoji: "🎮", text: "Playing video games", short: "video games" });
+    }
+    for (const g of pairs) {
+      const { t0, t1 } = g.together!;
+      expect(g.bumps).toBeUndefined();
+      expect(g.goals!.length).toBeGreaterThan(1);
+      for (const race of g.goals!) {
+        expect(race.at).toBeGreaterThan(t0);
+        // Each race's shout is over before the winner's moment.
+        expect(race.at + 1_600).toBeLessThanOrEqual(t1);
+        expect(sayingAt(g.tracks[race.by]!, race.at)).toBeDefined();
+      }
+      const [a, b] = scoreAt(g, t1);
+      expect(a + b).toBe(g.goals!.length);
+      expect(g.tracks.map((t) => sayingAt(t, t1)?.text)).toEqual(a === b ? ["gg!", "gg!"] : a > b ? ["🏆", "gg!"] : ["gg!", "🏆"]);
+      const [p, q] = g.people as [string, string];
+      expect(lifeNote(g, p, (id) => names.get(id), t0)?.text).toBe(`Playing video games with ${names.get(q)}`);
+      expect(lifeNote(g, q, (id) => names.get(id), t0)?.text).toBe(`Playing video games with ${names.get(p)}`);
+    }
+  });
+
+  it("seats the video game players on the beanbags facing the TV, a controller in hand only while they sit there", () => {
+    const { seats } = layout.life.gaming;
+    for (const g of all.filter((a) => a.kind === "gaming")) {
+      expect(g.venues).toEqual(["gaming"]);
+      g.tracks.forEach((t, i) => {
+        const seat = seats[i]!;
+        const playing = legAt(t, g.together!.t0 + 1)!;
+        expect(playing.to).toEqual({ x: seat.at.x, y: seat.at.y, z: BEANBAG_Z });
+        expect(playing.pose).toBe("sit");
+        // The TV is on the back-left wall: they look left, at it.
+        expect(playing.look).toBe(-1);
+        expect(seat.look).toBe(-1);
+        for (const leg of t.legs) {
+          const isOnBeanbag = leg.pose === "sit" && leg.to.x === seat.at.x && leg.to.y === seat.at.y;
+          expect(leg.prop === "controller", `${g.id}: a ${leg.pose} leg`).toBe(isOnBeanbag);
+        }
+      });
+    }
+  });
+
+  it("sends video game players back when one gets work, and closes the corner while a meeting sits next to it", () => {
+    const { people, layout: l, life: lp } = setup(7);
+    let state = advance(undefined, lp, l, T0);
+    let t = T0;
+    let game: Activity | undefined;
+    for (; t < T0 + 6 * 3_600_000 && !game; t += 1_000) {
+      state = advance(state, lp, l, t);
+      game = state.activities.find((a) => a.kind === "gaming" && a.people.length === 2 && a.together && t > a.together.t0);
+    }
+    expect(game).toBeDefined();
+    const [worker, friend] = game!.people as [string, string];
+    const busy = people.map((p) => (p.id === worker ? { ...p, state: "working" as const } : p));
+    const next = advance(state, lifePeople({ people: busy }, l), l, t);
+    expect(next.activities.find((a) => a.id === game!.id)).toBeUndefined();
+    expect(next.activities.find((a) => a.kind === "return" && a.people[0] === worker)!.gotWork).toBe(true);
+    expect(next.activities.find((a) => a.kind === "return" && a.people[0] === friend)!.gotWork).toBe(false);
+    // A meeting at the big table: its card is over the corner, and a meeting wants quiet. With a lounge or without.
+    for (const n of [3, 7]) {
+      const busyTeam = team(n, { pointer: "meeting", a0: "meeting" });
+      const room = officeLayout(busyTeam, [meeting(["pointer", "a0"])]);
+      const kinds = new Set<string>();
+      run(room, lifePeople({ people: busyTeam }, room), T0, T0 + 2 * 3_600_000, 2_000, (s) => {
+        for (const a of s.activities) {
+          kinds.add(a.kind);
+          expect(a.venues, `${n} agents`).not.toContain("gaming");
+        }
+      });
+      expect(kinds.size, `${n} agents`).toBeGreaterThan(2);
+    }
+  });
+
+  it("holds the ping pong table, the pinball machine and the video game corner while they are in use: nobody else starts a game there", () => {
+    // Someone (unseen) holds all three for two hours: no game starts at any.
     const start = advance(undefined, life, layout, T0);
-    const holder: Activity = { id: "held", kind: "pingpong", people: [], start: T0, end: T0 + 2 * 3_600_000, tracks: [], venues: ["pingpong", "pinball"] };
+    const holder: Activity = { id: "held", kind: "pingpong", people: [], start: T0, end: T0 + 2 * 3_600_000, tracks: [], venues: ["pingpong", "pinball", "gaming"] };
     const kinds = new Set<string>();
     run(
       layout,
@@ -633,14 +746,15 @@ describe("office games: ping pong, pinball and coffee for two", () => {
           if (a === holder) continue;
           expect(a.venues).not.toContain("pingpong");
           expect(a.venues).not.toContain("pinball");
+          expect(a.venues).not.toContain("gaming");
         }
       },
       { ...start, activities: [...start.activities, holder] },
     );
     expect(kinds).toContain("foosball");
-    // Left alone, the machine is never played twice at once (a game for one and one with a friend could otherwise overlap).
+    // Left alone, the machine and the TV are never played twice at once (a game for one and one for two could otherwise overlap).
     run(layout, life, T0, T0 + 6 * 3_600_000, 1_000, (s) => {
-      for (const venue of ["pingpong", "pinball", "foosball"]) expect(s.activities.filter((a) => a.venues.includes(venue)).length, venue).toBeLessThanOrEqual(1);
+      for (const venue of ["pingpong", "pinball", "foosball", "gaming"]) expect(s.activities.filter((a) => a.venues.includes(venue)).length, venue).toBeLessThanOrEqual(1);
     });
   });
 
@@ -672,6 +786,16 @@ describe("office games: ping pong, pinball and coffee for two", () => {
           if (s.what.endsWith("face")) expect(overlap(tag, s.r), `${n} agents: the ${name} player's name on ${s.what}`).toBe(0);
         }
       }
+      // On the beanbags they sit: a seated face, its name under it.
+      g.gaming.seats.forEach((seat, i) => {
+        const at = project(seat.at.x, seat.at.y, BEANBAG_Z);
+        const face = around(at, FACE * 2, FACE * 2);
+        const tag = around({ x: at.x, y: at.y + TAG_DY }, tagWidth("Kenji"), 26);
+        for (const s of seated) {
+          expect(overlap(face, s.r), `${n} agents: video game player ${i + 1}'s face on ${s.what}`).toBe(0);
+          if (s.what.endsWith("face")) expect(overlap(tag, s.r), `${n} agents: video game player ${i + 1}'s name on ${s.what}`).toBe(0);
+        }
+      });
     }
   });
 });
@@ -682,18 +806,22 @@ describe("office talk: real lines in the bubbles", () => {
   const game = all.find((a) => a.kind === "pingpong")!;
   const lines = (a: Activity, texts: string[]): TalkLine[] => texts.map((text, i) => ({ speaker: a.people[i % a.people.length]!, text }));
 
-  it("asks only for a chat, a coffee for two, a game for two or pinball with a friend, by an id made of the slot and the people", () => {
+  it("asks only for a chat, a coffee for two, a game for two (a video game too) or pinball with a friend, by an id made of the slot and the people", () => {
     const asked = new Set<string>();
     for (const a of all) {
       const r = talkRequest(a);
-      const isSocial = a.together !== undefined && a.people.length >= 2 && ["chat", "coffee", "foosball", "pingpong", "pinball"].includes(a.kind);
+      const isSocial = a.together !== undefined && a.people.length >= 2 && ["chat", "coffee", "foosball", "pingpong", "pinball", "gaming"].includes(a.kind);
       expect(Boolean(r), `${a.kind} for ${a.people.length}`).toBe(isSocial);
       if (!r) continue;
       expect(r).toEqual({ activityId: `${a.id}:${a.people.join(".")}`, kind: a.kind, people: a.people });
       expect(r.activityId).toMatch(/^[A-Za-z0-9:._-]{1,120}$/);
       asked.add(r.activityId);
     }
-    for (const kind of ["chat", "coffee", "foosball", "pingpong", "pinball"]) expect([...asked].some((id) => id.startsWith(`${kind}:`)), kind).toBe(true);
+    for (const kind of ["chat", "coffee", "foosball", "pingpong", "pinball", "gaming"]) expect([...asked].some((id) => id.startsWith(`${kind}:`)), kind).toBe(true);
+    // A video game alone has no talk: it takes two.
+    const solo = all.find((a) => a.kind === "gaming" && a.people.length === 1)!;
+    expect(solo.together).toBeDefined();
+    expect(talkRequest(solo)).toBeUndefined();
     expect(talkRequest({ ...chat, people: [chat.people[0]!] })).toBeUndefined();
     expect(talkRequest({ ...chat, together: undefined })).toBeUndefined();
   });
@@ -801,5 +929,98 @@ describe("office talk: real lines in the bubbles", () => {
     expect(talksOf([older], "nobody", 1e12)).toEqual([]);
     expect(talkTitle({ kind: "pingpong", people: game.people }, game.people[0]!, (id) => names.get(id)!)).toBe(`Ping pong with ${names.get(game.people[1]!)}`);
     expect(talkTitle({ kind: "chat", people: ["a", "b", "c"] }, "a", (id) => id.toUpperCase())).toBe("Chat with B and C");
+    expect(talkTitle({ kind: "gaming", people: ["a", "b"] }, "b", (id) => id.toUpperCase())).toBe("Video games with A");
+  });
+
+  /** The lines of real talk in an activity's bubbles, in order. */
+  const talkOf = (a: Activity) =>
+    a.tracks
+      .flatMap((t) => t.says)
+      .filter((x) => x.isTalk)
+      .sort((p, q) => p.t0 - q.t0);
+
+  it("ends the talk at the first line that does not fit: a reply never shows without the line before it", () => {
+    const [a, b] = chat.people as [string, string];
+    // Squeezed into 6 s, the long third line does not fit; the short last one alone would.
+    const said: TalkLine[] = [
+      { speaker: a, text: "Coffee?" },
+      { speaker: b, text: "Yes please." },
+      { speaker: a, text: "So the flaky checkout test was a race between the cart reload and the price refresh, and Lina found it in the end." },
+      { speaker: b, text: "Ha, nice." },
+    ];
+    const window = { t0: 0, t1: 6_000 };
+    const cut = talkSchedule(said, window);
+    expect(cut.map((l) => l.text)).toEqual([said[0]!.text, said[1]!.text]);
+    expect(window.t1 - cut[1]!.t1).toBeGreaterThan(1_600 + 350);
+  });
+
+  it("drops a line the answer came too late for: less than MIN_LEFT_MS left to read it", () => {
+    const said = lines(chat, ["Hey, how was the planning call?", "Long, but we have a plan.", "Good. Lunch later?", "Yes, at one."]);
+    const schedule = talkSchedule(said, chat.together!);
+    const line = schedule[1]!;
+    // Just enough left to read it: it shows, from the answer's arrival.
+    expect(talkOf(withTalk(chat, said, line.t1 - MIN_LEFT_MS))[0]).toMatchObject({ text: line.text, t0: line.t1 - MIN_LEFT_MS, t1: line.t1 });
+    // A moment later it never shows: the talk starts with the next line, at its time.
+    const late = talkOf(withTalk(chat, said, line.t1 - MIN_LEFT_MS + 1));
+    expect(late[0]).toMatchObject({ text: schedule[2]!.text, t0: schedule[2]!.t0 });
+    expect(late.map((x) => x.text)).toEqual(schedule.slice(2).map((l) => l.text));
+  });
+
+  it("keeps for the drawer only the lines that were on screen: none the answer came too late for, none after the outing was cut short", () => {
+    const said = lines(game, ["Your serve.", "Did the deploy go out?", "It did, all green.", "Lina fixed the flaky test.", "Three one me, by the way.", "Not for long."]);
+    const window = game.together!;
+    const schedule = talkSchedule(said, window);
+    // Arriving with half a second of the second line left: the bubbles and the drawer agree, from the third line on.
+    const since = schedule[1]!.t1 - 500;
+    const shown = shownLines(said, window, since);
+    expect(shown[0]!.text).toBe(schedule[2]!.text);
+    expect(talkOf(withTalk(game, said, since)).map((x) => [x.text, x.t0, x.t1])).toEqual(shown.map((l) => [l.text, l.t0, l.t1]));
+    // Cut short just after the fourth line started: the lines that started before, and none after.
+    const until = schedule[3]!.t0 + 300;
+    const cut = shownLines(said, window, since, until);
+    expect(cut.map((l) => l.text)).toEqual([schedule[2]!.text, schedule[3]!.text]);
+    const entry = { activityId: "pingpong:1:2", kind: "pingpong" as const, people: game.people, lines: cut };
+    expect(talksOf([entry], game.people[0]!, window.t1 + 60_000)[0]!.lines.map((l) => l.text)).toEqual([schedule[2]!.text, schedule[3]!.text]);
+  });
+
+  it("notes when a conversation leaves the plan: someone got work and walked back", () => {
+    const { people, layout: l, life: lp } = setup(7);
+    let state = advance(undefined, lp, l, T0);
+    let t = T0;
+    let talk: Activity | undefined;
+    for (; t < T0 + 3 * 3_600_000 && !talk; t += 1_000) {
+      state = advance(state, lp, l, t);
+      talk = state.activities.find((a) => talkRequest(a) && a.together && t > a.together.t0 + 3_000);
+    }
+    expect(talk).toBeDefined();
+    const id = talkRequest(talk!)!.activityId;
+    const was = plannedTalk(state.activities);
+    expect(was.has(id)).toBe(true);
+    // Nothing changed: nothing left.
+    expect(leftThePlan(was, plannedTalk(advance(state, lp, l, t).activities))).toEqual([]);
+    const busy = people.map((p) => (p.id === talk!.people[0] ? { ...p, state: "working" as const } : p));
+    const next = advance(state, lifePeople({ people: busy }, l), l, t);
+    expect(leftThePlan(was, plannedTalk(next.activities))).toEqual([id]);
+    // From then on, nothing more of it is listed.
+    const said = lines(talk!, ["one", "two", "three", "four", "five", "six"]);
+    const listed = shownLines(said, talk!.together!, talk!.together!.t0, t);
+    expect(listed.length).toBeGreaterThan(0);
+    expect(listed.length).toBeLessThan(shownLines(said, talk!.together!, talk!.together!.t0).length);
+    for (const line of listed) expect(line.t0).toBeLessThan(t);
+  });
+});
+
+describe("office talk settings", () => {
+  it("sets a model only with Gemini or the chat model: Auto always uses the default models", () => {
+    expect(picksModel("auto")).toBe(false);
+    expect(picksModel("gemini")).toBe(true);
+    expect(picksModel("chat")).toBe(true);
+    const saved = { enabled: true, provider: "auto" as const, model: "gemini-2.5-flash", dailyMax: 40 };
+    // A model left on Auto from before: the dialog drops it, so saving is never refused; the view's extra fields stay out.
+    expect(settingsDraft({ ...saved, usedToday: 3, available: { gemini: true, chat: true } })).toEqual({ ...saved, model: "" });
+    expect(settingsDraft({ ...saved, provider: "gemini" })).toEqual({ ...saved, provider: "gemini" });
+    // Another provider starts at its default model.
+    expect(withProvider({ ...saved, provider: "gemini" }, "chat")).toEqual({ ...saved, provider: "chat", model: "" });
+    expect(withProvider({ ...saved, provider: "chat" }, "auto")).toEqual({ ...saved, model: "" });
   });
 });

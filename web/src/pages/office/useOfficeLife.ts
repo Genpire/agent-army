@@ -57,12 +57,12 @@ export function useOfficeLife(view: OfficeView | undefined, layout: SceneLayout 
   }, [state, people, layout, isPaused]);
 
   const planned = state?.activities;
-  const talk = useOfficeTalk(planned ?? [], canTalk && !isPaused);
+  const talk = useOfficeTalk(planned, canTalk && !isPaused);
   const activities = useMemo(
     () =>
       (planned ?? []).map((a) => {
         const heard = talk.heard.get(talkRequest(a)?.activityId ?? "");
-        return heard ? withTalk(a, heard.lines, heard.arrivedAt) : a;
+        return heard ? withTalk(a, heard.said, heard.arrivedAt) : a;
       }),
     // The store's version says when a conversation arrived (the map itself is the same one).
     [planned, talk.heard, talk.version],
