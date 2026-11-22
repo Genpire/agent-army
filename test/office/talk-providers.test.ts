@@ -156,9 +156,21 @@ describe("chatTalk", () => {
     });
     const schema = (options!.outputFormat as { schema: { properties: { lines: { items: { properties: { speaker: { enum: string[] } } } } } } }).schema;
     expect(schema.properties.lines.items.properties.speaker.enum).toEqual(["coder", "qa"]);
-    expect(options!.env).toMatchObject({ ANTHROPIC_API_KEY: ANTHROPIC_KEY, HOME: options!.cwd });
-    expect(options!.env!.MASTER_KEY).toBeUndefined();
     expect(out).toEqual({ raw: LINES, model: SIZING_MODEL, costUsd: 0.0007, tokens: 1000 });
+  });
+
+  it("gives the CLI an environment of its own: the provider's credentials, none of the service's secrets", async () => {
+    vi.stubEnv("MASTER_KEY", "master-key-office-0123456789");
+    vi.stubEnv("SLACK_BOT_TOKEN", "xoxb-office-0123456789");
+    try {
+      const q = fakeQuery([result({ structured_output: LINES })]);
+      await chatTalk(anthropicRuntime(ANTHROPIC_KEY), CALL, { queryFn: q.queryFn });
+      const env = q.calls[0]!.options!.env!;
+      expect(Object.keys(env).sort()).toEqual(["ANTHROPIC_API_KEY", "CLAUDE_AGENT_SDK_CLIENT_APP", "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST", "HOME", "LANG", "PATH"]);
+      expect(env).toMatchObject({ ANTHROPIC_API_KEY: ANTHROPIC_KEY, HOME: q.calls[0]!.options!.cwd, LANG: "C.UTF-8", PATH: process.env.PATH });
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("uses the owner's model, and another provider's small tier for the default", async () => {

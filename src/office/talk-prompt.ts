@@ -2,6 +2,7 @@ import { plainLine } from "../tasks/task-events.js";
 import type { Task } from "../tasks/tasks.js";
 import { OFFICE_LEAD_ID, taskTitle } from "../team/office.js";
 import { type Team, enabledAgents } from "../team/team.js";
+import type { TalkKind, TalkLine } from "./talk-types.js";
 
 /**
  * What the office's AI talk asks a model for, and how its answer is read
@@ -13,10 +14,6 @@ import { type Team, enabledAgents } from "../team/team.js";
  * known speakers only, plain short lines, else no talk.
  */
 
-/** What people do together in the office (the page's activities). */
-export const TALK_KINDS = ["chat", "coffee", "foosball", "pingpong", "pinball"] as const;
-export type TalkKind = (typeof TALK_KINDS)[number];
-
 export const TALK_MIN_LINES = 2;
 export const TALK_MAX_LINES = 8;
 /** Longest line, in characters: a speech bubble. */
@@ -27,12 +24,6 @@ export const TALK_TASKS_SCAN = 20;
 export const TALK_WORK_MAX = 6;
 const ABOUT_MAX = 140;
 const SUMMARY_MAX = 160;
-
-export interface TalkLine {
-  /** A person's id: an agent id, or "pointer" for the lead. */
-  speaker: string;
-  text: string;
-}
 
 export interface TalkPerson {
   id: string;
@@ -60,6 +51,7 @@ const ACTIVITY: Record<TalkKind, (people: number) => string> = {
   foosball: () => "playing a foosball match",
   pingpong: () => "playing a ping pong rally",
   pinball: (n) => (n > 1 ? "playing the office pinball machine, taking turns" : "playing the office pinball machine"),
+  gaming: () => "on the sofa playing a video game together, an open-world driving game, taking turns with the controller",
 };
 
 /** One line of data for the prompt: no angle brackets (the data's tags cannot be closed), redacted, bounded. */

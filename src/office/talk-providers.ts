@@ -9,6 +9,7 @@ import type { Config } from "../core/config.js";
 import { engineUsd } from "../spending/prices.js";
 import { SIZING_MODEL } from "../tasks/sizing.js";
 import { talkSchema } from "./talk-prompt.js";
+import type { TalkProviderId } from "./talk-types.js";
 
 /**
  * Who writes an office conversation, and the one call it takes:
@@ -26,8 +27,6 @@ import { talkSchema } from "./talk-prompt.js";
  *
  * Neither call ever throws; errors carry the provider's message, never a key.
  */
-
-export type TalkProviderId = "gemini" | "chat";
 
 /** Far more than a few short lines from the cheapest model cost; a runaway call stops here. */
 export const TALK_BUDGET_USD = 0.05;

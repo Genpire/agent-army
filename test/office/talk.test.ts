@@ -11,6 +11,7 @@ import { type Task, TaskRepo, WEB_CHANNEL, newTaskId } from "../../src/tasks/tas
 
 const GEMINI_KEY = "AIzaSy-office-gemini-secret-0123456789";
 const ANTHROPIC_KEY = "sk-ant-office-secret-0123456789";
+const GITHUB_TOKEN = "ghp_officeTalkGithubToken0123456789abcd";
 const NOW = Date.parse("2026-11-22T10:00:00.000Z");
 const REQ: TalkRequest = { activityId: "pingpong:coder-qa-1", kind: "pingpong", people: ["coder", "qa"] };
 const LINES = [
@@ -45,7 +46,8 @@ async function setup(over: (c: Config) => void = () => undefined) {
   const usage = new UsageRepo(store, tasks);
   const config = ConfigSchema.parse({});
   config.engines.gemini.apiKey = GEMINI_KEY;
-  // A priced model, so costs are not 0.
+  // A priced model, so costs are not 0 (a model is set only with a chosen provider).
+  config.office.talk.provider = "gemini";
   config.office.talk.model = "gemini-2.5-flash-lite";
   over(config);
   const configRepo = { load: async () => config };
@@ -91,6 +93,64 @@ describe("OfficeTalk", () => {
     const day = JSON.parse((await s.store.get(talkDayKey(talkDay(NOW))))!.toString("utf8"));
     expect(day.count).toBe(1);
     expect(day.talks).toEqual([expect.objectContaining({ id: REQ.activityId, kind: "pingpong", people: ["coder", "qa"], lines: LINES, provider: "gemini" })]);
+  });
+
+  it("sends Gemini a prompt redacted with the platform's secrets: the task records and the people's descriptions", async () => {
+    const s = await setup((c) => {
+      c.anthropic.apiKey = ANTHROPIC_KEY;
+      c.github.token = GITHUB_TOKEN;
+      c.team.agents.find((a) => a.id === "qa")!.description = `Tests with ${GITHUB_TOKEN} at hand. More.`;
+    });
+    await s.tasks.save(
+      task({
+        instruction: `Rotate ${GITHUB_TOKEN} in the deploy`,
+        report: { title: "", summary: `Moved ${ANTHROPIC_KEY} into the vault.`, verification: "", risks: "" },
+      }),
+    );
+    expect((await s.talk.talk(REQ)).lines).toEqual(LINES);
+    const sent = s.gemini.calls[0]!.body.contents[0]!.parts[0]!.text;
+    expect(sent).toContain('acme/web: "Rotate [redacted] in the deploy": pull request opened, checks passed.');
+    expect(sent).toContain("Summary: Moved [redacted] into the vault.");
+    expect(sent).toContain("Tests with [redacted] at hand.");
+    expect(sent).not.toContain(GITHUB_TOKEN);
+    expect(sent).not.toContain(ANTHROPIC_KEY);
+  });
+
+  it("answers an activity id's conversation only to a request it fits: the same kind, every speaker one of the people", async () => {
+    const s = await setup();
+    const first = await s.talk.talk(REQ);
+    expect(first.lines).toEqual(LINES);
+    // The same people in another order, or with one more, still fit.
+    expect(await s.talk.talk({ ...REQ, people: ["qa", "coder"] })).toEqual(first);
+    expect(await s.talk.talk({ ...REQ, people: ["qa", "coder", "writer"] })).toEqual(first);
+    // Another kind, or a speaker missing: unavailable, and nothing is paid for a second one.
+    expect(await s.talk.talk({ ...REQ, kind: "foosball" })).toEqual({ lines: [], reason: "unavailable" });
+    expect(await s.talk.talk({ ...REQ, people: ["coder", "writer"] })).toEqual({ lines: [], reason: "unavailable" });
+    expect(await s.make().talk({ ...REQ, people: ["coder"] })).toEqual({ lines: [], reason: "unavailable" });
+    expect(s.gemini.calls).toHaveLength(1);
+  });
+
+  it("answers a running conversation only to a request it fits, and starts no second one", async () => {
+    const s = await setup();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const slow = fakeGemini();
+    const talk = s.make((async (input: string | URL | Request, init?: RequestInit) => {
+      await gate;
+      return slow.fetch(input, init);
+    }) as typeof fetch);
+    // What a request answers before the running call ends.
+    const soon = (answer: Promise<unknown>) => Promise.race([answer, new Promise((r) => setTimeout(() => r("still waiting"), 100))]);
+    const first = talk.talk(REQ);
+    await new Promise((r) => setTimeout(r, 20));
+    const more = talk.talk({ ...REQ, people: ["writer", "qa", "coder"] });
+    expect(await soon(talk.talk({ ...REQ, kind: "chat" }))).toEqual({ lines: [], reason: "unavailable" });
+    expect(await soon(talk.talk({ ...REQ, people: ["coder"] }))).toEqual({ lines: [], reason: "unavailable" });
+    expect(await soon(more)).toBe("still waiting");
+    release();
+    expect(await first).toEqual({ lines: LINES, provider: "gemini", model: "gemini-2.5-flash-lite" });
+    expect(await more).toEqual(await first);
+    expect(slow.calls).toHaveLength(1);
   });
 
   it("keeps any activity id apart, even one named like an object's own property", async () => {
@@ -229,7 +289,7 @@ describe("OfficeTalk", () => {
     await s.talk.talk(REQ);
     expect(await s.talk.settings()).toEqual({
       enabled: true,
-      provider: "auto",
+      provider: "gemini",
       model: "gemini-2.5-flash-lite",
       dailyMax: 40,
       usedToday: 1,
@@ -253,5 +313,16 @@ describe("office talk settings in the config", () => {
     expect(ConfigSchema.parse({}).office.talk.dailyMax).toBe(40);
     // A partial setting fills in the rest.
     expect(ConfigSchema.parse({ office: { talk: { enabled: false } } }).office.talk).toEqual({ enabled: false, provider: "auto", model: "", dailyMax: 40 });
+  });
+
+  it("load a model set on auto without it: auto always uses the default models", async () => {
+    const store = new FsStore(await mkdtemp(join(tmpdir(), "army-talk-auto-")));
+    const key = deriveKey("k");
+    const talk = { enabled: true, provider: "auto", model: "gemini-2.5-flash", dailyMax: 9 };
+    await store.put("config.enc", encrypt(key, JSON.stringify({ office: { talk } })));
+    expect((await new ConfigRepo(store, key, 0).load()).office.talk).toEqual({ ...talk, model: "" });
+    // A chosen provider keeps its model.
+    expect(ConfigSchema.parse({ office: { talk: { ...talk, provider: "gemini" } } }).office.talk.model).toBe("gemini-2.5-flash");
+    expect(ConfigSchema.parse({ office: { talk: { ...talk, provider: "chat" } } }).office.talk.model).toBe("gemini-2.5-flash");
   });
 });

@@ -76,7 +76,11 @@ describe("Office talk API", () => {
     expect(await talk({ ...ok, activityId: "has space" })).toEqual({ status: 400, body: { error: "Activity ids are 1 to 120 letters, digits and : . _ -." } });
     expect((await talk({ ...ok, activityId: "x".repeat(121) })).status).toBe(400);
     expect((await talk({ ...ok, activityId: "" })).status).toBe(400);
-    expect(await talk({ ...ok, kind: "darts" })).toEqual({ status: 400, body: { error: 'The activity is "chat", "coffee", "foosball", "pingpong", "pinball".' } });
+    expect(await talk({ ...ok, kind: "darts" })).toEqual({ status: 400, body: { error: 'The activity is "chat", "coffee", "foosball", "pingpong", "pinball", "gaming".' } });
+    // Gaming takes two: one playing alone (listed twice too) has no talk.
+    const alone = { status: 400, body: { error: "Gaming takes two people: one playing alone has no talk." } };
+    expect(await talk({ ...ok, kind: "gaming", people: ["coder"] })).toEqual(alone);
+    expect(await talk({ ...ok, kind: "gaming", people: ["coder", "coder"] })).toEqual(alone);
     expect(await talk({ ...ok, people: ["pointer", "nobody"] })).toEqual({
       status: 400,
       body: { error: '"nobody" is not in the office: people are enabled agents\' ids or "pointer".' },
@@ -99,16 +103,28 @@ describe("Office talk API", () => {
     expect(settings).toMatchObject({ usedToday: 1, available: { gemini: true, chat: false } });
   });
 
+  it("talks for two playing a video game on the sofa", async () => {
+    const gaming = await talk({ activityId: "gaming:abc-1", kind: "gaming", people: ["pointer", "coder"] });
+    expect(gaming).toEqual({ status: 200, body: { lines: LINES, provider: "gemini", model: TRANSCRIPTION.geminiModels[0] } });
+    expect(geminiCalls).toHaveLength(2);
+  });
+
   it("saves the settings and answers as GET; refuses bad ones", async () => {
     const saved = await save({ enabled: false, provider: "gemini", model: "gemini-2.5-flash", dailyMax: 12 });
     expect(saved).toEqual({
       status: 200,
-      body: { enabled: false, provider: "gemini", model: "gemini-2.5-flash", dailyMax: 12, usedToday: 1, available: { gemini: true, chat: false } },
+      body: { enabled: false, provider: "gemini", model: "gemini-2.5-flash", dailyMax: 12, usedToday: 2, available: { gemini: true, chat: false } },
     });
     expect(await (await get("/api/office/talk/settings")).json()).toEqual(saved.body);
     expect(await talk({ activityId: "chat:off-1", kind: "chat", people: ["coder", "qa"] })).toEqual({ status: 200, body: { lines: [], reason: "off" } });
 
-    expect(await save({ enabled: true, provider: "auto", model: "bad model", dailyMax: 1 })).toEqual({
+    // Auto always uses the default models: a model goes with Gemini or the chat provider.
+    expect(await save({ enabled: true, provider: "auto", model: "gemini-2.5-flash", dailyMax: 1 })).toEqual({
+      status: 400,
+      body: { error: "Choose Gemini or the chat provider to set a model." },
+    });
+    expect((await save({ enabled: true, provider: "auto", model: "", dailyMax: 1 })).body).toMatchObject({ provider: "auto", model: "" });
+    expect(await save({ enabled: true, provider: "gemini", model: "bad model", dailyMax: 1 })).toEqual({
       status: 400,
       body: { error: "A model id is letters, digits and . _ : / -, like the CLI's --model takes." },
     });
