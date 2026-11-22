@@ -23,7 +23,7 @@ import { type Screenshot, browserAvailable, browserServer, collectScreenshots } 
 import { type CiOutcome, type WaitOptions, ciFailureDetails, ciFixPrompt, ciSummary, ciSummaryLine, storedCiSummary, waitForChecks } from "./ci.js";
 import { type ProviderSession, providerProblem, providerRuntime, secretParts } from "../ai/ai-providers.js";
 import { repoTaskApps } from "../integrations/apps/apps.js";
-import { repoTaskEngines, runCli } from "../ai/engines.js";
+import { redactStrings, repoTaskEngines, runCli } from "../ai/engines.js";
 import type { CodeHost } from "../integrations/code-hosts/code-host.js";
 import { allHostSecrets, codeHostFor } from "../integrations/code-hosts/code-host-factory.js";
 import { type Config, ConfigRepo, integrationSecrets, resolveMasterKey } from "../core/config.js";
@@ -318,6 +318,38 @@ export async function saveProjectNotes(
     console.error(`[worker] could not save project notes: ${redact(err instanceof Error ? err.message : String(err))}`);
     return false;
   }
+}
+
+/**
+ * The team's report from its result, every string in it redacted before
+ * parseReport clips any: a secret across a cut would keep its first part,
+ * which the redactor no longer recognises.
+ */
+export function redactedReport(structured: unknown, resultText: string, redact: (text: string) => string): Report {
+  return parseReport(redactStrings(structured, redact), redact(resultText));
+}
+
+/**
+ * Saves what the team learned in one run (the first, or an extra round), from
+ * its report: the project notes, kept with what was added to them while it
+ * worked, and the lessons, with the task's id. Both redacted. Never throws,
+ * and does nothing without a report.
+ */
+export async function saveWhatTheTeamLearned(
+  o: {
+    notes: Pick<NotesRepo, "put"> & Partial<Pick<NotesRepo, "get">>;
+    lessons: Pick<LessonsRepo, "add">;
+    repo: string;
+    taskId: string;
+    /** The project notes the run started with. */
+    notesBefore: string;
+    redact?: (text: string) => string;
+  },
+  report: Report | undefined,
+): Promise<void> {
+  if (!report) return;
+  await saveProjectNotes(o.notes, o.repo, o.notesBefore, report.projectNotes, o.redact);
+  await saveTaskLessons(o.lessons, o.repo, report.lessons, o.taskId, o.redact);
 }
 
 /** Keep credentials out of anything we log, store or post. */
@@ -1592,7 +1624,8 @@ export async function main(): Promise<void> {
     const projectNotes = await loadNotes();
     // The lessons library, written next to the checkout for the team to grep (lessons.ts). Unreadable lessons are skipped, not fatal.
     const lessonsLibrary = new LessonsRepo(store, masterKey);
-    const lessons = await materializeLessons(lessonsLibrary, task.repo, join(workRoot, "lessons"), redact);
+    const loadLessons = () => materializeLessons(lessonsLibrary, task.repo, join(workRoot, "lessons"), redact);
+    const lessons = await loadLessons();
     if (lessons) timeline.add({ kind: "note", text: lessonsNote(lessons) });
 
     // The owner's test command, which the platform runs after the team instead of the team's own checks (recheck.ts).
@@ -1717,7 +1750,7 @@ export async function main(): Promise<void> {
             result = message;
             turns = message.num_turns;
             if (message.subtype === "success" && !message.is_error) {
-              report = parseReport(message.structured_output, message.result);
+              report = redactedReport(message.structured_output, message.result, redact);
             } else if (message.subtype === "success") {
               // e.g. a rejected API key arrives as a "success" result flagged is_error
               failure = `The team could not run: ${message.result || "unknown error"}.`;
@@ -1747,13 +1780,17 @@ export async function main(): Promise<void> {
       return { report, failure: failure && redact(failure), costUsd, turns, plan: final.plan };
     };
 
+    // Where each run's project notes and lessons go (saveWhatTheTeamLearned).
+    const learned = { notes, lessons: lessonsLibrary, repo: task.repo, taskId: task.id, redact };
     /**
      * One more round of the team after the first (fixing checks, checking the
      * preview): bounded by `runMs`, its cost added to the task's, its project
-     * notes kept.
+     * notes and lessons kept. It starts from the notes and lessons as they are
+     * now, with what the earlier runs saved.
      */
     const extraRound = async (roundPrompt: string, o: { budgetUsd: number; runMs: number; since: string; phaseLabel: string }) => {
       const notesBefore = await loadNotes();
+      const lessonsBefore = await loadLessons();
       const roundAbort = new AbortController();
       const roundTimer = setTimeout(() => roundAbort.abort(), o.runMs);
       const run = await runTeam(roundPrompt, {
@@ -1761,13 +1798,12 @@ export async function main(): Promise<void> {
         abort: roundAbort,
         timeoutMin: Math.round(o.runMs / 60_000),
         since: o.since,
-        context: { ...context, projectNotes: notesBefore },
+        context: { ...context, projectNotes: notesBefore, lessons: lessonsBefore },
         phaseLabel: o.phaseLabel,
       }).finally(() => clearTimeout(roundTimer));
       task.costUsd = (task.costUsd ?? 0) + run.costUsd;
       task.turns = (task.turns ?? 0) + run.turns;
-      if (run.report) await saveProjectNotes(notes, task.repo, notesBefore, run.report.projectNotes, redact);
-      if (run.report) await saveTaskLessons(lessonsLibrary, task.repo, run.report.lessons, task.id, redact);
+      await saveWhatTheTeamLearned({ ...learned, notesBefore }, run.report);
       return run;
     };
 
@@ -1864,8 +1900,7 @@ export async function main(): Promise<void> {
     if (report) task.report = taskReport(report, redact);
 
     // Saved before publishing so a failed push doesn't lose what the team learned (blocked reports too).
-    if (report) await saveProjectNotes(notes, task.repo, projectNotes, report.projectNotes, redact);
-    if (report) await saveTaskLessons(lessonsLibrary, task.repo, report.lessons, task.id, redact);
+    await saveWhatTheTeamLearned({ ...learned, notesBefore: projectNotes }, report);
 
     // ---------- 4. Publish ----------
     // With the worker's own config back first: no filter or clean driver the agents configured runs in `add`.
