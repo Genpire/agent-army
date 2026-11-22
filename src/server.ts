@@ -76,6 +76,7 @@ import { gitlabRoutes } from "./routes/gitlab.js";
 import { jiraRoutes } from "./routes/jira.js";
 import { lessonsRoutes } from "./routes/lessons.js";
 import { miroRoutes } from "./routes/miro.js";
+import { officeRoutes } from "./routes/office.js";
 import type { IntegrationRouteDeps } from "./routes/types.js";
 
 const SESSION_COOKIE = "army_session";
@@ -1381,6 +1382,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
   app.use(aiRoutes(routeDeps));
   app.use(emailRoutes(routeDeps));
   app.use(dataSourcesRoutes(routeDeps));
+  app.use(officeRoutes({ ...routeDeps, usage, spending }));
   // The Routines page's API, and POST /routines/tick for external schedulers (outside /api: its own secret header, no session).
   app.use(routinesRoutes({ ...routeDeps, routines }));
   app.use(chatRoutes({ ...routeDeps, conversations }));
