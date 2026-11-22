@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import type { SceneLayout } from "./layout";
 import { type Activity, type LifeNote, type LifeState, type Track, advance, lifeNote, lifePeople, nextEvent } from "./life";
 import type { OfficeView } from "./model";
+import { talkRequest, withTalk } from "./talk";
+import { useOfficeTalk } from "./useOfficeTalk";
 
 function subscribeVisibility(onChange: () => void) {
   document.addEventListener("visibilitychange", onChange);
@@ -32,9 +34,12 @@ export interface OfficeLife {
  * The office's life (life.ts) for the page: the director steps whenever the
  * office is re-read and wakes up only at its next event (an outing that
  * starts or ends), never per frame. A hidden tab stops it; when the tab is
- * shown again it catches up with the clock.
+ * shown again it catches up with the clock. With `canTalk` (the picture is
+ * shown, with motion), the conversations get real talk when the server has
+ * some (useOfficeTalk): the activities come back with those lines in their
+ * people's bubbles; the director's own plan never changes.
  */
-export function useOfficeLife(view: OfficeView | undefined, layout: SceneLayout | undefined): OfficeLife {
+export function useOfficeLife(view: OfficeView | undefined, layout: SceneLayout | undefined, canTalk = false): OfficeLife {
   const isPaused = usePageHidden();
   const people = useMemo(() => (view && layout ? lifePeople(view, layout) : undefined), [view, layout]);
   const [state, setState] = useState<LifeState>();
@@ -51,15 +56,24 @@ export function useOfficeLife(view: OfficeView | undefined, layout: SceneLayout 
     return () => clearTimeout(timer);
   }, [state, people, layout, isPaused]);
 
-  const activities = state?.activities;
+  const planned = state?.activities;
+  const talk = useOfficeTalk(planned ?? [], canTalk && !isPaused);
+  const activities = useMemo(
+    () =>
+      (planned ?? []).map((a) => {
+        const heard = talk.heard.get(talkRequest(a)?.activityId ?? "");
+        return heard ? withTalk(a, heard.lines, heard.arrivedAt) : a;
+      }),
+    // The store's version says when a conversation arrived (the map itself is the same one).
+    [planned, talk.heard, talk.version],
+  );
   return useMemo(() => {
-    const list = activities ?? [];
-    const parts = new Map(list.flatMap((activity) => activity.tracks.map((track) => [track.personId, { activity, track }] as const)));
+    const parts = new Map(activities.flatMap((activity) => activity.tracks.map((track) => [track.personId, { activity, track }] as const)));
     const names = new Map(view?.people.map((p) => [p.id, p.name]));
     const noteOf = (personId: string, now: number) => {
       const part = parts.get(personId);
       return part ? lifeNote(part.activity, personId, (id) => names.get(id), now) : undefined;
     };
-    return { activities: list, parts, noteOf, isPaused };
+    return { activities, parts, noteOf, isPaused };
   }, [activities, view?.people, isPaused]);
 }

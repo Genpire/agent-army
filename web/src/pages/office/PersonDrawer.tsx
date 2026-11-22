@@ -32,6 +32,9 @@ import { useTeamSave } from "../team/useTeamSave";
 import { AskComposer } from "./AskComposer";
 import { Face } from "./Face";
 import { type OfficePerson, STATE_INFO, faceChoices, minutesText, nameTag, taskHref, tasksOf } from "./model";
+import { talksOf } from "./talk";
+import { TalkLog } from "./TalkLog";
+import { useTalkLog } from "./useOfficeTalk";
 
 const RECENT = 5;
 
@@ -116,8 +119,10 @@ function FacePicker({ person, agent, onChanged }: { person: OfficePerson; agent:
   );
 }
 
-function DrawerBody({ person, onClose, onChanged }: { person: OfficePerson; onClose: () => void; onChanged: () => void }) {
+function DrawerBody({ person, people, onClose, onChanged }: { person: OfficePerson; people: OfficePerson[]; onClose: () => void; onChanged: () => void }) {
   const { config } = useConfig();
+  // What they said in the office this session, when the team talks with AI.
+  const talks = talksOf(useTalkLog(), person.id, Date.now());
   const lead = config.team.pointer.name || "Pointer";
   const agent = person.kind === "agent" ? config.team.agents.find((a) => a.id === person.id) : undefined;
   const tasks = useTasks();
@@ -255,6 +260,15 @@ function DrawerBody({ person, onClose, onChanged }: { person: OfficePerson; onCl
               )}
             </Part>
 
+            {talks.length > 0 && (
+              <>
+                <Divider />
+                <Part title="Said in the office">
+                  <TalkLog talks={talks} personId={person.id} people={people} />
+                </Part>
+              </>
+            )}
+
             <Divider />
             <Part title={`Ask ${lead} for work`}>
               <AskComposer
@@ -320,13 +334,15 @@ export interface PersonDrawerProps {
   onClose: () => void;
   /** Something changed (a face, a new conversation): re-read the office now. */
   onChanged: () => void;
+  /** Everyone in the office, for the names and faces of who they talked with. */
+  people?: OfficePerson[];
 }
 
-/** A person's details: what they do and when, their settings, current and recent work, and asking Pointer for work. */
-export function PersonDrawer({ person, isOpen, onClose, onChanged }: PersonDrawerProps) {
+/** A person's details: what they do and when, their settings, current and recent work, what they said in the office, and asking Pointer for work. */
+export function PersonDrawer({ person, isOpen, onClose, onChanged, people = [] }: PersonDrawerProps) {
   return (
     <Drawer isOpen={isOpen} onOpenChange={(open) => !open && onClose()} label={person ? `${person.name}, ${person.role}` : "Person"} width={520} experimental={{ isFullWidthOnMobile: true }}>
-      {person && <DrawerBody key={person.id} person={person} onClose={onClose} onChanged={onChanged} />}
+      {person && <DrawerBody key={person.id} person={person} people={people} onClose={onClose} onChanged={onChanged} />}
     </Drawer>
   );
 }

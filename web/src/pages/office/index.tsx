@@ -23,6 +23,7 @@ import { AskComposer } from "./AskComposer";
 import { officeLayout } from "./layout";
 import { OFFICE_EVERY_MS, type OfficePerson, type OfficeView, isBusy, officePath } from "./model";
 import { OfficeScene } from "./OfficeScene";
+import { OfficeTalkButton } from "./OfficeTalkSettings";
 import { PeopleList } from "./PeopleList";
 import { PersonDrawer } from "./PersonDrawer";
 import { useOfficeLife } from "./useOfficeLife";
@@ -67,7 +68,8 @@ function Counts({ view, isLive }: { view: OfficeView | undefined; isLive: boolea
  *   narrower           the same people as a list of cards
  * The office is re-read every 3 s while the tab is visible. Free agents get
  * up now and then (useOfficeLife, the same for everyone who looks): the
- * picture shows them walking, the list says what they do.
+ * picture shows them walking, the list says what they do. While the picture
+ * moves, their conversations can be real talk (Office talk, in the actions).
  */
 export default function OfficePage() {
   const { config } = useConfig();
@@ -95,8 +97,9 @@ export default function OfficePage() {
   const reload = office.reload;
 
   const layout = useMemo(() => (view ? officeLayout(view.people, view.meetings) : undefined), [view]);
-  const life = useOfficeLife(view, layout);
   const isReducedMotion = useMediaQuery("(prefers-reduced-motion: reduce)");
+  // Real talk only where its bubbles show: the moving picture.
+  const life = useOfficeLife(view, layout, !showList && !isReducedMotion);
   const sceneWidth = layout?.view.width ?? 0;
   const needsScroll = width !== undefined && sceneWidth * MIN_SCALE > width;
   const hasAgents = Boolean(view?.people.some((p) => p.kind === "agent"));
@@ -135,6 +138,7 @@ export default function OfficePage() {
       actions={
         <HStack gap={3} vAlign="center" wrap="wrap">
           <Counts view={view} isLive={!office.error} />
+          <OfficeTalkButton />
           {!isNarrow && (
             <SegmentedControl label="Show the office as" value={mode} onChange={(v) => setMode(v === "list" ? "list" : "office")} size="sm">
               <SegmentedControlItem value="office" label="Office" />
@@ -163,7 +167,7 @@ export default function OfficePage() {
           isCompact
         />
       </VStack>
-      <PersonDrawer person={shown} isOpen={Boolean(selected)} onClose={close} onChanged={() => void reload()} />
+      <PersonDrawer person={shown} isOpen={Boolean(selected)} onClose={close} onChanged={() => void reload()} people={view?.people} />
     </PageFrame>
   );
 }

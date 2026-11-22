@@ -273,7 +273,7 @@ export function OfficeScene({ view, layout, life, isReducedMotion, onOpen, now }
   return (
     <Card padding={0} variant="muted" xstyle={styles.frame}>
       <VStack xstyle={styles.stage} ref={stageRef}>
-        <OfficeArt layout={layout} {...art} now={now} away={away} isPaused={life.isPaused} />
+        <OfficeArt layout={layout} {...art} now={now} away={away} isPaused={life.isPaused} isPingPongOn={!isReducedMotion && life.activities.some((a) => a.kind === "pingpong")} />
 
         {!isReducedMotion && <OfficeLife life={life} layout={layout} people={byId} scale={scale} isCompact={isCompact} onOpen={onOpen} />}
 

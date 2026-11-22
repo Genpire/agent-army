@@ -1,18 +1,22 @@
 /**
  * The moving parts of the office, drawn like the room (OfficeArt.tsx, whose
  * helpers and token colours this reuses): a person out of their seat (legs,
- * shirt, arms and what they carry) and the props of what they do (a cup
- * brewing under the coffee machine, the foosball, water for a plant).
+ * shirt, arms and what they carry: a paddle that swings at each stroke, hands
+ * on a pinball's buttons) and the props of what they do (a cup brewing under
+ * the coffee machine, the foosball, the ping pong ball flying from paddle to
+ * paddle, a pinball game's ball, flippers and lights, water for a plant).
  *
- * Motion is transform and opacity only, in CSS keyframes, so it runs on the
+ * Motion is transform and opacity only, in CSS keyframes or a Web Animation
+ * (the ping pong ball, whose path life.ts computes), so it runs on the
  * compositor; `isPaused` (a hidden tab) holds it. The scene leaves all of
  * this out under prefers-reduced-motion. Decorative: aria-hidden.
  */
 import { durationVars, easeVars } from "@astryxdesign/core/theme/tokens.stylex";
 import * as stylex from "@stylexjs/stylex";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import { type SceneLayout, project } from "./layout";
-import type { Activity, Pose, Prop } from "./life";
-import { Box, SHIRTS, fill, r1 } from "./OfficeArt";
+import { type Activity, type Pose, type Prop, ballFrames } from "./life";
+import { Box, Poly, SHIRTS, fill, playfieldPoint, r1 } from "./OfficeArt";
 
 // ---------- Motion ----------
 
@@ -54,6 +58,47 @@ const rally = stylex.keyframes({
   "100%": { transform: "translate(-16px, -14px)" },
 });
 
+// A paddle's stroke: back, through the ball, and back to rest.
+const stroke = stylex.keyframes({
+  "0%": { transform: "rotate(-32deg)" },
+  "45%": { transform: "rotate(26deg)" },
+  "100%": { transform: "rotate(0deg)" },
+});
+// Fingers on a pinball's buttons.
+const tap = stylex.keyframes({
+  "0%": { transform: "translateY(0)" },
+  "20%": { transform: "translateY(1.6px)" },
+  "40%": { transform: "translateY(0)" },
+  "100%": { transform: "translateY(0)" },
+});
+const flipLeft = stylex.keyframes({
+  "0%": { transform: "rotate(0deg)" },
+  "12%": { transform: "rotate(-34deg)" },
+  "30%": { transform: "rotate(0deg)" },
+  "100%": { transform: "rotate(0deg)" },
+});
+const flipRight = stylex.keyframes({
+  "0%": { transform: "rotate(0deg)" },
+  "12%": { transform: "rotate(34deg)" },
+  "30%": { transform: "rotate(0deg)" },
+  "100%": { transform: "rotate(0deg)" },
+});
+const flash = stylex.keyframes({
+  "0%": { opacity: 0.15 },
+  "50%": { opacity: 1 },
+  "100%": { opacity: 0.15 },
+});
+// The pinball's ball round the playfield, in screen units from its centre (playfield offsets projected: across → (18, 9), up the slope → (29, −18.5)).
+const run = stylex.keyframes({
+  "0%": { transform: "translate(-11px, 7px)" },
+  "16%": { transform: "translate(13.2px, -3.3px)" },
+  "32%": { transform: "translate(8.6px, -9.6px)" },
+  "48%": { transform: "translate(8px, -1px)" },
+  "64%": { transform: "translate(-4px, -3.6px)" },
+  "82%": { transform: "translate(-4px, 4.6px)" },
+  "100%": { transform: "translate(-11px, 7px)" },
+});
+
 const anim = stylex.create({
   leg: { transformBox: "fill-box", transformOrigin: "50% 0%" },
   walking: {
@@ -85,6 +130,18 @@ const anim = stylex.create({
     animationTimingFunction: "ease-in-out",
     animationIterationCount: "infinite",
   },
+  // The paddle arm turns at the shoulder (figure units).
+  arm: { transformOrigin: "12px 31px" },
+  stroke: { animationName: { default: stroke, [REDUCE]: "none" }, animationDuration: "0.42s", animationTimingFunction: easeVars["--ease-move"], animationFillMode: "both" },
+  tap: { animationName: { default: tap, [REDUCE]: "none" }, animationDuration: "0.7s", animationIterationCount: "infinite" },
+  tapOther: { animationDuration: "0.95s", animationDelay: "-0.3s" },
+  flipper: { transformBox: "fill-box" },
+  pivotLeft: { transformOrigin: "0% 0%" },
+  pivotRight: { transformOrigin: "100% 100%" },
+  flipLeft: { animationName: { default: flipLeft, [REDUCE]: "none" }, animationDuration: "0.9s", animationIterationCount: "infinite" },
+  flipRight: { animationName: { default: flipRight, [REDUCE]: "none" }, animationDuration: "1.3s", animationDelay: "-0.5s", animationIterationCount: "infinite" },
+  flash: { opacity: 0.15, animationName: { default: flash, [REDUCE]: "none" }, animationDuration: "0.8s", animationIterationCount: "infinite" },
+  run: { animationName: { default: run, [REDUCE]: "none" }, animationDuration: "3.2s", animationTimingFunction: "linear", animationIterationCount: "infinite" },
   /** When an animation starts (ms from now; negative when it started before this was drawn). */
   delay: (ms: number) => ({ animationDelay: `${Math.round(ms)}ms` }),
   paused: { animationPlayState: "paused" },
@@ -112,6 +169,10 @@ export interface FigureProps {
   pose: Pose;
   prop?: Prop;
   isStretch?: boolean;
+  /** At a pinball machine: hands on the buttons. */
+  isAtPinball?: boolean;
+  /** A paddle's last stroke: its time (the animation restarts for each) and how long ago it was, in ms. */
+  swing?: { at: number; since: number };
   /** The shirt, by person (as at their desk). */
   hue: number;
   look: 1 | -1;
@@ -132,7 +193,7 @@ function Arm({ from, to, shirt }: { from: [number, number]; to: [number, number]
  * the chair or sofa drawn in the room), drawn under their face; it turns
  * with the way they walk. Placed around the face's centre.
  */
-export function Figure({ pose, prop, isStretch, hue, look, scale, isPaused }: FigureProps) {
+export function Figure({ pose, prop, isStretch, isAtPinball, swing, hue, look, scale, isPaused }: FigureProps) {
   const shirt = SHIRTS[hue % SHIRTS.length]!;
   const box = figure.box(FIG.w * scale, FIG.h * scale, FIG.x * scale, FIG.y * scale);
   if (pose === "sit") {
@@ -181,6 +242,22 @@ export function Figure({ pose, prop, isStretch, hue, look, scale, isPaused }: Fi
         <>
           <Arm from={[12, 31]} to={[16, 43]} shirt={shirt} />
           <Cup x={14} y={38} />
+        </>
+      ) : prop === "paddle" ? (
+        // Towards the table: red at one end, black at the other (as they lie on the table).
+        <g key={swing?.at} {...stylex.props(anim.arm, swing && anim.stroke, swing && anim.delay(-swing.since), isPaused && anim.paused)}>
+          <Arm from={[12, 31]} to={[20, 37]} shirt={shirt} />
+          <line x1={21} y1={37} x2={24} y2={33.5} {...stylex.props(fill.rod)} />
+          <ellipse cx={26.5} cy={29.5} rx={5} ry={5.6} {...stylex.props(look > 0 ? fill.paddleRed : fill.paddleBlack)} />
+        </g>
+      ) : isAtPinball ? (
+        <>
+          <g {...stylex.props(anim.tap, isPaused && anim.paused)}>
+            <Arm from={[-12, 31]} to={[-17, 44]} shirt={shirt} />
+          </g>
+          <g {...stylex.props(anim.tap, anim.tapOther, isPaused && anim.paused)}>
+            <Arm from={[12, 31]} to={[17, 44]} shirt={shirt} />
+          </g>
         </>
       ) : null}
     </svg>
@@ -254,6 +331,82 @@ function Drops({ layout, plant, isPaused }: { layout: SceneLayout; plant: number
   );
 }
 
+/**
+ * The ping pong ball over a whole game: one Web Animation along the path
+ * life.ts computes (from paddle to paddle, a bounce on the far half, past the
+ * one who missed), caught up with the clock when shown, held while paused.
+ */
+function PingPongBall({ activity, layout, isPaused }: { activity: Activity; layout: SceneLayout; isPaused: boolean }) {
+  const ref = useRef<SVGCircleElement>(null);
+  const animation = useRef<Animation | undefined>(undefined);
+  const { x, y, w, d } = layout.life.pingpong;
+  const strokes = activity.strokes;
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    const path = ballFrames({ strokes }, { x, y, w, d });
+    if (!el || !path || typeof el.animate !== "function") return;
+    const a = el.animate(path.frames, { duration: Math.max(1, path.end - path.start), fill: "both" });
+    a.currentTime = Date.now() - path.start;
+    animation.current = a;
+    return () => {
+      a.cancel();
+      animation.current = undefined;
+    };
+  }, [strokes, x, y, w, d]);
+
+  // A hidden tab holds the ball; back in view it catches up with the clock.
+  useEffect(() => {
+    const a = animation.current;
+    const first = strokes?.[0]?.at;
+    if (!a || first === undefined) return;
+    if (isPaused) a.pause();
+    else {
+      a.currentTime = Date.now() - first;
+      a.play();
+    }
+  }, [isPaused, strokes]);
+
+  return <circle ref={ref} r={2} opacity={0} {...stylex.props(fill.pongBall)} />;
+}
+
+/** A pinball game on: the ball runs round the playfield, the flippers flick, the bumpers and the head's lights flash, the display glows. */
+function PinballPlay({ layout, isPaused }: { layout: SceneLayout; isPaused: boolean }) {
+  const m = layout.life.pinball;
+  const held = isPaused && anim.paused;
+  const at = (u: number, v: number, dz = 0.7) => playfieldPoint(m, u, v, dz);
+  const centre = at(0.5, 0.5, 1.4);
+  const flippers = [
+    { from: at(0.18, 0.14), to: at(0.4, 0.07), s: [anim.pivotLeft, anim.flipLeft] },
+    { from: at(0.82, 0.14), to: at(0.6, 0.07), s: [anim.pivotRight, anim.flipRight] },
+  ];
+  const bumpers = [
+    [0.3, 0.74],
+    [0.7, 0.74],
+    [0.5, 0.56],
+  ] as const;
+  const head = (u: number, z: number) => project(m.x + 1 + u * (m.w - 2), m.y + 7, z);
+  return (
+    <g>
+      {bumpers.map(([u, v], i) => {
+        const c = at(u, v, 0.9);
+        return <ellipse key={`${u}-${v}`} cx={r1(c.x)} cy={r1(c.y)} rx={3.4} ry={2.2} {...stylex.props(fill.white, anim.flash, anim.delay(-i * 270), held)} />;
+      })}
+      {[0.15, 0.38, 0.62, 0.85].map((u, i) => {
+        const c = head(u, 62);
+        return <circle key={u} cx={r1(c.x)} cy={r1(c.y)} r={1.3} {...stylex.props([fill.lightYellow, fill.lightRed, fill.lightGreen, fill.lightBlue][i]!, anim.flash, anim.delay(-i * 200), held)} />;
+      })}
+      <Poly points={[head(0.05, 40), head(0.95, 40), head(0.95, 47), head(0.05, 47)]} s={[fill.backglassArt, anim.flash, held]} />
+      {flippers.map((f, i) => (
+        <line key={i} x1={r1(f.from.x)} y1={r1(f.from.y)} x2={r1(f.to.x)} y2={r1(f.to.y)} {...stylex.props(fill.flipper, anim.flipper, ...f.s, held)} />
+      ))}
+      <g transform={`translate(${r1(centre.x)} ${r1(centre.y)})`}>
+        <circle r={1.5} {...stylex.props(fill.steel, anim.run, held)} />
+      </g>
+    </g>
+  );
+}
+
 export interface LifePropsProps {
   layout: SceneLayout;
   activities: Activity[];
@@ -263,10 +416,13 @@ export interface LifePropsProps {
 
 /** The props of what people do, over the room and under the people. */
 export function LifeProps({ layout, activities, now, isPaused }: LifePropsProps) {
+  const isOn = (a: Activity, kind: Activity["kind"]) => a.kind === kind && a.together !== undefined && now >= a.together.t0 && now < a.together.t1;
   const brewing = activities.filter((a) => a.brew && now >= a.brew.t0 && now < a.brew.t1);
-  const playing = activities.some((a) => a.kind === "foosball" && a.together && now >= a.together.t0 && now < a.together.t1);
+  const playing = activities.some((a) => isOn(a, "foosball"));
+  const rallies = activities.filter((a) => isOn(a, "pingpong"));
+  const pinball = activities.some((a) => isOn(a, "pinball"));
   const watering = activities.filter((a) => a.water && now >= a.water.t0 && now < a.water.t1);
-  if (!brewing.length && !playing && !watering.length) return null;
+  if (!brewing.length && !playing && !rallies.length && !pinball && !watering.length) return null;
   const { view } = layout;
   return (
     <svg viewBox={`${r1(view.x)} ${r1(view.y)} ${r1(view.width)} ${r1(view.height)}`} aria-hidden="true" focusable="false" {...stylex.props(props.root)}>
@@ -274,6 +430,10 @@ export function LifeProps({ layout, activities, now, isPaused }: LifePropsProps)
         <Brew key={a.id} layout={layout} t0={a.brew!.t0} now={now} isPaused={isPaused} />
       ))}
       {playing && <Ball layout={layout} isPaused={isPaused} />}
+      {rallies.map((a) => (
+        <PingPongBall key={a.id} activity={a} layout={layout} isPaused={isPaused} />
+      ))}
+      {pinball && <PinballPlay layout={layout} isPaused={isPaused} />}
       {watering.map((a) => (
         <Drops key={a.id} layout={layout} plant={a.water!.plant} isPaused={isPaused} />
       ))}
@@ -281,8 +441,12 @@ export function LifeProps({ layout, activities, now, isPaused }: LifePropsProps)
   );
 }
 
-/** Where the foosball score is shown: on the floor in front of the table, clear of both players. */
-export const foosballFront = (layout: SceneLayout) => {
-  const f = layout.life.foosball;
-  return project(f.x + f.w / 2 + 10, f.y + f.d + 22, 0);
+
+/** Where a game table's score is shown: on the floor in front of the table, clear of both players. */
+export const tableFront = (table: SceneLayout["life"]["foosball"]) => project(table.x + table.w / 2 + 10, table.y + table.d + 22, 0);
+
+/** Where a pinball game's score is shown: on the machine's back glass, like its own display (under the talk bubbles above the faces). */
+export const pinballDisplay = (layout: SceneLayout) => {
+  const m = layout.life.pinball;
+  return project(m.x + m.w / 2, m.y + 7, 52);
 };
