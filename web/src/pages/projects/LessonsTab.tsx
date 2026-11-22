@@ -14,7 +14,7 @@ import { useToast } from "@astryxdesign/core/Toast";
 import { VStack } from "@astryxdesign/core/VStack";
 import { VisuallyHidden } from "@astryxdesign/core/VisuallyHidden";
 import { AcademicCapIcon, MagnifyingGlassIcon, PlusIcon } from "@heroicons/react/24/outline";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { AddLessonResult, LessonsList, RepoLessonsView } from "../../../../src/routes/lessons.js";
 import type { Lesson } from "../../../../src/team/lessons.js";
 import { ConfirmButton } from "../../components/ConfirmButton";
@@ -31,6 +31,27 @@ type LessonRow = Lesson & Record<string, unknown>;
 /** Any repository id, GitLab's nested ones included, goes in the query. */
 const lessonsPath = (repo: string) => `/api/lessons/repo?repo=${encodeURIComponent(repo)}`;
 const ALL_AREAS = "";
+
+/** A repository's lessons, or what went wrong loading them. */
+export type LessonsAnswer = { view: RepoLessonsView } | { error: string };
+
+/**
+ * Loads one repository's lessons for the tab. The answer goes to `show` only
+ * if that repository is still the one on screen: a slow answer that comes
+ * back after a switch must not replace the current one.
+ */
+export async function loadRepoLessons(
+  name: string,
+  o: { get: (path: string) => Promise<RepoLessonsView>; onScreen: () => string | undefined; show: (answer: LessonsAnswer) => void },
+): Promise<void> {
+  let answer: LessonsAnswer;
+  try {
+    answer = { view: await o.get(lessonsPath(name)) };
+  } catch (err) {
+    answer = { error: errorMessage(err) };
+  }
+  if (o.onScreen() === name) o.show(answer);
+}
 
 /** The lessons library: what earlier tasks on each repository got wrong, or nearly did, by area. */
 export function LessonsTab() {
@@ -58,14 +79,20 @@ export function LessonsTab() {
     }
   }, []);
 
-  const loadRepo = useCallback(async (name: string) => {
-    try {
-      setView(await api.get<RepoLessonsView>(lessonsPath(name)));
-      setViewError(undefined);
-    } catch (err) {
-      setViewError(errorMessage(err));
-    }
-  }, []);
+  // The repository on screen (set by the effect below): answers for any other are dropped.
+  const shown = useRef<string>(undefined);
+  const loadRepo = useCallback(
+    (name: string) =>
+      loadRepoLessons(name, {
+        get: (path) => api.get<RepoLessonsView>(path),
+        onScreen: () => shown.current,
+        show: (answer) => {
+          if ("view" in answer) setView(answer.view);
+          setViewError("error" in answer ? answer.error : undefined);
+        },
+      }),
+    [],
+  );
 
   useEffect(() => {
     void reloadList();
@@ -81,6 +108,7 @@ export function LessonsTab() {
   const selected = repo ?? (list ? repos[0] : undefined);
 
   useEffect(() => {
+    shown.current = selected;
     setView(undefined);
     setArea(ALL_AREAS);
     setQuery("");

@@ -8,7 +8,7 @@ import { type GitHubConnection, connectionForRepo, describeAllowed, githubConnec
 import type { MemoryRepo } from "./memory.js";
 import { MONDAY_READ_TOOL_NAMES, type MondayToolOptions, mondayTools } from "../integrations/monday/monday.js";
 import type { NotesRepo } from "./notes.js";
-import type { LessonsRepo } from "../team/lessons.js";
+import { type LessonsRepo, byRepeats } from "../team/lessons.js";
 import type { AddAttachment, StartRepoTask } from "./pointer-types.js";
 import { prRef } from "../tasks/pr-feedback.js";
 import {
@@ -531,7 +531,7 @@ async function lessonsText(o: PointerToolOptions, repo: string): Promise<string>
     return `\n\nThe lessons library could not be read: ${errorText(err)}`;
   }
   if (!found?.lessons.length) return "";
-  const lessons = [...found.lessons].sort((a, b) => b.seen - a.seen || b.lastSeenAt.localeCompare(a.lastSeenAt));
+  const lessons = [...found.lessons].sort(byRepeats);
   const shown = lessons.slice(0, LESSONS_IN_NOTES_READ).map((l) => `- [${l.area}] ${l.lesson}${l.seen > 1 ? ` (seen ${l.seen} times)` : ""}`);
   const more = lessons.length - shown.length;
   return (

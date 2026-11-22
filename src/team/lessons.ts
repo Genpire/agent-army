@@ -11,12 +11,14 @@ import { LESSON_AREA_MAX_CHARS, LESSON_TEXT_MAX_CHARS, type LessonsContext, type
  * The lessons library: what earlier tasks on a repository got wrong, or nearly
  * did, and how to avoid it, filed by area. Unlike project notes (one curated
  * text), lessons accumulate: up to LESSONS_MAX_PER_REPO per repository, the
- * same lesson reported again counted as seen again (a repeated mistake).
+ * same lesson reported again by another task counted as seen again (a
+ * repeated mistake).
  *
- * Before each repo task the worker writes the repository's lessons to a
- * folder next to the checkout (writeLessonsFolder): INDEX.md and one file per
- * area, which the team greps before it works on an area. After each run it
- * saves the lessons in the team's report (saveTaskLessons). Stored encrypted,
+ * Before each repo task, and again before each of its extra rounds, the
+ * worker writes the repository's lessons to a folder next to the checkout
+ * (writeLessonsFolder): INDEX.md and one file per area, which the team greps
+ * before it works on an area. After each run it saves the lessons in the
+ * team's report (saveTaskLessons). Stored encrypted,
  * one blob per repository under lessons/, named like the notes (notes.ts).
  *
  * agents.ts imports this module for lessonsSection, so the limits imported
@@ -93,7 +95,7 @@ export function lessonMatchKey(text: string): string {
 }
 
 /** The most repeated first, then the most recently seen. */
-const byRepeats = (a: Lesson, b: Lesson) => b.seen - a.seen || b.lastSeenAt.localeCompare(a.lastSeenAt);
+export const byRepeats = (a: Lesson, b: Lesson) => b.seen - a.seen || b.lastSeenAt.localeCompare(a.lastSeenAt);
 
 /** Beyond the cap, the lessons seen longest ago go first (the fewest times seen, then the oldest, on a tie). */
 function capped(lessons: Lesson[]): Lesson[] {
@@ -113,10 +115,17 @@ export interface AddLessonsOptions {
   redact?: (text: string) => string;
 }
 
+/** `added`: the new lessons; `repeated`: the ones already in the library. */
 export type AddLessonsResult = { ok: true; added: Lesson[]; repeated: Lesson[] } | { ok: false; error: string };
 
 export class LessonsRepo {
-  /** Serialises writes so the worker's, the admin page's and a delete's read-modify-write never lose each other. */
+  /**
+   * Serialises writes within one process, so its read-modify-writes never
+   * lose each other. Each repo task's worker and the server are separate
+   * processes: each write reads the stored lessons just before it, with
+   * nothing slow in between, so only writes in the same moment can collide
+   * (the store has no conditional write to rule that out).
+   */
   private chain: Promise<unknown> = Promise.resolve();
 
   constructor(
@@ -137,9 +146,12 @@ export class LessonsRepo {
   /**
    * Adds lessons, each redacted, cleaned and filed under its normalised area.
    * One that matches a stored lesson (lessonMatchKey) is not added again: it
-   * is seen once more, now, and moves to its area when it had none. The same
-   * lesson twice in one call counts once. Lessons with no text left after
-   * cleaning are skipped (nothing is written when none is left).
+   * is seen once more, now, and moves to its area when it had none. Reported
+   * again by the task that last reported it (each round of a task reports
+   * its lessons), only the time it was last seen changes: one task is not a
+   * repeated mistake. The same lesson twice in one call counts once. Lessons
+   * with no text left after cleaning are skipped (nothing is written when
+   * none is left).
    */
   add(repo: string, items: Pick<ReportedLesson, "area" | "lesson">[], o: AddLessonsOptions): Promise<AddLessonsResult> {
     return this.exclusive(async () => {
@@ -161,7 +173,8 @@ export class LessonsRepo {
         const area = normaliseArea(redact(item.area));
         const existing = byKey.get(key);
         if (existing) {
-          existing.seen += 1;
+          const sameTask = o.source === "task" && taskId !== undefined && existing.taskId === taskId;
+          if (!sameTask) existing.seen += 1;
           existing.lastSeenAt = now;
           if (taskId) existing.taskId = taskId;
           if (existing.area === DEFAULT_AREA && area !== DEFAULT_AREA) existing.area = area;

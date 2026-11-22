@@ -68,7 +68,9 @@ describe("the Failure Reviewer", () => {
     expect(fr.instructions).toContain("`git diff` against the base branch you are given");
     expect(fr.instructions).toContain("read the code paths it touches end to end");
     expect(fr.instructions).toContain("run a targeted test or check");
-    expect(fr.instructions).toContain("Do not modify files in the checkout. Write a throwaway script only outside the repository, or not at all.");
+    expect(fr.instructions).toContain(
+      "Do not modify files in the checkout. Write a throwaway script only in a temporary folder outside the checkout, and remove it when you are done.",
+    );
     expect(fr.instructions).toContain('"VERDICT: approve" or "VERDICT: changes requested"');
     expect(fr.instructions).toContain("file, line, the failure scenario (what happens, step by step), severity (blocker / should-fix / nit) and a concrete fix");
   });
@@ -105,9 +107,17 @@ describe("the sharpened default roles", () => {
 
   it("QA proves each test red then green with the safe undo, and reports the proof", () => {
     const qa = agent("qa").instructions;
-    expect(qa).toContain("`git stash push -- <product files only>` (never the tests)");
+    expect(qa).toContain("Note `git diff --stat` and `git status --short`");
+    expect(qa).toContain("`git stash push -u -m red-green-proof -- <product files only>` (never the tests; -u undoes a new product file too)");
+    expect(qa).not.toContain("`git stash push -- ");
     expect(qa).toContain("see it fail, restore it with `git stash pop`, run the test again and see it pass");
-    expect(qa).toContain("check `git diff --stat` is what it was");
+    expect(qa).toContain("check `git diff --stat` and `git status --short` are what they were");
+    expect(qa).toContain(
+      "If the change is already committed (a later round), undo it with `git checkout <base> -- <the changed product files>` (deleting the ones it added) and put it back with `git checkout HEAD -- <those files>`, stashing any uncommitted edits to them first (`git stash push -m red-green-proof -- <those files>`) and popping them after.",
+    );
+    expect(qa).toContain(
+      "The proof runs on its own: Pointer has it done after the other verifiers have reported, so that nobody else works in or runs the checkout while the change is undone.",
+    );
     expect(qa).toContain("Never leave the change undone and never commit in between.");
     expect(qa).toContain("A test that passes both ways proves nothing: fix the test.");
     expect(qa).toContain("A run that showed no result (no tests found, nothing printed, cut off) is not a pass");

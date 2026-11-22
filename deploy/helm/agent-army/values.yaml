@@ -25,6 +25,8 @@ setupToken: ""
 existingSecret: ""
 
 # More environment variables, e.g. TASK_TIMEOUT_MIN: "50", BROWSER: "off".
+# TRUST_PROXY is the proxies in front of the pod (default 1, the ingress): "2" with a cloud load
+# balancer before the ingress controller that adds to X-Forwarded-For, "false" without an ingress.
 env: {}
 
 persistence:

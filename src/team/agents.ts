@@ -199,13 +199,13 @@ How to run a task:
 3. For a change:
    - Implement: brief the agent that can change code and whose description best fits the work, with precise scope and acceptance criteria. Split large work into several pieces and hand them over one at a time.
    - Verify: send the result to agents other than the one that made it: one whose description fits reviewing, one whose description fits testing, and one whose description fits failure cases (what happens when things go wrong), when the team has them (at least one). Give them the base branch so they can inspect the diff.${browserVerify}
-   - Test proof: every test added or changed for the request must be shown to catch the problem. The testing agent runs it with the product change undone (it fails), then with the change (it passes). A test that passes both ways proves nothing: have it fixed. Safe undo: \`git stash push -- <product files only>\`, run the test, \`git stash pop\`, then check \`git diff --stat\` is back to what it was; never leave the change undone and never commit in between.
+   - Test proof: every test added or changed for the request must be shown to catch the problem. The testing agent runs it with the product change undone (it fails), then with the change (it passes). A test that passes both ways proves nothing: have it fixed. Safe undo: \`git stash push -u -m red-green-proof -- <product files only>\` (-u undoes a new product file too), run the test, \`git stash pop\`, then check \`git diff --stat\` and \`git status --short\` are back to what they were. If the change is already committed (a later round), undo it for the run with \`git checkout <base> -- <the changed product files>\` (deleting the ones it added) and put it back with \`git checkout HEAD -- <those files>\`, stashing any uncommitted edits to them first (\`git stash push -m red-green-proof -- <those files>\`) and popping them after. The proof runs on its own: have it done after the other verifiers have reported, and let no other agent work in or run the checkout while the change is undone. Never leave the change undone and never commit in between.
    - Checks of checks: when the work adds or changes a check (a validator, guard, permission check, lint rule, CI step, or a test helper that decides pass or fail), add tests showing it fails on bad input and passes on good input.
    - Feed blockers and failures back to the implementing agent and repeat until the verifiers approve and the checks pass, for at most three rounds.
    - If no listed agent fits a step (for example nobody reviews or tests), skip that step, check what you can yourself (read the diff, run the tests), and say what was skipped in verification and risks.
    - If no listed agent can change code and the request needs code changes, do not work around it: report it as blocked and explain that the owner must enable an agent with "Change code" access on the admin page.
 4. You do not edit files yourself. You coordinate, check your team's claims against the actual diff (\`git diff\`), and decide when it is done. Never relay an agent's "tests pass" without the command and its real output: when the output is missing or looks wrong (no tests found, nothing printed, cut off), run the check again yourself (you have Bash) or have an agent run it.
-5. Leave the work in the working tree (commits are optional). The platform commits anything uncommitted, pushes the branch and opens the ${pr} for a human to review and merge.
+5. Leave the work uncommitted in the working tree: do not commit it, so the test proof's undo works on it. The platform commits it, pushes the branch and opens the ${pr} for a human to review and merge.
 6. At the end of every task (changes, answers and blocked tasks alike), fill your report:
    - checks: every check command run on the final state of the work, with its real outcome. A run that showed no result (no tests found, no output, cut off) is "no-result", never "pass".
    - testProof: for each test added or changed, the commands and both results (failing with the change undone, passing with it), or why it did not apply.
@@ -329,6 +329,9 @@ export interface Report {
 
 const FALLBACK_TITLE = "Pointer update";
 
+/** A report's text field when it is text; anything else counts as missing. */
+const textOr = (v: unknown, fallback: string): string => (typeof v === "string" ? v : fallback);
+
 const oneLineText = (v: unknown, max: number): string => (typeof v === "string" ? v.replace(/\s+/g, " ").trim().slice(0, max) : "");
 
 /** The checks in a report, kept only when well formed: a command and a known outcome; clipped to the limits. */
@@ -361,18 +364,19 @@ export function parseReportedLessons(value: unknown): ReportedLesson[] {
   return out;
 }
 
+/** The team's structured output as the worker trusts it: text fields only when they are text, a known kind, clipped. A report without a summary or kind is the fallback text. */
 export function parseReport(structured: unknown, fallbackText: string): Report {
-  const s = structured as (Partial<Omit<Report, "checks" | "lessons">> & { checks?: unknown; lessons?: unknown }) | undefined;
+  const s = structured as Record<string, unknown> | null | undefined;
   if (s && typeof s === "object" && typeof s.summary === "string" && typeof s.kind === "string") {
     return {
       kind: s.kind === "change" || s.kind === "blocked" ? s.kind : "answer",
-      title: (s.title ?? FALLBACK_TITLE).slice(0, 120),
+      title: textOr(s.title, FALLBACK_TITLE).slice(0, 120),
       summary: s.summary,
-      verification: s.verification ?? "",
-      testProof: typeof s.testProof === "string" ? s.testProof.trim().slice(0, TEST_PROOF_MAX_CHARS) : "",
+      verification: textOr(s.verification, ""),
+      testProof: textOr(s.testProof, "").trim().slice(0, TEST_PROOF_MAX_CHARS),
       checks: parseReportedChecks(s.checks),
-      risks: s.risks ?? "",
-      projectNotes: typeof s.projectNotes === "string" ? s.projectNotes : "",
+      risks: textOr(s.risks, ""),
+      projectNotes: textOr(s.projectNotes, ""),
       lessons: parseReportedLessons(s.lessons),
     };
   }

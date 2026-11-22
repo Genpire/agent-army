@@ -26,6 +26,7 @@ import {
   recheckPrSection,
   recheckSection,
   recheckSummary,
+  reportedFailure,
   restoreWorkTree,
   runRecheck,
 } from "../../src/tasks/recheck.js";
@@ -34,6 +35,8 @@ import { gitRunner, makeRedactor } from "../../src/tasks/worker.js";
 import { recheckRows } from "../../web/src/pages/chat/labels.js";
 
 const pass = (command: string, summary = ""): ReportedCheck => ({ command, outcome: "pass", summary });
+/** No secrets to redact. */
+const asIs = (text: string) => text;
 
 const dirs: string[] = [];
 const tempDir = async (prefix: string) => {
@@ -125,6 +128,22 @@ describe("which checks the platform runs again", () => {
     await expect(stat(join(cwd, "pushed"))).rejects.toThrow();
   });
 
+  it("never runs a command the report's redaction changed: it is not the one the team ran", async () => {
+    const plan = planRecheck([pass("DATABASE_URL=[redacted] npm test"), pass("npm run lint")], "");
+    expect(plan.checks.map((c) => Boolean(c.withheld))).toEqual([true, false]);
+
+    const cwd = await tempDir("army-recheck-redacted-");
+    const results = await runRecheck({
+      checks: planRecheck([pass("touch ran-it [redacted]")], "").checks,
+      cwd,
+      env: shellEnv(cwd),
+      budgetMs: 10_000,
+      run: runCli,
+    });
+    expect(results).toEqual([expect.objectContaining({ outcome: "not-run", note: expect.stringContaining("it holds a secret the platform hides") })]);
+    await expect(stat(join(cwd, "ran-it"))).rejects.toThrow();
+  });
+
   it("gets as long as the limit allows, never past the deadline less a margin", () => {
     expect(recheckBudgetMs(10, undefined, 0)).toBe(600_000);
     expect(recheckBudgetMs(10, 300_000, 0)).toBe(300_000 - RECHECK_MARGIN_MS);
@@ -148,6 +167,11 @@ describe("telling a pass from no result", () => {
     ["No tests executed!"],
     ["Tests:       0 total\nTime:        0.3 s"],
     ["ℹ tests 0\nℹ pass 0"],
+    // Go, when no test matched -run: its "ok" line is no evidence.
+    ["ok  \texample.com/pkg\t0.01s [no tests to run]"],
+    ["testing: warning: no tests to run\nPASS\nok  \texample.com/pkg\t(cached) [no tests to run]"],
+    // Maven's Surefire.
+    ["[INFO] Tests run: 0, Failures: 0, Errors: 0, Skipped: 0\n[INFO] BUILD SUCCESS"],
   ])("finds no result in %j", (output) => {
     expect(noResultReason("npm test", output)).toMatch(/^no tests ran: “.+”$/);
   });
@@ -167,8 +191,42 @@ describe("telling a pass from no result", () => {
     ["@acme/docs: No test files found\n@acme/web: Tests  31 passed (31)"],
     // A test named after the message it checks.
     ["✓ shows 'no tests found' when the suite is empty\n 1 passed"],
+    // One Go package where no test matched, one whose tests ran.
+    ["ok  \texample.com/a\t0.01s [no tests to run]\nok  \texample.com/b\t0.02s"],
+    // A Maven module without tests next to one whose tests ran.
+    ["[INFO] Tests run: 0, Failures: 0, Errors: 0, Skipped: 0\n[INFO] Tests run: 12, Failures: 0, Errors: 0, Skipped: 0\n[INFO] BUILD SUCCESS"],
   ])("finds a result in %j", (output) => {
     expect(noResultReason("npm test", output)).toBeUndefined();
+  });
+
+  it.each([
+    ["Tests:       3 failed, 9 passed, 12 total"],
+    ["  9 passing (40ms)\n  1 failing"],
+    ["Ran 4 tests in 0.1s\n\nFAILED (failures=2)"],
+    ["Ran 4 tests in 0.1s\n\nFAILED (errors=1)"],
+    ["==== 1 failed, 12 passed in 0.40s ===="],
+    ["Test Files  1 failed | 2 passed (3)\n     Tests  2 failed | 40 passed (42)"],
+    ["Tests: 1,024 failed, 3,000 passed"],
+    ["12 tests completed, 2 tests failed"],
+    ["10 examples, 2 failures"],
+    ["[ERROR] Tests run: 5, Failures: 2, Errors: 0, Skipped: 0"],
+  ])("finds failures in %j, whatever the exit code", (output) => {
+    expect(reportedFailure(output)).toMatch(/^exit code 0, but the output says tests failed: “.+”$/);
+  });
+
+  it.each([
+    ["Tests:       12 passed, 12 total"],
+    ["Test Files  3 passed (3)\n     Tests  0 failed | 40 passed (40)"],
+    ["12 tests completed, 0 tests failed"],
+    ["10 examples, 0 failures"],
+    ["test result: ok. 3 passed; 0 failed; 0 ignored"],
+    ["[INFO] Tests run: 5, Failures: 0, Errors: 0, Skipped: 0"],
+    // A passing test whose name says it, and a count quoted in a log line.
+    ["✓ reports 2 failed checks\n 1 passed"],
+    ["ok 1 - says 3 failed\n1..1"],
+    ["log: the summary was '2 failed'\n 1 passed"],
+  ])("finds no failure in %j", (output) => {
+    expect(reportedFailure(output)).toBeUndefined();
   });
 
   it("calls a silent test run no result, and a silent type check or linter a pass", () => {
@@ -196,6 +254,14 @@ describe("running the checks again (real shell)", () => {
 
     // A test command that exits 0 and prints nothing showed no result (`test` is the shell's own).
     expect((await rerun(["test -d ."]))[0]).toMatchObject({ outcome: "no-result", note: "it printed nothing" });
+
+    // A pipe fails when its first command does (pipefail), not only when the last one does.
+    const [piped] = await rerun(["sh -c 'echo building; exit 2' 2>&1 | tail -50"]);
+    expect(piped).toMatchObject({ outcome: "failed", note: "exit code 2", output: "building" });
+    // Exit code 0 with output that says tests failed is a failure.
+    const [ignored] = await rerun(["echo 'Tests:       3 failed, 9 passed, 12 total' || true"]);
+    expect(ignored).toMatchObject({ outcome: "failed", note: "exit code 0, but the output says tests failed: “Tests: 3 failed, 9 passed, 12 total”" });
+    expect(isMismatch(ignored!)).toBe(true);
 
     // No bash on PATH: it could not start.
     const cwd = await tempDir("army-recheck-nobash-");
@@ -341,12 +407,15 @@ describe("the results next to the team's claims", () => {
   });
 
   it("says in one line how the run went, naming the check the team said passed", () => {
-    const passed = recheckSummary(run({ first: [result({}), result({ command: "npx tsc --noEmit" })] }));
+    const passed = recheckSummary(run({ first: [result({}), result({ command: "npx tsc --noEmit" })] }), asIs);
     expect(passed).toMatchObject({ state: "passed", mismatches: [], fixRounds: 0 });
     expect(recheckLine(passed)).toBe("**Checked again:** 2 of 2 passed.");
     expect(recheckLine(passed, "slack")).toBe("*Checked again:* :white_check_mark: 2 of 2 passed.");
 
-    const doubted = recheckSummary(run({ first: [result({ outcome: "no-result", note: "it printed nothing" }), result({ command: "npm run lint", claimed: "fail", outcome: "failed" })] }));
+    const doubted = recheckSummary(
+      run({ first: [result({ outcome: "no-result", note: "it printed nothing" }), result({ command: "npm run lint", claimed: "fail", outcome: "failed" })] }),
+      asIs,
+    );
     expect(doubted).toMatchObject({ state: "failed", mismatches: ["npm test"] });
     expect(recheckLine(doubted, "slack")).toBe(
       "*Checked again:* :warning: 0 of 2 passed: `npm test` showed no result, though the team said it passed and `npm run lint` failed.",
@@ -354,26 +423,40 @@ describe("the results next to the team's claims", () => {
 
     // Mended by the fix round: the line still says the team's claim did not hold at first.
     const first = [result({ outcome: "failed" })];
-    const mended = recheckSummary(run({ first, final: [result({})], fixRounds: 1 }));
+    const mended = recheckSummary(run({ first, final: [result({})], fixRounds: 1 }), asIs);
     expect(mended).toMatchObject({ state: "passed", mismatches: ["npm test"], fixRounds: 1 });
     expect(recheckLine(mended)).toBe("**Checked again:** 1 of 1 passed after a fix round. Before the fix round, `npm test` did not pass, though the team said it did.");
     expect(recheckPrSection(run({ first, final: [result({})], fixRounds: 1 }))).toContain(
       "The first time, `npm test` failed (the team said it passed). The team had one round to fix it; these are the results after that round.",
     );
 
-    expect(recheckLine(recheckSummary(run({ first: [] })))).toBe(
+    expect(recheckLine(recheckSummary(run({ first: [] }), asIs))).toBe(
       "**Checked again:** nothing to run: no test command is set for this repository (Repo setup) and the team reported no passing check.",
     );
-    const refused = recheckSummary(run({ first: [result({ command: "gh pr view", outcome: "not-run", note: "refused by the shell guard: no" })] }));
+    const refused = recheckSummary(run({ first: [result({ command: "gh pr view", outcome: "not-run", note: "refused by the shell guard: no" })] }), asIs);
     expect(refused.state).toBe("not-run");
     expect(recheckLine(refused)).toBe("**Checked again:** nothing could be run: `gh pr view` (refused by the shell guard: no).");
-    const slow = recheckSummary(run({ first: [result({}), result({ command: "npm run e2e", outcome: "timed-out", note: "stopped after 10 min" })] }));
+    const slow = recheckSummary(run({ first: [result({}), result({ command: "npm run e2e", outcome: "timed-out", note: "stopped after 10 min" })] }), asIs);
     expect(recheckLine(slow, "slack")).toBe("*Checked again:* :grey_question: 1 of 2 passed: `npm run e2e` timed out.");
     expect(recheckEventText({ command: "npm test", outcome: "failed", note: "exit code 1", claimed: "pass" })).toBe("npm test: failed (exit code 1); the team said passed");
 
     // Pointer's task status says it too.
     const task = { id: "t1", repo: "acme/web", status: "done", createdAt: new Date().toISOString(), instruction: "Fix the sum", channel: "web", recheck: doubted } as Task;
     expect(describeTask(task)).toContain("Checked again by the platform: 0 of 2 passed: `npm test` showed no result, though the team said it passed");
+  });
+
+  it("keeps no secret from the team's commands or notes in the task record", () => {
+    const secret = "sk_live_recheck_summary_0123456789";
+    const command = `API_KEY=${secret} npm test`;
+    const summary = recheckSummary(
+      run({ first: [result({ command, outcome: "failed", note: "exit code 1" })], final: [result({ command, note: `took ${secret}` })], fixRounds: 1 }),
+      makeRedactor([secret]),
+    );
+    expect(JSON.stringify(summary)).not.toContain(secret);
+    expect(summary.checks[0]).toMatchObject({ command: "API_KEY=[redacted] npm test", note: "took [redacted]" });
+    // The mismatch still names the same (redacted) command as the check.
+    expect(summary.mismatches).toEqual(["API_KEY=[redacted] npm test"]);
+    expect(recheckLine(summary)).toContain("Before the fix round, `API_KEY=[redacted] npm test` did not pass");
   });
 
   it("gives the fix round the commands and their real output as data", () => {
@@ -436,6 +519,7 @@ describe("the orchestrator prompt about the checks run again", () => {
     for (const section of [owner, team]) {
       expect(section).toContain("runnable as it is from the repository root: non-interactive and ending on its own (no watch mode, no dev servers, no prompts");
       expect(section).toContain('a check that could not be run, failed, was cut off or ran no tests is not "pass"');
+      expect(section).toContain("Report each check without output filters (no `| tail`, `| head` or `| grep`): the platform runs it as written");
     }
     expect(recheckSection(undefined)).toBe("");
 
