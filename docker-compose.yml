@@ -10,9 +10,11 @@ services:
       MASTER_KEY: ${MASTER_KEY:?set MASTER_KEY in .env (openssl rand -base64 32)}
       # Passed only when set (in .env or the shell); never as an empty default.
       # Unset, a setup token is generated and printed in the log, and the public
-      # address is taken from each request.
+      # address is taken from each request. TRUST_PROXY unset is one proxy in front
+      # (the TLS proxy or tunnel); "false" when clients reach port 8080 directly.
       SETUP_TOKEN:
       PUBLIC_URL:
+      TRUST_PROXY:
       RUNNER: local
       # Optional: see .env.example. Local workers have no hard job deadline, so JOB_TIMEOUT_MIN is not passed.
       TASK_TIMEOUT_MIN: ${TASK_TIMEOUT_MIN:-50}

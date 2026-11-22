@@ -204,6 +204,76 @@ const SKILL_INPUT = z
   })
   .refine((x) => Boolean(x.url) !== Boolean(x.skillMd?.trim()), "Give the GitHub address of a skill's folder, or paste a SKILL.md.");
 
+/** Proxy hops trusted when TRUST_PROXY is unset: every supported deployment has one proxy in front of the app. */
+const DEFAULT_TRUST_PROXY = 1;
+/** No deployment has more proxies in front than this; a larger count is as good as trusting every client. */
+const MAX_TRUST_PROXY_HOPS = 10;
+
+/**
+ * Express's "trust proxy" from TRUST_PROXY: which X-Forwarded-For entry is the
+ * client's address (req.ip, which the throttles count by), and whether
+ * X-Forwarded-Proto is read. Unset or blank: one hop, so the entry the proxy
+ * in front added, the right-most one. A number of hops; "false" (or 0): no
+ * proxy, the socket's address; or addresses, subnets and Express's names
+ * ("loopback, uniquelocal"): the hops from those addresses.
+ *
+ * "true" (any client could name its own address) and anything Express cannot
+ * read fall back to one hop, with a warning, instead of stopping the server:
+ * one hop is right for every supported deployment and never trusts more than
+ * the default does, and other settings (PUBLIC_URL, MAX_PARALLEL) are ignored
+ * the same way.
+ */
+export function trustProxySetting(env: NodeJS.ProcessEnv = process.env): { value: number | false | string; warning?: string } {
+  const text = env.TRUST_PROXY?.trim() ?? "";
+  if (!text) return { value: DEFAULT_TRUST_PROXY };
+  if (/^false$/i.test(text)) return { value: false };
+  if (/^\d+$/.test(text) && Number(text) <= MAX_TRUST_PROXY_HOPS) return { value: Number(text) };
+  const fallback = (problem: string) => ({ value: DEFAULT_TRUST_PROXY, warning: `${problem}, so it is ignored: one proxy hop is trusted.` });
+  if (/^true$/i.test(text)) return fallback("TRUST_PROXY=true would let any client choose its own address (the left-most X-Forwarded-For entry)");
+  const invalid = `TRUST_PROXY is not a number of proxy hops from 0 to ${MAX_TRUST_PROXY_HOPS}, "false", or addresses and names Express trusts (such as "loopback, uniquelocal")`;
+  // Express would read 11 as the address 0.0.0.11.
+  if (/^-?\d+$/.test(text)) return fallback(invalid);
+  try {
+    // Express reads the list when it is set, and throws on an entry that is not an address, a subnet or one of its names.
+    express().set("trust proxy", text);
+  } catch {
+    return fallback(invalid);
+  }
+  return { value: text };
+}
+
+/** Addresses the sign-in throttle keeps at most, as many as the routines tick's limiter. */
+const MAX_THROTTLED_ADDRESSES = 10_000;
+
+/**
+ * The brute-force brake for the unauthenticated routes that check a secret:
+ * `max` attempts per address (req.ip) every `windowMs`, then 429. Windows
+ * all last `windowMs` and start at an address's first attempt, so the map is
+ * in the order they end: each new one first drops those that ended (an
+ * earlier window of the same address among them), and the oldest when
+ * `maxAddresses` are kept, so many addresses cannot grow it without limit.
+ */
+export function attemptThrottle({ max = 10, windowMs = 10 * 60_000, maxAddresses = MAX_THROTTLED_ADDRESSES } = {}) {
+  const attempts = new Map<string, { n: number; resetAt: number }>();
+  const throttle = (req: Request, res: Response, next: NextFunction) => {
+    const key = req.ip ?? "unknown";
+    const now = Date.now();
+    const entry = attempts.get(key);
+    if (entry && entry.resetAt >= now) {
+      if (++entry.n > max) return void res.status(429).json({ error: "Too many attempts. Try again later." });
+      return next();
+    }
+    for (const [k, e] of attempts) {
+      if (e.resetAt >= now && attempts.size < maxAddresses) break;
+      attempts.delete(k);
+    }
+    attempts.set(key, { n: 1, resetAt: now + windowMs });
+    next();
+  };
+  /** The addresses kept, for tests. */
+  return Object.assign(throttle, { size: () => attempts.size });
+}
+
 export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides: AppOverrides = {}) {
   const store = createStore(env);
   const masterKey = await resolveMasterKey(store, env);
@@ -279,7 +349,10 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
 
   const app = express();
   app.disable("x-powered-by");
-  app.set("trust proxy", true);
+  // Which X-Forwarded-For entry is the client (req.ip, which the throttles count by): TRUST_PROXY, one hop by default.
+  const trustProxy = trustProxySetting(env);
+  if (trustProxy.warning) console.warn(`[server] ${trustProxy.warning}`);
+  app.set("trust proxy", trustProxy.value);
 
   // Stopping (SIGTERM, see the end of this file): while the requests in flight finish, new ones are refused,
   // so the platform sends them to the next instance, and the local runner starts no more workers.
@@ -326,16 +399,9 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
     next();
   };
 
-  // Brute-force brake for the two unauthenticated secret-checking routes.
-  const attempts = new Map<string, { n: number; resetAt: number }>();
-  const throttle = (req: Request, res: Response, next: NextFunction) => {
-    const key = req.ip ?? "unknown";
-    const now = Date.now();
-    const entry = attempts.get(key);
-    if (!entry || entry.resetAt < now) attempts.set(key, { n: 1, resetAt: now + 10 * 60_000 });
-    else if (++entry.n > 10) return void res.status(429).json({ error: "Too many attempts. Try again later." });
-    next();
-  };
+  // Brute-force brake for the unauthenticated routes that check a secret (sign-in, setup, password reset and
+  // change, wrong Jira and GitLab webhook secrets): 10 attempts per address every 10 minutes.
+  const throttle = attemptThrottle();
 
   // ---------- Slack events (raw body is needed for the signature) ----------
   const seenEvents = new Set<string>();
