@@ -1,5 +1,7 @@
 import type { Config } from "../core/config.js";
 import { type CodeHostKind, HOST_TERMS } from "../integrations/code-hosts/repo-id.js";
+import { recheckSection } from "../tasks/recheck.js";
+import { lessonsSection } from "./lessons.js";
 import { REPO_RULES, hasWriteAgent, rosterText } from "./team.js";
 
 /** A file the requester shared (Slack or monday.com), written outside the checkout for the team to read. */
@@ -28,6 +30,26 @@ export interface OrchestratorContext {
   repoSetup?: RepoSetupContext;
   /** The repository's code host, for what the prompt calls the change request ("merge request" on GitLab); GitHub when absent. */
   host?: CodeHostKind;
+  /** The repository's lessons library, written outside the checkout for the team to read (see lessons.ts). Absent = none yet. */
+  lessons?: LessonsContext;
+  /** The platform runs the team's checks again after it finishes (see recheck.ts). Absent = it does not. */
+  recheck?: RecheckContext;
+}
+
+/** What the prompt says about the lessons library written out for this run (lessons.ts). */
+export interface LessonsContext {
+  /** Absolute path of the folder the lessons were written to: outside the checkout. */
+  dir: string;
+  /** How many lessons the repository has in all. */
+  count: number;
+  /** The areas the lessons are filed under, with how many each has, most first. */
+  areas: { area: string; count: number }[];
+}
+
+/** What the prompt says about the platform's own run of the checks after the team (recheck.ts). */
+export interface RecheckContext {
+  /** The owner's test command for this repository (Repo setup), run instead of the team's own; empty = the team's passing checks are run. */
+  testCommand: string;
 }
 
 /** What the team is told about the owner's setup for the repository (see repo-setup.ts). */
@@ -184,16 +206,46 @@ How to run a task:
 6. At the end of every task (changes, answers and blocked tasks alike), fill projectNotes in your report with ${PROJECT_NOTES_GUIDANCE} The platform stores them outside the repository: never write them into a file in the checkout.
 
 If the request is ambiguous, pick the most reasonable reading and state the assumption. If it is unsafe, impossible or needs a decision only a human can make (credentials, destructive data changes, product direction), stop and report it as blocked rather than improvising.
-${notesSection}${filesSection}${setupSection}${browserChecks}${ownerInstructions ? `\nInstructions from the owner (the ground rules below take precedence):\n${ownerInstructions}\n` : ""}${REPO_RULES}
+${notesSection}${lessonsSection(context.lessons)}${recheckSection(context.recheck)}${filesSection}${setupSection}${browserChecks}${ownerInstructions ? `\nInstructions from the owner (the ground rules below take precedence):\n${ownerInstructions}\n` : ""}${REPO_RULES}
 
 Your final answer is read in Slack and becomes the ${pr} description: be concrete and brief. In verification, give the checks actually run with their real results, and each verifying agent's verdict.`;
+}
+
+/** Limits on what a report may carry beyond its text (parseReport clips to them). */
+export const REPORTED_CHECKS_MAX = 10;
+export const CHECK_COMMAND_MAX_CHARS = 500;
+export const CHECK_SUMMARY_MAX_CHARS = 300;
+export const REPORTED_LESSONS_MAX = 10;
+export const LESSON_AREA_MAX_CHARS = 60;
+export const LESSON_TEXT_MAX_CHARS = 600;
+export const TEST_PROOF_MAX_CHARS = 3000;
+
+export const CHECK_OUTCOMES = ["pass", "fail", "no-result"] as const;
+export type CheckOutcome = (typeof CHECK_OUTCOMES)[number];
+
+/** A check the team ran (tests, build, type check, lint), as it reports it. The platform runs the passing ones again (recheck.ts). */
+export interface ReportedCheck {
+  /** The exact shell command, run from the repository root. */
+  command: string;
+  /** pass = it ran and succeeded; fail = it ran and failed; no-result = it ran but showed no result (no tests ran, no output, cut off). */
+  outcome: CheckOutcome;
+  /** The result in one line, e.g. "212 passed, 0 failed". */
+  summary: string;
+}
+
+/** A lesson the task taught, for the repository's lessons library (lessons.ts). */
+export interface ReportedLesson {
+  /** The part of the project it is about: a folder, module or topic, e.g. "billing", "src/auth", "migrations". */
+  area: string;
+  /** What went wrong or nearly did, and how to avoid it next time: one or two sentences. */
+  lesson: string;
 }
 
 /** Structured final report the worker turns into the Slack message and PR. */
 export const REPORT_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["kind", "title", "summary", "verification", "risks", "projectNotes"],
+  required: ["kind", "title", "summary", "verification", "testProof", "checks", "risks", "projectNotes", "lessons"],
   properties: {
     kind: {
       type: "string",
@@ -206,10 +258,48 @@ export const REPORT_SCHEMA = {
       type: "string",
       description: "Checks actually run and their real results, and the verdicts of the agents who verified.",
     },
+    testProof: {
+      type: "string",
+      description:
+        'How each test added or changed for this request was shown to catch the problem: the command run with the change undone and its failing result, then with the change and its passing result. Or why that did not apply (no tests changed, an answer, blocked). At most 3000 characters.',
+    },
+    checks: {
+      type: "array",
+      description:
+        "Every check command the team ran on the final state of the work (tests, build, type check, lint), with its real outcome; at most 10. The platform runs the passing ones again after you finish and shows any that do not match. Empty for an answer or when nothing could be run.",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["command", "outcome", "summary"],
+        properties: {
+          command: { type: "string", description: "The exact shell command, as run from the repository root." },
+          outcome: {
+            type: "string",
+            enum: [...CHECK_OUTCOMES],
+            description: "pass = ran and succeeded; fail = ran and failed; no-result = ran but showed no result (no tests ran, no output, cut off).",
+          },
+          summary: { type: "string", description: 'The result in one line, e.g. "212 passed, 0 failed".' },
+        },
+      },
+    },
     risks: { type: "string", description: "Known risks, assumptions made, and follow-ups. Empty string if none." },
     projectNotes: {
       type: "string",
       description: `Return ${PROJECT_NOTES_GUIDANCE}`,
+    },
+    lessons: {
+      type: "array",
+      description:
+        "At most 10 lessons this task taught for the repository's lessons library: mistakes made or nearly made (by an agent or in the request) and how to avoid them next time. Each is specific to this project, not general advice. No secrets. Empty when there are none.",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["area", "lesson"],
+        properties: {
+          area: { type: "string", description: 'The part of the project it is about: a folder, module or topic, e.g. "billing", "src/auth", "migrations".' },
+          lesson: { type: "string", description: "What went wrong or nearly did, and how to avoid it: one or two sentences." },
+        },
+      },
     },
   },
 } as const;
@@ -219,23 +309,64 @@ export interface Report {
   title: string;
   summary: string;
   verification: string;
+  /** How the new or changed tests were shown to catch the problem (red, then green), or why it did not apply. */
+  testProof: string;
+  /** The checks the team ran on the final state of the work, as it reports them. */
+  checks: ReportedCheck[];
   risks: string;
   /** Full updated project notes, or "" for unchanged. */
   projectNotes: string;
+  /** Lessons for the repository's lessons library. */
+  lessons: ReportedLesson[];
 }
 
 const FALLBACK_TITLE = "Pointer update";
 
+const oneLineText = (v: unknown, max: number): string => (typeof v === "string" ? v.replace(/\s+/g, " ").trim().slice(0, max) : "");
+
+/** The checks in a report, kept only when well formed: a command and a known outcome; clipped to the limits. */
+export function parseReportedChecks(value: unknown): ReportedCheck[] {
+  if (!Array.isArray(value)) return [];
+  const out: ReportedCheck[] = [];
+  for (const item of value) {
+    if (out.length >= REPORTED_CHECKS_MAX) break;
+    if (!item || typeof item !== "object") continue;
+    const c = item as Record<string, unknown>;
+    const command = typeof c.command === "string" ? c.command.trim().slice(0, CHECK_COMMAND_MAX_CHARS) : "";
+    if (!command || !CHECK_OUTCOMES.includes(c.outcome as CheckOutcome)) continue;
+    out.push({ command, outcome: c.outcome as CheckOutcome, summary: oneLineText(c.summary, CHECK_SUMMARY_MAX_CHARS) });
+  }
+  return out;
+}
+
+/** The lessons in a report, kept only when they have text; clipped to the limits. */
+export function parseReportedLessons(value: unknown): ReportedLesson[] {
+  if (!Array.isArray(value)) return [];
+  const out: ReportedLesson[] = [];
+  for (const item of value) {
+    if (out.length >= REPORTED_LESSONS_MAX) break;
+    if (!item || typeof item !== "object") continue;
+    const l = item as Record<string, unknown>;
+    const lesson = oneLineText(l.lesson, LESSON_TEXT_MAX_CHARS);
+    if (!lesson) continue;
+    out.push({ area: oneLineText(l.area, LESSON_AREA_MAX_CHARS), lesson });
+  }
+  return out;
+}
+
 export function parseReport(structured: unknown, fallbackText: string): Report {
-  const s = structured as Partial<Report> | undefined;
+  const s = structured as (Partial<Omit<Report, "checks" | "lessons">> & { checks?: unknown; lessons?: unknown }) | undefined;
   if (s && typeof s === "object" && typeof s.summary === "string" && typeof s.kind === "string") {
     return {
       kind: s.kind === "change" || s.kind === "blocked" ? s.kind : "answer",
       title: (s.title ?? FALLBACK_TITLE).slice(0, 120),
       summary: s.summary,
       verification: s.verification ?? "",
+      testProof: typeof s.testProof === "string" ? s.testProof.trim().slice(0, TEST_PROOF_MAX_CHARS) : "",
+      checks: parseReportedChecks(s.checks),
       risks: s.risks ?? "",
       projectNotes: typeof s.projectNotes === "string" ? s.projectNotes : "",
+      lessons: parseReportedLessons(s.lessons),
     };
   }
   return {
@@ -243,7 +374,10 @@ export function parseReport(structured: unknown, fallbackText: string): Report {
     title: FALLBACK_TITLE,
     summary: fallbackText || "(no report produced)",
     verification: "",
+    testProof: "",
+    checks: [],
     risks: "",
     projectNotes: "",
+    lessons: [],
   };
 }

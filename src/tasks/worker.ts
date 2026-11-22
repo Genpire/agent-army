@@ -1750,6 +1750,7 @@ export async function main(): Promise<void> {
           [
             report.summary,
             report.verification && `### Verification\n${report.verification}`,
+            report.testProof && `### How the tests were shown to catch the problem\n${report.testProof}`,
             report.risks && `### Risks and follow-ups\n${report.risks}`,
             screenshotsSection(shotsForPr(), where),
             footer,
