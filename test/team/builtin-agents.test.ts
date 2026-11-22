@@ -108,12 +108,12 @@ describe("the sharpened default roles", () => {
   it("QA proves each test red then green with the safe undo, and reports the proof", () => {
     const qa = agent("qa").instructions;
     expect(qa).toContain("Note `git diff --stat` and `git status --short`");
-    expect(qa).toContain("`git stash push -u -- <product files only>` (never the tests; -u undoes a new product file too)");
+    expect(qa).toContain("`git stash push -u -m red-green-proof -- <product files only>` (never the tests; -u undoes a new product file too)");
     expect(qa).not.toContain("`git stash push -- ");
     expect(qa).toContain("see it fail, restore it with `git stash pop`, run the test again and see it pass");
     expect(qa).toContain("check `git diff --stat` and `git status --short` are what they were");
     expect(qa).toContain(
-      "If the change is already committed (a later round), undo it with `git checkout <base> -- <the changed product files>` (deleting the ones it added) and put it back with `git checkout HEAD -- <those files>`, stashing any uncommitted edits to them first and popping them after.",
+      "If the change is already committed (a later round), undo it with `git checkout <base> -- <the changed product files>` (deleting the ones it added) and put it back with `git checkout HEAD -- <those files>`, stashing any uncommitted edits to them first (`git stash push -m red-green-proof -- <those files>`) and popping them after.",
     );
     expect(qa).toContain(
       "The proof runs on its own: Pointer has it done after the other verifiers have reported, so that nobody else works in or runs the checkout while the change is undone.",

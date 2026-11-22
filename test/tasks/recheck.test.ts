@@ -128,6 +128,22 @@ describe("which checks the platform runs again", () => {
     await expect(stat(join(cwd, "pushed"))).rejects.toThrow();
   });
 
+  it("never runs a command the report's redaction changed: it is not the one the team ran", async () => {
+    const plan = planRecheck([pass("DATABASE_URL=[redacted] npm test"), pass("npm run lint")], "");
+    expect(plan.checks.map((c) => Boolean(c.withheld))).toEqual([true, false]);
+
+    const cwd = await tempDir("army-recheck-redacted-");
+    const results = await runRecheck({
+      checks: planRecheck([pass("touch ran-it [redacted]")], "").checks,
+      cwd,
+      env: shellEnv(cwd),
+      budgetMs: 10_000,
+      run: runCli,
+    });
+    expect(results).toEqual([expect.objectContaining({ outcome: "not-run", note: expect.stringContaining("it holds a secret the platform hides") })]);
+    await expect(stat(join(cwd, "ran-it"))).rejects.toThrow();
+  });
+
   it("gets as long as the limit allows, never past the deadline less a margin", () => {
     expect(recheckBudgetMs(10, undefined, 0)).toBe(600_000);
     expect(recheckBudgetMs(10, 300_000, 0)).toBe(300_000 - RECHECK_MARGIN_MS);

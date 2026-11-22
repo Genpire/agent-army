@@ -1115,6 +1115,8 @@ export interface RecheckDeps {
   now?: () => number;
   /** Runs one command (runCli). */
   run?: CommandRunner;
+  /** The worker committed a fix round's change (HEAD is now `sha`): what is published if the checks after it break off. */
+  onCommitted?: (sha: string) => void;
 }
 
 /**
@@ -1204,6 +1206,7 @@ export async function followRecheck(d: RecheckDeps): Promise<RecheckRun> {
   await d.git(["add", "-A"]);
   if ((await d.git(["status", "--porcelain"])) !== "") await d.git(commitArgs(`Fix the checks run again: ${run.report.title}`));
   if (Number(await d.git(["rev-list", "--count", `${sha}..HEAD`])) === 0) return ended({ fixRounds: 1, note: "The team changed nothing for them." });
+  d.onCommitted?.(await d.git(["rev-parse", "HEAD"]));
   d.timeline.add({ kind: "note", text: `Committed the fix: ${run.report.title}` });
   const final = await runAll("Running the checks again after the fix");
   return { ...kept, first, final, fixRounds: 1 };
@@ -1232,6 +1235,23 @@ export async function stashEntries(git: GitRun): Promise<string[]> {
   return (await git(["stash", "list", "--format=%H"])).split("\n").filter(Boolean);
 }
 
+/**
+ * The message the red/green proof's stash carries (\`git stash push -u -m
+ * red-green-proof -- …\`, as the prompts ask). Only such entries are put back
+ * before publishing: an attempt an agent set aside with a plain \`git stash\`
+ * and abandoned is not part of its work.
+ */
+export const PROOF_STASH_MESSAGE = "red-green-proof";
+
+/** Where the newest proof stash not in \`before\` is in \`git stash list\` (its stash@{n}), or -1. */
+async function proofStashAt(git: GitRun, before: readonly string[]): Promise<number> {
+  const entries = (await git(["stash", "list", "--format=%H %gs"])).split("\n").filter(Boolean);
+  return entries.findIndex((entry) => {
+    const [sha = "", ...subject] = entry.split(" ");
+    return !before.includes(sha) && new RegExp(`: ${PROOF_STASH_MESSAGE}\\b`).test(subject.join(" "));
+  });
+}
+
 /** What popStashes put back, and why it stopped when an entry would not go back. */
 export interface Unstashed {
   popped: number;
@@ -1252,7 +1272,7 @@ export interface Unstashed {
 export async function popStashes(git: GitRun, before: readonly string[] = []): Promise<Unstashed> {
   let popped = 0;
   for (let tries = (await stashEntries(git)).length; tries > 0; tries -= 1) {
-    const at = (await stashEntries(git)).findIndex((entry) => !before.includes(entry));
+    const at = await proofStashAt(git, before);
     if (at < 0) break;
     // Everything staged first: what a pop that does not apply is undone to.
     await git(["add", "-A"]);
@@ -1284,7 +1304,7 @@ export async function popStashes(git: GitRun, before: readonly string[] = []): P
  * `since`, and what was put back.
  */
 export async function commitTeamWork(git: GitRun, o: { message: string; since: string }): Promise<{ ahead: number; unstashed: Unstashed }> {
-  // The checkout is a fresh clone: every entry in `git stash` is the team's.
+  // The checkout is a fresh clone: every entry in `git stash` is the team's; only the proof's go back (popStashes).
   const unstashed = await popStashes(git);
   await git(["add", "-A"]);
   if ((await git(["status", "--porcelain"])) !== "") await git(commitArgs(o.message));
@@ -1954,8 +1974,8 @@ export async function main(): Promise<void> {
     // On the committed change, before it is published; the checkout goes back to the team's work after each run.
     let recheck: RecheckRun | undefined;
     if (!failure && report?.kind === "change" && ahead > 0 && config.limits.recheckMin > 0) {
-      // The team's committed work: what is published if the run breaks off (headBackTo).
-      const teamHead = await gitAfterAgents(["rev-parse", "HEAD"]);
+      // The team's committed work, then the worker's commit of a fix round: what is published if the run breaks off (headBackTo).
+      let teamHead = await gitAfterAgents(["rev-parse", "HEAD"]);
       try {
         recheck = await followRecheck({
           report,
@@ -1975,6 +1995,9 @@ export async function main(): Promise<void> {
           onStage: (text) => stage("verify", text),
           progress: (text) => progress(text, true),
           redact,
+          onCommitted: (sha) => {
+            teamHead = sha;
+          },
         });
         task.recheck = recheckSummary(recheck, redact);
         await tasks.save(task).catch((err: unknown) => console.error("[worker] task not saved:", redact(String(err))));

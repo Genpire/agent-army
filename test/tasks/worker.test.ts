@@ -1284,12 +1284,15 @@ describe("the platform runs the team's checks again (real git and shell)", () =>
       },
     });
     teams.push(t.root);
-    const run = await followRecheck(t.d);
+    const committed: string[] = [];
+    const run = await followRecheck({ ...t.d, onCommitted: (sha) => void committed.push(sha) });
 
     expect(run.first[0]!.outcome).toBe("failed");
     expect(run.final.map((r) => r.outcome)).toEqual(["passed"]);
     expect(run.fixRounds).toBe(1);
     expect(await t.sh("log", "--format=%s", "-2")).toBe("Fix the checks run again: Correct the sum\nFix the sum");
+    // The worker is told its commit, so a later break-off publishes the fix rather than dropping it.
+    expect(committed).toEqual([await t.sh("rev-parse", "HEAD")]);
     // The fix is committed, never what the checks wrote.
     expect(await t.sh("show", "--name-only", "--format=", "HEAD")).toBe("fixed.txt");
     await t.clean();
@@ -1403,7 +1406,7 @@ describe("the platform runs the team's checks again (real git and shell)", () =>
       fix: async (repoDir) => {
         await writeFile(join(repoDir, "fixed.txt"), "the real fix\n");
         // Stopped between the proof's `git stash push` and its `git stash pop`.
-        await plainGit("git", ["stash", "push", "--quiet", "--include-untracked", "-m", "proof"], {
+        await plainGit("git", ["stash", "push", "--quiet", "--include-untracked", "-m", "red-green-proof"], {
           cwd: repoDir,
           env: { PATH: process.env.PATH ?? "", HOME: repoDir, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
         });
@@ -1429,7 +1432,7 @@ describe("the platform runs the team's checks again (real git and shell)", () =>
       fix: async (repoDir) => {
         const env = { PATH: process.env.PATH ?? "", HOME: repoDir, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
         await writeFile(join(repoDir, "app.txt"), "the fix\n");
-        await plainGit("git", ["stash", "push", "--quiet", "-m", "proof"], { cwd: repoDir, env });
+        await plainGit("git", ["stash", "push", "--quiet", "-m", "red-green-proof"], { cwd: repoDir, env });
         await writeFile(join(repoDir, "app.txt"), "another change\n");
         await plainGit("git", ["-c", "user.name=T", "-c", "user.email=t@example.com", "commit", "--quiet", "-am", "another"], { cwd: repoDir, env });
         return { report: { ...claimed, title: "Correct the sum" } };
@@ -1486,7 +1489,7 @@ describe("what the team left in git stash (real git)", () => {
     // The proof: the product change set aside, the test run without it, and the run stopped there.
     await writeFile(join(r.repoDir, "app.txt"), "the fix\n");
     await writeFile(join(r.repoDir, "feature.txt"), "a new file of the fix\n");
-    await r.sh("stash", "push", "--quiet", "--include-untracked", "-m", "proof");
+    await r.sh("stash", "push", "--quiet", "--include-untracked", "-m", "red-green-proof");
     await writeFile(join(r.repoDir, "app.test.txt"), "the new test\n");
 
     const { ahead, unstashed } = await commitTeamWork(r.git, { message: "Work in progress (stopped early): Timed out", since: r.sha });
@@ -1502,12 +1505,12 @@ describe("what the team left in git stash (real git)", () => {
     const r = await repo();
     // The older entry conflicts with what the team committed after it; the newer one applies.
     await writeFile(join(r.repoDir, "app.txt"), "the fix\n");
-    await r.sh("stash", "push", "--quiet", "-m", "older");
+    await r.sh("stash", "push", "--quiet", "-m", "red-green-proof older");
     await writeFile(join(r.repoDir, "app.txt"), "committed after\n");
     await r.sh("commit", "--quiet", "-am", "the team's commit");
     const teamSha = await r.sh("rev-parse", "HEAD");
     await writeFile(join(r.repoDir, "lib.txt"), "the newer change\n");
-    await r.sh("stash", "push", "--quiet", "-m", "newer");
+    await r.sh("stash", "push", "--quiet", "-m", "red-green-proof newer");
     // Work the team had not committed or stashed.
     await writeFile(join(r.repoDir, "notes.txt"), "uncommitted\n");
 
@@ -1521,7 +1524,7 @@ describe("what the team left in git stash (real git)", () => {
     expect(await r.files()).toEqual(["lib.txt", "notes.txt"]);
     expect(await r.sh("show", "HEAD:app.txt")).toBe("committed after");
     expect(await r.sh("show", "HEAD:lib.txt")).toBe("the newer change");
-    expect(await r.sh("stash", "list", "--format=%gs")).toBe("On main: older");
+    expect(await r.sh("stash", "list", "--format=%gs")).toBe("On main: red-green-proof older");
     expect(await r.sh("status", "--porcelain", "--untracked-files=all")).toBe("");
     expect(await readFile(join(r.repoDir, "app.txt"), "utf8")).toBe("committed after\n");
 
@@ -1533,7 +1536,7 @@ describe("what the team left in git stash (real git)", () => {
     // An untracked file of the entry already there: git's own reason, and nothing changes.
     await r.sh("stash", "drop", "--quiet");
     await writeFile(join(r.repoDir, "new.txt"), "the entry's\n");
-    await r.sh("stash", "push", "--quiet", "--include-untracked");
+    await r.sh("stash", "push", "--quiet", "--include-untracked", "-m", "red-green-proof");
     await writeFile(join(r.repoDir, "new.txt"), "the team's own\n");
     const blocked = await popStashes(r.git);
     expect(blocked.popped).toBe(0);
@@ -1546,10 +1549,23 @@ describe("what the team left in git stash (real git)", () => {
     const r = await repo();
     expect(await popStashes(r.git)).toEqual({ popped: 0 });
     await writeFile(join(r.repoDir, "app.txt"), "a check's change\n");
-    await r.sh("stash", "push", "--quiet");
+    await r.sh("stash", "push", "--quiet", "-m", "red-green-proof");
     expect(await popStashes(r.git, await stashEntries(r.git))).toEqual({ popped: 0 });
     expect(await stashEntries(r.git)).toHaveLength(1);
     expect(await readFile(join(r.repoDir, "app.txt"), "utf8")).toBe("base\n");
+  });
+
+  it("leaves an entry that is not the proof's: an attempt set aside with a plain git stash is not published", { timeout: 30_000 }, async () => {
+    const r = await repo();
+    await writeFile(join(r.repoDir, "app.txt"), "an abandoned attempt\n");
+    await r.sh("stash", "push", "--quiet");
+    await writeFile(join(r.repoDir, "app.txt"), "an attempt named like the proof but not it\n");
+    await r.sh("stash", "push", "--quiet", "-m", "red-green-proofs");
+    await writeFile(join(r.repoDir, "app.txt"), "the team's final work\n");
+    const { unstashed } = await commitTeamWork(r.git, { message: "Fix the sum", since: r.sha });
+    expect(unstashed).toEqual({ popped: 0 });
+    expect(await r.sh("show", "HEAD:app.txt")).toBe("the team's final work");
+    expect(await stashEntries(r.git)).toHaveLength(2);
   });
 
   it("puts a CI fix round's stashed change back before committing and pushing it", { timeout: 30_000 }, async () => {
@@ -1573,7 +1589,7 @@ describe("what the team left in git stash (real git)", () => {
       push,
       runRound: async () => {
         await writeFile(join(r.repoDir, "app.txt"), "the fix\n");
-        await r.sh("stash", "push", "--quiet", "-m", "proof");
+        await r.sh("stash", "push", "--quiet", "-m", "red-green-proof");
         return { report: { kind: "change", title: "Fix the failing test", summary: "", verification: "", risks: "", projectNotes: "" } as Report };
       },
       task: {},

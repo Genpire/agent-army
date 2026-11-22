@@ -18,6 +18,9 @@ import type { RecheckItem, RecheckOutcome, RecheckSummary } from "./tasks.js";
  * command wrote is committed.
  */
 
+/** What the worker's redactor puts in place of a secret (makeRedactor in worker.ts). */
+const REDACTED = "[redacted]";
+
 /** Checks from the team's report run again, at most (the owner's test command is always one). */
 export const RECHECK_MAX_COMMANDS = 3;
 /** Kept free before the task's deadline after the checks: publishing comes next. */
@@ -61,6 +64,8 @@ export interface PlannedCheck {
   claimedSummary?: string;
   /** Why the shell guard refused it: it is listed, never run. */
   refused?: string;
+  /** Why it is not run although the guard allows it (it holds a redacted secret): listed, never run. */
+  withheld?: string;
 }
 
 export interface RecheckPlan {
@@ -121,7 +126,15 @@ export function planRecheck(checks: ReportedCheck[], testCommand: string, protec
     source: "team",
     checks: passing.slice(0, RECHECK_MAX_COMMANDS).map((c) => {
       const refused = checkBashCommand(c.command, protectedPaths);
-      return { command: c.command, claimed: c.outcome, ...(c.summary ? { claimedSummary: c.summary } : {}), ...(refused ? { refused } : {}) };
+      // The report is redacted before the worker reads it: a command that held a secret is no longer the one the team ran.
+      const withheld = !refused && c.command.includes(REDACTED) ? "it holds a secret the platform hides, so it is not the command the team ran" : undefined;
+      return {
+        command: c.command,
+        claimed: c.outcome,
+        ...(c.summary ? { claimedSummary: c.summary } : {}),
+        ...(refused ? { refused } : {}),
+        ...(withheld ? { withheld } : {}),
+      };
     }),
     notRechecked: Math.max(0, passing.length - RECHECK_MAX_COMMANDS),
   };
@@ -253,6 +266,10 @@ export async function runRecheck(o: {
     };
     if (check.refused) {
       results.push({ ...base, outcome: "not-run", note: `refused by the shell guard: ${check.refused.replace(/\.$/, "")}`, output: "" });
+      continue;
+    }
+    if (check.withheld) {
+      results.push({ ...base, outcome: "not-run", note: `not run: ${check.withheld}`, output: "" });
       continue;
     }
     const left = end - now();

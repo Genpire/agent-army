@@ -54,7 +54,7 @@ describe("the lead's verify step", () => {
     expect(proof).toContain("with the product change undone (it fails), then with the change (it passes)");
     expect(proof).toContain("A test that passes both ways proves nothing: have it fixed.");
     // -u, so a product file the change added is undone too; both views of the checkout are back after.
-    expect(proof).toContain("Safe undo: `git stash push -u -- <product files only>` (-u undoes a new product file too), run the test, `git stash pop`");
+    expect(proof).toContain("Safe undo: `git stash push -u -m red-green-proof -- <product files only>` (-u undoes a new product file too), run the test, `git stash pop`");
     expect(proof).not.toContain("`git stash push -- ");
     expect(proof).toContain("then check `git diff --stat` and `git status --short` are back to what they were.");
     expect(proof).toContain("Never leave the change undone and never commit in between.");
@@ -63,7 +63,7 @@ describe("the lead's verify step", () => {
   it("undoes work that is already committed with git checkout, keeping uncommitted edits", () => {
     const proof = line(prompt(), "- Test proof:");
     expect(proof).toContain(
-      "If the change is already committed (a later round), undo it for the run with `git checkout <base> -- <the changed product files>` (deleting the ones it added) and put it back with `git checkout HEAD -- <those files>`, stashing any uncommitted edits to them first and popping them after.",
+      "If the change is already committed (a later round), undo it for the run with `git checkout <base> -- <the changed product files>` (deleting the ones it added) and put it back with `git checkout HEAD -- <those files>`, stashing any uncommitted edits to them first (`git stash push -m red-green-proof -- <those files>`) and popping them after.",
     );
   });
 

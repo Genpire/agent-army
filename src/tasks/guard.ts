@@ -13,8 +13,8 @@ const NO_PUSH = "Agents don't push; the platform publishes the branch after revi
 const DESTRUCTIVE = "Destructive system commands are not allowed.";
 
 const RULES: { pattern: RegExp; reason: string }[] = [
-  // A git alias for push (`git config alias.p push`, `git -c alias.p=push p`). `git push` itself is found by its words (runsGitPush).
-  { pattern: /\balias\.[^\s=]+(?:\s+|=)["']?push(?![\w.-])/, reason: NO_PUSH },
+  // A git alias for push (`git config alias.p push`, `git -c alias.p=push p`, `alias.p '!git push'`). `git push` itself is found by its words (runsGitPush).
+  { pattern: /\balias\.[^\s=]+(?:\s+|=)["']?(?:![^"']*\b)?push(?![\w.-])/, reason: NO_PUSH },
   { pattern: /\bgit\s+remote\s+(add|set-url)\b/, reason: "Changing git remotes is not allowed." },
   { pattern: /\bgit\s+config\b[^|;&]*\b(credential|extraheader|url\.)/i, reason: "Changing git credentials is not allowed." },
   { pattern: /(^|[\s;&|(])gh\s/, reason: "The GitHub CLI is not available to agents; the platform opens the pull request." },
@@ -106,6 +106,9 @@ const flatCommands = (text: string): string[][] =>
     .map((s) => s.split(/[\s"'$\\<>]+/).filter(Boolean))
     .filter((w) => w.length > 0);
 
+/** What a `$(…)` or `` `…` `` outside quotes leaves in its word: its output is only known when it runs. */
+const SUBSTITUTED = "$…";
+
 /** A word that holds more than one word or a command of its own: it came from quotes. */
 const holdsLine = (word: string) => /[\s;&|()`]/.test(word);
 
@@ -142,11 +145,16 @@ function simpleCommands(line: string, depth: number): string[][] {
   let words: string[] = [];
   let word = "";
   let inWord = false;
-  // The next word is a redirection's file.
+  // The next word is a redirection's file, or a here-string's text (`<<< "git push"`), which is read as a line.
   let target = false;
+  let hereString = false;
   const endWord = () => {
-    if (inWord && !target) words.push(word);
-    if (inWord) target = false;
+    if (inWord && hereString) commands.push(...simpleCommands(word, depth + 1));
+    else if (inWord && !target) words.push(word);
+    if (inWord) {
+      target = false;
+      hereString = false;
+    }
     word = "";
     inWord = false;
   };
@@ -155,6 +163,7 @@ function simpleCommands(line: string, depth: number): string[][] {
     if (words.length) commands.push(words);
     words = [];
     target = false;
+    hereString = false;
   };
   for (let i = 0; i < line.length; i++) {
     const c = line[i]!;
@@ -166,6 +175,8 @@ function simpleCommands(line: string, depth: number): string[][] {
       const start = c === "`" ? i + 1 : i + 2;
       const end = c === "`" ? closingQuote(line, "`", start) : closingParen(line, start);
       commands.push(...simpleCommands(line.slice(start, end), depth + 1));
+      // Its word is only known when it runs: marked, so a rule can refuse what it cannot read (`git $(echo push)`).
+      word += SUBSTITUTED;
       inWord = true;
       i = end;
     } else if (c === "'" || c === '"') {
@@ -179,8 +190,10 @@ function simpleCommands(line: string, depth: number): string[][] {
       // The descriptor in `2>` belongs to the redirection.
       if (/^\d+$/.test(word)) inWord = false;
       endWord();
+      const here = line.startsWith("<<<", i);
       while (line[i + 1] === "<" || line[i + 1] === ">") i++;
       target = true;
+      hereString = here;
     } else if (/[;&|()\n]/.test(c)) {
       endCommand();
     } else if (/\s/.test(c)) {
@@ -208,6 +221,7 @@ function commandsRun(words: string[], depth: number): Command[] {
     const word = words[i]!;
     if (holdsLine(word)) return commandsIn(word, depth + 1);
     const name = commandName(word);
+    if (name === "find") return [{ name, args: words.slice(i + 1) }, ...findRuns(words.slice(i + 1), depth)];
     const takesValue = WRAPPERS.get(name);
     if (!takesValue) return [{ name, args: words.slice(i + 1) }];
     let next = i + 1;
@@ -217,6 +231,19 @@ function commandsRun(words: string[], depth: number): Command[] {
     i = next;
   }
   return [];
+}
+
+/** What `find … -exec <command> ;` (or -execdir, -ok, -okdir) runs, each up to its `;` or `+`. */
+function findRuns(args: string[], depth: number): Command[] {
+  const runs: Command[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (!/^-(?:exec|execdir|ok|okdir)$/.test(args[i]!)) continue;
+    let end = i + 1;
+    while (end < args.length && args[end] !== ";" && args[end] !== "+") end++;
+    runs.push(...commandsRun(args.slice(i + 1, end), depth));
+    i = end;
+  }
+  return runs;
 }
 
 /** Every command a line runs (see commandsRun). */
@@ -237,19 +264,34 @@ const PUSHING_SUBCOMMANDS = new Set(["lfs", "subtree", "annex"]);
  * Whether the words after a `git` run its push: the subcommand after git's
  * own options is push. `git stash push`, `git log --grep push` and a
  * message that says push are other subcommands. A quoted "git push" (in a
- * search, say) is read as one, like `sh -c 'git push'`.
+ * search, say) is read as one, like `sh -c 'git push'`. A subcommand known
+ * only when it runs (`git $(echo push)`, `git push$IFS`, `git "$cmd"`) is
+ * refused too: the guard cannot tell it is not push.
  */
 function runsGitPush(words: string[], from: number): boolean {
   let i = from;
   while (words[i]?.startsWith("-")) i += GIT_VALUE_OPTIONS.has(words[i]!) ? 2 : 1;
   const sub = words[i];
-  return sub === "push" || (sub !== undefined && PUSHING_SUBCOMMANDS.has(sub) && words.slice(i + 1).includes("push"));
+  if (sub === undefined) return false;
+  if (sub === "" || sub.includes("$") || sub.includes("`")) return true;
+  return sub === "push" || (PUSHING_SUBCOMMANDS.has(sub) && words.slice(i + 1).some((w) => w === "push" || w.includes("$")));
 }
 
 /** git anywhere in a line, behind any wrapper (`command git push`, `sudo -E git push`, `find … -exec git push`). */
 const pushes = (line: string) => wordLists(line).some((words) => words.some((w, i) => commandName(w) === "git" && runsGitPush(words, i + 1)));
 
-export function checkBashCommand(command: string, protectedPaths: string[] = []): string | null {
+/** A pipe into a shell that reads its commands from the pipe (`… | sh`, `… | sudo bash -s`), not one running a script or -c. */
+const PIPE_TO_SHELL = /\|\s*(?:sudo\s+(?:-\S+\s+)*)?(?:\S*\/)?(?:ba|z|da|k)?sh(?:\s+-[a-zA-Z]*s[a-zA-Z]*)?\s*(?:$|[;&|)])/;
+
+/** Lines a pipe into a shell runs: what echo and printf print before it (`echo env | sh`, `printf 'env\\n' | bash`), best effort. */
+const pipedLines = (line: string): string[] =>
+  PIPE_TO_SHELL.test(line)
+    ? simpleCommands(line, 0)
+        .filter((w) => /^(?:echo|printf)$/.test(commandName(w[0] ?? "")))
+        .map((w) => w.slice(1).join(" ").replace(/\\n/g, "\n"))
+    : [];
+
+export function checkBashCommand(command: string, protectedPaths: string[] = [], depth = 0): string | null {
   // A backslash at the end of a line joins it to the next, as the shell does.
   const line = command.replace(/\\\r?\n/g, "");
   for (const rule of RULES) {
@@ -261,6 +303,12 @@ export function checkBashCommand(command: string, protectedPaths: string[] = [])
   }
   for (const path of protectedPaths) {
     if (path && line.includes(path)) return "The platform's data directory is off limits.";
+  }
+  if (depth < MAX_DEPTH) {
+    for (const piped of pipedLines(line)) {
+      const reason = checkBashCommand(piped, protectedPaths, depth + 1);
+      if (reason) return reason;
+    }
   }
   return null;
 }

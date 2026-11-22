@@ -131,6 +131,51 @@ describe("the no-push rule refuses git's push only", () => {
   });
 });
 
+describe("what the guard cannot read is not let through", () => {
+  it("refuses a git subcommand known only when it runs, here-strings, find -exec and pipes into a shell", () => {
+    for (const cmd of [
+      "git $(echo push)",
+      "git `echo push`",
+      'git "$(echo push)"',
+      "git push$IFS",
+      "git push${IFS}origin main",
+      'git "$cmd" origin main',
+      "git lfs $(echo push) origin",
+      'bash <<< "git push"',
+      "sh <<< 'git push origin main'",
+      "echo 'git push' | sh",
+      "printf 'git push\\n' | bash -s",
+      "git config alias.p '!git push'",
+      "git -c alias.p='!f() { git push; }; f' p",
+    ]) {
+      expect(checkBashCommand(cmd), cmd).toBe(NO_PUSH);
+    }
+    for (const cmd of ["find / -exec reboot \\;", "echo reboot | sh", "bash <<< reboot", "echo 'shutdown -h now' | sudo bash"]) {
+      expect(checkBashCommand(cmd), cmd).toBe(DESTRUCTIVE);
+    }
+    for (const cmd of ["echo env | sh", "echo printenv | bash", "bash <<< env", "sh <<< printenv", "find . -maxdepth 0 -exec env \\;", "find . -maxdepth 0 -execdir printenv \\;"]) {
+      expect(checkBashCommand(cmd), cmd).toBe(DUMP);
+    }
+  });
+
+  it("lets the ordinary forms of the same things through", () => {
+    for (const cmd of [
+      'git -C "$DIR" status',
+      "git -C $(pwd) status",
+      'git log -1 --format="%H $(date)"',
+      "git config alias.st status",
+      'grep -c x <<< "hello"',
+      "echo env",
+      "echo reboot > notes.txt",
+      "find . -name '*.ts' -exec grep -l env {} +",
+      "find src -type f -exec wc -l {} \\;",
+      "cat setup.sh | sh",
+    ]) {
+      expect(checkBashCommand(cmd), cmd).toBeNull();
+    }
+  });
+});
+
 describe("destructive system commands are refused only as the command", () => {
   it("refuses them at the start, after a separator, inside $( ) or ( ), and behind a wrapper", () => {
     for (const cmd of [
@@ -234,7 +279,7 @@ describe("the red/green proof the prompts ask for", () => {
     const qa = defaultTeam().agents.find((a) => a.id === "qa")!.instructions;
     for (const text of [proof, qa]) {
       const commands = gitCommands(text);
-      expect(commands).toContain("git stash push -u -- src/login.ts src/new-file.ts");
+      expect(commands).toContain("git stash push -u -m red-green-proof -- src/login.ts src/new-file.ts");
       expect(commands).toContain("git stash pop");
       expect(commands).toContain("git checkout main -- src/login.ts src/new-file.ts");
       for (const cmd of commands) expect(checkBashCommand(cmd, [DATA_DIR]), cmd).toBeNull();
