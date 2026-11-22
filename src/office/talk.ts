@@ -1,22 +1,26 @@
 import { z } from "zod";
 import type { QueryFn } from "../chat/pointer.js";
-import type { Config, ConfigRepo, OfficeTalkSettings } from "../core/config.js";
+import type { Config, ConfigRepo } from "../core/config.js";
 import type { Store } from "../core/store.js";
 import { type CapStatus, type Spending, agentStatus, capsApply, monthlyStatus, providerStatus } from "../spending/budget.js";
 import type { AgentCosts } from "../spending/attribution.js";
 import type { UsageRepo } from "../spending/usage.js";
 import type { TaskRepo } from "../tasks/tasks.js";
 import { configSecrets, makeRedactor } from "../tasks/worker.js";
-import { TALK_SYSTEM_PROMPT, TALK_TASKS_SCAN, type TalkKind, type TalkLine, type TalkPerson, parseTalk, recentWork, talkPeople, talkPrompt } from "./talk-prompt.js";
-import { type TalkChoice, type TalkOutcome, type TalkProviderId, chatTalk, chooseTalkProvider, geminiTalk, talkAvailability } from "./talk-providers.js";
+import { TALK_SYSTEM_PROMPT, TALK_TASKS_SCAN, type TalkPerson, parseTalk, recentWork, talkPeople, talkPrompt } from "./talk-prompt.js";
+import { type TalkChoice, type TalkOutcome, chatTalk, chooseTalkProvider, geminiTalk, talkAvailability } from "./talk-providers.js";
+import type { TalkAnswer, TalkKind, TalkRequest, TalkSettingsView } from "./talk-types.js";
 
 /**
- * The office's AI talk (POST /api/office/talk): when people meet in the
- * office (a coffee, a chat on the sofa, foosball, ping pong, pinball), the
- * page asks for their conversation, and a model writes it about the team's
- * real recent work (talk-prompt.ts, talk-providers.ts). Each activity id gets
- * one conversation: kept in the store for a day or two, so everyone who opens
- * the office sees the same lines and a reload never pays twice.
+ * The office's AI talk (POST /api/office/talk, its types in talk-types.ts):
+ * when people meet in the office (a coffee, a chat on the sofa, foosball,
+ * ping pong, pinball, a video game), the page asks for their conversation,
+ * and a model writes it about the team's real recent work (talk-prompt.ts,
+ * talk-providers.ts). Each activity id gets one conversation: kept in the
+ * store for a day or two, so everyone who opens the office sees the same
+ * lines and a reload never pays twice. A kept or running conversation
+ * answers only a request it fits (the same kind, every speaker one of the
+ * people asked for); another request for its id is unavailable.
  *
  * What bounds the spend: the owner's daily maximum of new conversations (a
  * counter per UTC day in the store; every call that reaches a model counts),
@@ -27,21 +31,6 @@ import { type TalkChoice, type TalkOutcome, type TalkProviderId, chatTalk, choos
  * page uses its canned lines. Each conversation's cost counts with chat,
  * shared between the people talking.
  */
-
-export type TalkReason = "off" | "limit" | "unavailable";
-export type TalkAnswer = { lines: TalkLine[]; provider: TalkProviderId; model: string } | { lines: []; reason: TalkReason };
-
-export interface TalkRequest {
-  activityId: string;
-  kind: TalkKind;
-  /** People ids, checked against the team (talkPeople) by the route. */
-  people: string[];
-}
-
-export interface TalkSettingsView extends OfficeTalkSettings {
-  usedToday: number;
-  available: Record<TalkProviderId, boolean>;
-}
 
 /** New conversations a minute. */
 export const TALK_RATE = { max: 3, windowMs: 60_000 } as const;
@@ -87,6 +76,16 @@ const OFF: TalkAnswer = { lines: [], reason: "off" };
 const LIMIT: TalkAnswer = { lines: [], reason: "limit" };
 const UNAVAILABLE: TalkAnswer = { lines: [], reason: "unavailable" };
 
+/** Whether a conversation of an activity id fits a request for that id: the same kind, and every speaker one of the people asked for. */
+const fits = (req: TalkRequest, kind: string, speakers: string[]) => kind === req.kind && speakers.every((id) => req.people.includes(id));
+
+/** A conversation being written, with the request it is for (its speakers will be among those people). */
+interface Running {
+  kind: TalkKind;
+  people: string[];
+  answer: Promise<TalkAnswer>;
+}
+
 export interface OfficeTalkDeps {
   configRepo: Pick<ConfigRepo, "load">;
   store: Pick<Store, "get" | "put">;
@@ -104,7 +103,7 @@ export interface OfficeTalkDeps {
 
 export class OfficeTalk {
   private readonly days = new Map<string, { file: DayFile; readAt: number }>();
-  private readonly running = new Map<string, Promise<TalkAnswer>>();
+  private readonly running = new Map<string, Running>();
   private readonly failedUntil = new Map<string, number>();
   private starts: number[] = [];
   private chain: Promise<unknown> = Promise.resolve();
@@ -124,13 +123,14 @@ export class OfficeTalk {
       const now = this.now();
       await this.refresh(now);
       // No await from here until the id is marked running: two requests for it cannot both start one.
+      // An id's conversation never answers a request it does not fit, and never makes a second one.
       const kept = this.find(req.activityId);
-      if (kept) return { lines: kept.lines, provider: kept.provider, model: kept.model };
+      if (kept) return fits(req, kept.kind, kept.lines.map((l) => l.speaker)) ? { lines: kept.lines, provider: kept.provider, model: kept.model } : UNAVAILABLE;
       const running = this.running.get(req.activityId);
-      if (running) return await running;
-      const run = this.generate(req, config, now).finally(() => this.running.delete(req.activityId));
-      this.running.set(req.activityId, run);
-      return await run;
+      if (running) return fits(req, running.kind, running.people) ? await running.answer : UNAVAILABLE;
+      const answer = this.generate(req, config, now).finally(() => this.running.delete(req.activityId));
+      this.running.set(req.activityId, { kind: req.kind, people: req.people, answer });
+      return await answer;
     } catch (err) {
       console.error(`[office] talk failed: ${(err instanceof Error ? err.message : String(err)).slice(0, 200)}`);
       return UNAVAILABLE;

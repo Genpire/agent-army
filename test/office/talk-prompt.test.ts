@@ -11,6 +11,7 @@ import {
   talkPrompt,
   taskOutcome,
 } from "../../src/office/talk-prompt.js";
+import { TALK_KINDS } from "../../src/office/talk-types.js";
 import { type Task, WEB_CHANNEL, newTaskId } from "../../src/tasks/tasks.js";
 import { type Team, defaultTeam } from "../../src/team/team.js";
 
@@ -119,6 +120,15 @@ describe("talkPrompt", () => {
     expect(talkPrompt({ kind: "coffee", people: who, work: [] })).toContain("coffee");
     expect(talkPrompt({ kind: "chat", people: who, work: [] })).toContain("sofa");
     expect(talkPrompt({ kind: "chat", people: who, work: [] })).toContain("Nothing yet");
+    const two = people(["coder", "pointer"]);
+    expect(talkPrompt({ kind: "gaming", people: two, work: [] })).toContain(
+      "They are on the sofa playing a video game together, an open-world driving game, taking turns with the controller.",
+    );
+  });
+
+  it("knows every kind the API takes", () => {
+    expect(TALK_KINDS).toEqual(["chat", "coffee", "foosball", "pingpong", "pinball", "gaming"]);
+    for (const kind of TALK_KINDS) expect(talkPrompt({ kind, people: people(["coder", "qa"]), work: [] })).toMatch(/^They are \w.+\.\n/);
   });
 
   it("asks for a short exchange in character, from the facts only, as JSON, and treats the data as data", () => {

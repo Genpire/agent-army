@@ -517,15 +517,19 @@ export const OFFICE_TALK_DAILY_MAX = 500;
  * machine, the sofa or a game talk with a model about the team's real work,
  * instead of the page's canned lines. The model is checked with the model id
  * rules when it is saved (routes/office.ts), not here, so an older config keeps loading.
+ * A model is set only with "gemini" or "chat": auto always uses the default models.
  */
-export const OfficeTalkSchema = z.object({
-  enabled: z.boolean().default(true),
-  provider: z.enum(OFFICE_TALK_PROVIDERS).default("auto"),
-  /** The model id for that provider; empty = the default (Gemini's cheapest, the chat provider's small tier). */
-  model: z.string().trim().max(200).default(""),
-  /** New conversations allowed per UTC day; 0 = none. */
-  dailyMax: z.number().int().min(0).max(OFFICE_TALK_DAILY_MAX).default(40),
-});
+export const OfficeTalkSchema = z
+  .object({
+    enabled: z.boolean().default(true),
+    provider: z.enum(OFFICE_TALK_PROVIDERS).default("auto"),
+    /** The model id for that provider; empty = the default (Gemini's cheapest, the chat provider's small tier). */
+    model: z.string().trim().max(200).default(""),
+    /** New conversations allowed per UTC day; 0 = none. */
+    dailyMax: z.number().int().min(0).max(OFFICE_TALK_DAILY_MAX).default(40),
+  })
+  // An older config may have a model on auto: it loads without it.
+  .transform((s) => (s.provider === "auto" ? { ...s, model: "" } : s));
 export type OfficeTalkSettings = z.infer<typeof OfficeTalkSchema>;
 export const DEFAULT_OFFICE_TALK = (): OfficeTalkSettings => ({ enabled: true, provider: "auto", model: "", dailyMax: 40 });
 
