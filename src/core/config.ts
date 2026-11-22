@@ -503,6 +503,30 @@ export const RoutineSchema = z.object({
 });
 export type Routine = z.infer<typeof RoutineSchema>;
 
+
+// ---------- The office ----------
+
+/** Who writes the office's conversations: Gemini when its key is connected, else the chat provider; or one of them. */
+export const OFFICE_TALK_PROVIDERS = ["auto", "gemini", "chat"] as const;
+export const OFFICE_TALK_DAILY_MAX = 500;
+
+/**
+ * The office's AI talk (see office/talk.ts): people who meet at the coffee
+ * machine, the sofa or a game talk with a model about the team's real work,
+ * instead of the page's canned lines. The model is checked with the model id
+ * rules when it is saved (routes/office.ts), not here, so an older config keeps loading.
+ */
+export const OfficeTalkSchema = z.object({
+  enabled: z.boolean().default(true),
+  provider: z.enum(OFFICE_TALK_PROVIDERS).default("auto"),
+  /** The model id for that provider; empty = the default (Gemini's cheapest, the chat provider's small tier). */
+  model: z.string().trim().max(200).default(""),
+  /** New conversations allowed per UTC day; 0 = none. */
+  dailyMax: z.number().int().min(0).max(OFFICE_TALK_DAILY_MAX).default(40),
+});
+export type OfficeTalkSettings = z.infer<typeof OfficeTalkSchema>;
+export const DEFAULT_OFFICE_TALK = (): OfficeTalkSettings => ({ enabled: true, provider: "auto", model: "", dailyMax: 40 });
+
 export const ConfigSchema = z.object({
   orgName: z.string().default(""),
   adminPasswordHash: z.string().optional(),
@@ -620,6 +644,8 @@ export const ConfigSchema = z.object({
   repoSetup: z.record(z.string().regex(REPO_RE), StoredRepoSetupSchema).default({}),
   /** Pointer and the agents it orchestrates (seeded with defaults on first load). */
   team: TeamSchema.default(defaultTeam),
+  /** The virtual office: its AI talk. */
+  office: z.object({ talk: OfficeTalkSchema.default(DEFAULT_OFFICE_TALK) }).default(() => ({ talk: DEFAULT_OFFICE_TALK() })),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
@@ -892,6 +918,8 @@ export function publicView(c: Config) {
     bindings: c.bindings,
     limits: c.limits,
     team: c.team,
+    /** The office's AI talk settings (no secrets in them). */
+    office: { talk: c.office.talk },
   };
 }
 
