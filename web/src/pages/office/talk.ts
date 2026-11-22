@@ -16,9 +16,15 @@
  * so the page and the server cannot drift apart.
  */
 import type { OfficeTalkSettings } from "../../../../src/core/config.js";
-import type { TalkAnswer, TalkReason, TalkRequest as ServerTalkRequest, TalkSettingsView } from "../../../../src/office/talk.js";
-import type { TalkKind as ServerTalkKind, TalkLine } from "../../../../src/office/talk-prompt.js";
-import type { TalkProviderId } from "../../../../src/office/talk-providers.js";
+import type {
+  TalkAnswer,
+  TalkKind as ServerTalkKind,
+  TalkLine,
+  TalkProviderId,
+  TalkReason,
+  TalkRequest as ServerTalkRequest,
+  TalkSettingsView,
+} from "../../../../src/office/talk-types.js";
 import type { Activity, ActivityKind, Say } from "./life";
 
 /**

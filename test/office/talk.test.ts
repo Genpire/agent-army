@@ -5,7 +5,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { type Config, ConfigRepo, ConfigSchema } from "../../src/core/config.js";
 import { deriveKey, encrypt } from "../../src/core/crypto.js";
 import { FsStore } from "../../src/core/store.js";
-import { OfficeTalk, TALK_RATE, TALK_RETRY_MS, type TalkRequest, talkDay, talkDayKey } from "../../src/office/talk.js";
+import { OfficeTalk, TALK_RATE, TALK_RETRY_MS, talkDay, talkDayKey } from "../../src/office/talk.js";
+import type { TalkRequest } from "../../src/office/talk-types.js";
 import { UsageRepo } from "../../src/spending/usage.js";
 import { type Task, TaskRepo, WEB_CHANNEL, newTaskId } from "../../src/tasks/tasks.js";
 
