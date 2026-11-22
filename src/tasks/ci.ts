@@ -141,7 +141,7 @@ const clip = (text: string, max: number) => (text.length <= max ? text : `${text
 const stripLogTimestamps = (log: string) => log.replace(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z ?/gm, "");
 
 /** A code fence longer than any backtick run inside, so a log cannot close it early. */
-const fence = (text: string) => {
+export const fence = (text: string) => {
   const longest = Math.max(2, ...(text.match(/`+/g) ?? []).map((m) => m.length));
   const ticks = "`".repeat(longest + 1);
   return `${ticks}\n${text}\n${ticks}`;

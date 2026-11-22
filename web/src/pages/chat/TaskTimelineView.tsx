@@ -26,7 +26,7 @@ import type { ReactNode } from "react";
 import type { CheckItem, PhaseInfo, Task, TaskEvent, TaskTimeline } from "../../lib/types";
 import { TASK_PHASE_ORDER } from "../../lib/types";
 import { useTaskTimeline } from "./hooks";
-import { EVENT_VERB, PHASE_LABEL, type StatusTone, agentWork, between, formatMs, isActiveTask, plainLabel } from "./labels";
+import { EVENT_VERB, PHASE_LABEL, type StatusTone, agentWork, between, formatMs, isActiveTask, plainLabel, recheckRows } from "./labels";
 import { PreviewStatus } from "./PreviewStatus";
 import { ScreenshotStrip } from "./Screenshots";
 
@@ -107,7 +107,7 @@ function More({ shown, total }: { shown: number; total: number }) {
 const stepIcon = (e: TaskEvent) =>
   e.kind === "edit"
     ? PencilSquareIcon
-    : e.kind === "command"
+    : e.kind === "command" || e.kind === "recheck"
       ? CommandLineIcon
       : e.kind === "browser"
         ? GlobeAltIcon
@@ -137,8 +137,9 @@ export interface TaskTimelineViewProps {
 
 /**
  * Everything happening inside a repo task, live: the step it is on, its plan,
- * what each team member did and for how long, files, commands, the pull
- * request's checks, its preview deployment, screenshots, and the full event log.
+ * what each team member did and for how long, files, commands, the checks the
+ * platform ran again, the pull request's checks, its preview deployment,
+ * screenshots, and the full event log.
  */
 export function TaskTimelineView({ task }: TaskTimelineViewProps) {
   const { timeline, error } = useTaskTimeline(task, true);
@@ -252,6 +253,22 @@ export function TaskTimelineView({ task }: TaskTimelineViewProps) {
             ))}
           </List>
           <More shown={SHOWN} total={commands.length} />
+        </Part>
+      )}
+
+      {task.recheck && (
+        <Part title="Checked again by the platform" count={task.recheck.checks.length} defaultOpen>
+          {task.recheck.checks.length ? (
+            <List density="compact">
+              {recheckRows(task.recheck).map((r) => (
+                <ListItem key={r.command} label={<Code>{r.command}</Code>} description={r.description} endContent={<Badge label={r.label} variant={r.tone} />} />
+              ))}
+            </List>
+          ) : (
+            <Text type="supporting" color="secondary">
+              Nothing to run: no test command is set for this repository and the team reported no passing check.
+            </Text>
+          )}
         </Part>
       )}
 

@@ -43,6 +43,7 @@ const redirectsClaudeCode = (name: string): boolean => {
 export const REPO_SETUP_MAX_ENV = 100;
 export const ENV_VALUE_MAX = 10_000;
 export const SETUP_COMMAND_MAX = 2000;
+export const TEST_COMMAND_MAX = 1000;
 export const START_COMMAND_MAX = 500;
 export const APP_URL_MAX = 300;
 const APP_URL_RE = /^https?:\/\/\S+$/;

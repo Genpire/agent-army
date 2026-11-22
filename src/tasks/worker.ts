@@ -23,7 +23,7 @@ import { type Screenshot, browserAvailable, browserServer, collectScreenshots } 
 import { type CiOutcome, type WaitOptions, ciFailureDetails, ciFixPrompt, ciSummary, ciSummaryLine, storedCiSummary, waitForChecks } from "./ci.js";
 import { type ProviderSession, providerProblem, providerRuntime, secretParts } from "../ai/ai-providers.js";
 import { repoTaskApps } from "../integrations/apps/apps.js";
-import { repoTaskEngines } from "../ai/engines.js";
+import { repoTaskEngines, runCli } from "../ai/engines.js";
 import type { CodeHost } from "../integrations/code-hosts/code-host.js";
 import { allHostSecrets, codeHostFor } from "../integrations/code-hosts/code-host-factory.js";
 import { type Config, ConfigRepo, integrationSecrets, resolveMasterKey } from "../core/config.js";
@@ -34,6 +34,21 @@ import { LessonsRepo, lessonsNote, materializeLessons, saveTaskLessons } from ".
 import { formatFeedback } from "./pr-feedback.js";
 import { BYPASS_ENV, type PreviewResult, checkPreview, previewSlackLine } from "./preview.js";
 import { type PlanItem, ProgressTracker, formatProgress } from "./progress.js";
+import {
+  type CommandRunner,
+  type RecheckResult,
+  type RecheckRun,
+  needsFix,
+  planRecheck,
+  recheckBudgetMs,
+  recheckEventText,
+  recheckFixPrompt,
+  recheckLine,
+  recheckPrSection,
+  recheckSummary,
+  restoreWorkTree,
+  runRecheck,
+} from "./recheck.js";
 import { type CodeHostKind, HOST_TERMS, repoHost } from "../integrations/code-hosts/repo-id.js";
 import { findRepoSetup, repoSetupContext, runSetupCommand, setupEnv } from "./repo-setup.js";
 import { ScreenshotRepo } from "./screenshots.js";
@@ -382,6 +397,28 @@ export type TaskSurface = "slack" | "web";
 export function prFooter(taskId: string, pointerName: string, where: TaskSurface = "slack"): string {
   const from = where === "web" ? "the admin console" : "Slack";
   return `---\nRequested in ${from} · task \`${taskId}\` · built by ${pointerName} and the team. A human must review and merge.`;
+}
+
+/**
+ * The pull (merge) request's description for finished work: the team's report,
+ * the platform's own run of its checks next to its verification, the
+ * screenshots and the footer. Redacted by the caller.
+ */
+export function prBody(
+  report: Pick<Report, "summary" | "verification" | "testProof" | "risks">,
+  o: { recheck?: RecheckRun; screenshots: number; where?: TaskSurface; footer: string },
+): string {
+  return [
+    report.summary,
+    report.verification && `### Verification\n${report.verification}`,
+    report.testProof && `### How the tests were shown to catch the problem\n${report.testProof}`,
+    o.recheck && recheckPrSection(o.recheck),
+    report.risks && `### Risks and follow-ups\n${report.risks}`,
+    screenshotsSection(o.screenshots, o.where),
+    o.footer,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 /** Points reviewers to the screenshots posted in Slack (or kept in the admin console), or "" when there are none. */
@@ -1007,6 +1044,124 @@ export async function followPrChecks(d: FollowChecksDeps): Promise<{ outcome: Ci
   }
 }
 
+export interface RecheckDeps {
+  /** The team's report: the checks it says it ran, with their outcomes. */
+  report: Pick<Report, "checks">;
+  /** The owner's test command for the repository (Repo setup); "" = the team's passing checks are run. */
+  testCommand: string;
+  limits: Pick<Config["limits"], "recheckMin" | "ciFixRounds">;
+  /** When everything must be done (jobDeadline); undefined = no limit. */
+  deadline: number | undefined;
+  repoDir: string;
+  /** The agents' environment, never the worker's own. */
+  env: Record<string, string>;
+  /** What the shell guard keeps the team's commands away from (the platform's data directory). */
+  protectedPaths: string[];
+  base: string;
+  branch: string;
+  request: string;
+  /** What is left of the task's budget for a fix round. */
+  budgetLeft: () => number;
+  /** git on what the agents left: the worker's own config is put back first (snapshotGitConfig). */
+  git: GitRun;
+  /** One fix round of the team; it adds the round's cost to the task and keeps its project notes. */
+  runRound: FollowChecksDeps["runRound"];
+  timeline: Pick<TimelineRecorder, "add">;
+  /** The task moved to a step of the verify phase. */
+  onStage: (text: string) => Promise<void>;
+  /** The live progress message (Slack). */
+  progress: (text: string) => Promise<void>;
+  redact: (text: string) => string;
+  now?: () => number;
+  /** Runs one command (runCli). */
+  run?: CommandRunner;
+}
+
+/**
+ * After the team's change is committed, before anything is published: the
+ * platform runs the checks again itself (recheck.ts) and puts the checkout
+ * back as the team left it. When a check failed or showed no result and fix
+ * rounds, budget and time allow, the team gets one round to fix it, with the
+ * commands and their real output; its change is committed like the other
+ * rounds' and the checks run again. An unfinished fix, or a round that changed
+ * nothing in the code, leaves the work as it was. Nothing a command wrote is
+ * ever committed.
+ */
+export async function followRecheck(d: RecheckDeps): Promise<RecheckRun> {
+  const now = d.now ?? Date.now;
+  const plan = planRecheck(d.report.checks, d.testCommand, d.protectedPaths);
+  const kept = { source: plan.source, notRechecked: plan.notRechecked };
+  if (!plan.checks.length) {
+    d.timeline.add({ kind: "recheck", text: "Nothing to check again: no test command is set and the team reported no passing check" });
+    return { ...kept, first: [], final: [], fixRounds: 0 };
+  }
+
+  const runAll = async (text: string): Promise<RecheckResult[]> => {
+    await d.onStage(text);
+    await d.progress(`:mag: ${text}…`);
+    const sha = await d.git(["rev-parse", "HEAD"]);
+    let results: RecheckResult[];
+    try {
+      results = await runRecheck({
+        checks: plan.checks,
+        cwd: d.repoDir,
+        env: d.env,
+        budgetMs: recheckBudgetMs(d.limits.recheckMin, d.deadline, now()),
+        run: d.run ?? runCli,
+        redact: d.redact,
+        now,
+      });
+    } finally {
+      // Whatever the commands wrote, the checkout goes back to the team's committed work.
+      await restoreWorkTree(d.git, sha);
+    }
+    for (const r of results) {
+      d.timeline.add({ kind: "recheck", text: recheckEventText(r), ok: r.outcome === "passed", ...(r.ms !== undefined ? { ms: r.ms } : {}) }, true);
+    }
+    return results;
+  };
+
+  const first = await runAll(plan.source === "owner" ? "Running the owner's test command on the team's work" : "Running the team's checks again");
+  // `final` is `first` itself until the checks run again after a fix.
+  const ended = (o: { fixRounds?: number; note?: string } = {}): RecheckRun => ({ ...kept, first, final: first, fixRounds: o.fixRounds ?? 0, ...(o.note ? { note: o.note } : {}) });
+  if (!needsFix(first)) return ended();
+  if (d.limits.ciFixRounds <= 0) return ended({ note: "No fix round: fix rounds are turned off (Settings)." });
+  const budgetUsd = d.budgetLeft();
+  if (budgetUsd < 1) return ended({ note: "Not enough of the task's budget was left to fix them." });
+  const fixMs = fixRunTimeoutMs(d.deadline, now());
+  if (fixMs === null) return ended({ note: "Not enough time was left to fix them." });
+
+  const failing = first.filter((r) => r.outcome === "failed" || r.outcome === "no-result").map((r) => r.command);
+  const label = "Fixing what the checks run again found";
+  d.timeline.add({ kind: "fix-round", text: `Checked again: ${failing.join(", ")} did not pass: the team is fixing it` }, true);
+  await d.onStage(label);
+  await d.progress(`:wrench: Checked again: ${truncate(failing.join(", "), 200)} did not pass: the team is fixing it…`);
+  const sha = await d.git(["rev-parse", "HEAD"]);
+  const run = await d.runRound(recheckFixPrompt(first, { source: plan.source, base: d.base, branch: d.branch, request: d.request }), {
+    budgetUsd,
+    runMs: fixMs,
+    since: sha,
+    phaseLabel: label,
+  });
+
+  // An unfinished fix, or a round that changed nothing in the code, is not kept: the work stays as the team finished it.
+  if (!run.report || run.failure) {
+    await restoreWorkTree(d.git, sha);
+    return ended({ fixRounds: 1, note: `Fixing them stopped early: ${run.failure ?? "the team finished without a report."}` });
+  }
+  if (run.report.kind !== "change") {
+    await restoreWorkTree(d.git, sha);
+    // Markdown; the Slack result converts it.
+    return ended({ fixRounds: 1, note: `**The team on the checks: ${run.report.title}** ${truncate(run.report.summary, 800)}` });
+  }
+  await d.git(["add", "-A"]);
+  if ((await d.git(["status", "--porcelain"])) !== "") await d.git(commitArgs(`Fix the checks run again: ${run.report.title}`));
+  if (Number(await d.git(["rev-list", "--count", `${sha}..HEAD`])) === 0) return ended({ fixRounds: 1, note: "The team changed nothing for them." });
+  d.timeline.add({ kind: "note", text: `Committed the fix: ${run.report.title}` });
+  const final = await runAll("Running the checks again after the fix");
+  return { ...kept, first, final, fixRounds: 1 };
+}
+
 /** Runs the task in TASK_B64 to the end. The entry point (src/worker.ts) calls it. */
 export async function main(): Promise<void> {
   const payload = process.env.TASK_B64;
@@ -1351,6 +1506,8 @@ export async function main(): Promise<void> {
     const lessons = await materializeLessons(lessonsLibrary, task.repo, join(workRoot, "lessons"), redact);
     if (lessons) timeline.add({ kind: "note", text: lessonsNote(lessons) });
 
+    // The owner's test command, which the platform runs after the team instead of the team's own checks (recheck.ts).
+    const testCommand = setup?.testCommand.trim() ?? "";
     const context: OrchestratorContext = {
       projectNotes,
       ...(lessons ? { lessons } : {}),
@@ -1358,6 +1515,7 @@ export async function main(): Promise<void> {
       ...(browser ? { browser: { shotsDir } } : {}),
       ...(setup ? { repoSetup: repoSetupContext(setup, setupResult) } : {}),
       host: host.kind,
+      ...(config.limits.recheckMin > 0 ? { recheck: { testCommand } } : {}),
     };
 
     const everyMin = config.limits.progressEveryMin;
@@ -1524,13 +1682,16 @@ export async function main(): Promise<void> {
       return run;
     };
 
+    // Set when the platform's run of the checks broke off (see below): the checkout may not be as the team left it,
+    // so no later round commits from it.
+    let workTreeUnsure = false;
     /** After a push: the request's checks and the fix rounds (followPrChecks). */
     const followChecks = (pr: PrRef) =>
       followPrChecks({
         host,
         repo: task.repo,
         pr,
-        limits: config.limits,
+        limits: workTreeUnsure ? { ...config.limits, ciFixRounds: 0 } : config.limits,
         deadline,
         base,
         branch,
@@ -1660,6 +1821,44 @@ export async function main(): Promise<void> {
         if (!resultNotes.includes(line)) resultNotes.push(line);
       }
     };
+    // ---------- The platform runs the team's checks again (recheck.ts) ----------
+    // On the committed change, before it is published; the checkout goes back to the team's work after each run.
+    let recheck: RecheckRun | undefined;
+    if (!failure && report?.kind === "change" && ahead > 0 && config.limits.recheckMin > 0) {
+      try {
+        recheck = await followRecheck({
+          report,
+          testCommand,
+          limits: config.limits,
+          deadline,
+          repoDir,
+          env: agentEnv,
+          protectedPaths: [dataDir],
+          base,
+          branch,
+          request: task.instruction,
+          budgetLeft: () => taskBudgetUsd - (task.costUsd ?? 0),
+          git: gitAfterAgents,
+          runRound: extraRound,
+          timeline,
+          onStage: (text) => stage("verify", text),
+          progress: (text) => progress(text, true),
+          redact,
+        });
+        task.recheck = recheckSummary(recheck);
+        await tasks.save(task).catch((err: unknown) => console.error("[worker] task not saved:", redact(String(err))));
+      } catch (err) {
+        // The team's work is committed and is published as it is; nothing commits from the checkout after this.
+        workTreeUnsure = true;
+        const message = redact(errorText(err));
+        console.error(`[worker] checks not run again: ${message}`);
+        timeline.add({ kind: "error", text: `The checks could not be run again: ${message}` }, true);
+        resultNotes.push(`The platform could not run the checks again: ${truncate(message, 300)}`);
+      }
+    } else if (!failure && report?.kind === "change" && ahead > 0) {
+      timeline.add({ kind: "note", text: "Running the team's checks again is turned off" });
+    }
+
     await postScreenshots((n) => `:camera: ${plural(n, "screenshot")} from the browser checks.`);
     // What the pull request points reviewers to: the thread's screenshots, or the console's.
     const shotsForPr = () => (slack ? posted.size : storedShots);
@@ -1755,19 +1954,8 @@ export async function main(): Promise<void> {
         await progress(`:rocket: Publishing the branch and opening the ${prWord}…`, true);
         await push();
         timeline.add({ kind: "push", text: `Pushed branch ${branch}` });
-        const prBody = redact(
-          [
-            report.summary,
-            report.verification && `### Verification\n${report.verification}`,
-            report.testProof && `### How the tests were shown to catch the problem\n${report.testProof}`,
-            report.risks && `### Risks and follow-ups\n${report.risks}`,
-            screenshotsSection(shotsForPr(), where),
-            footer,
-          ]
-            .filter(Boolean)
-            .join("\n\n"),
-        );
-        const published = await publishPr({ host, repo: task.repo, branch, base, title: redact(report.title), body: prBody, redact });
+        const body = redact(prBody(report, { recheck, screenshots: shotsForPr(), where, footer }));
+        const published = await publishPr({ host, repo: task.repo, branch, base, title: redact(report.title), body, redact });
         pr = published.pr;
         const updated = published.updated;
         timeline.add({ kind: "pr", text: `${updated ? "Updated" : "Opened"} ${prLabel(pr.number, host.kind)}: ${report.title}`, url: pr.html_url }, true);
@@ -1812,7 +2000,10 @@ export async function main(): Promise<void> {
       const storedCi = ci && storedCiSummary(ci.outcome);
       if (storedCi) task.ci = storedCi;
       // Markdown for the console (the Slack text below converts the same notes).
-      task.notes = [ci?.note, ...resultNotes].filter((n): n is string => Boolean(n)).map((n) => redact(n));
+      const rechecked = task.recheck;
+      task.notes = [rechecked && recheckLine(rechecked), recheck?.note, ci?.note, ...resultNotes]
+        .filter((n): n is string => Boolean(n))
+        .map((n) => redact(n));
       const endText =
         report.kind === "blocked"
           ? `Blocked: ${report.title}`
@@ -1832,6 +2023,8 @@ export async function main(): Promise<void> {
         head,
         toMrkdwn(report.summary),
         report.verification && `*Verification:* ${toMrkdwn(report.verification)}`,
+        rechecked && recheckLine(rechecked, "slack"),
+        recheck?.note && toMrkdwn(recheck.note),
         report.risks && `*Risks:* ${toMrkdwn(report.risks)}`,
         ci && ciSummaryLine(ci.outcome, config.limits.ciWaitMin, host.kind),
         ci?.note && toMrkdwn(ci.note),

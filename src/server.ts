@@ -98,6 +98,7 @@ const CONNECTION_ID = z.string().max(40).regex(/^gh-[0-9a-f]{6,}$/, "Connection 
 const MAX_EXTRA_GITHUB = 10;
 const CI_WAIT_ERROR = "The wait for checks is a whole number of minutes from 0 to 60.";
 const CI_FIX_ERROR = "Fix rounds are a whole number from 0 to 5.";
+const RECHECK_ERROR = "The time to run the checks again is a whole number of minutes from 0 to 60.";
 const PREVIEW_CHECK_ERROR = 'The preview check is "off", "visible" or "always".';
 const CAP_ERROR = "Caps are amounts in USD from 0 (no cap) to 100,000.";
 const ALERT_PERCENT_ERROR = "The alert level is a whole percent from 10 to 100.";
@@ -678,6 +679,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
       z.object({
         repo: REPO_INPUT,
         setupCommand: z.string().trim().max(2000, "The setup command is limited to 2000 characters.").optional(),
+        testCommand: z.string().trim().max(1000, "The test command is limited to 1000 characters.").optional(),
         startCommand: z.string().trim().max(500, "The start command is limited to 500 characters.").optional(),
         appUrl: z.string().trim().max(300, "The app URL is limited to 300 characters.").optional(),
         env: ENV_CHANGES.optional(),
@@ -697,6 +699,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
       }
       const merged = RepoSetupSchema.safeParse({
         setupCommand: input.setupCommand ?? current.setupCommand,
+        testCommand: input.testCommand ?? current.testCommand,
         startCommand: input.startCommand ?? current.startCommand,
         appUrl: input.appUrl ?? current.appUrl,
         env,
@@ -748,6 +751,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
             progressEveryMin: z.number(),
             ciWaitMin: z.number().int(CI_WAIT_ERROR).min(0, CI_WAIT_ERROR).max(60, CI_WAIT_ERROR),
             ciFixRounds: z.number().int(CI_FIX_ERROR).min(0, CI_FIX_ERROR).max(5, CI_FIX_ERROR),
+            recheckMin: z.number().int(RECHECK_ERROR).min(0, RECHECK_ERROR).max(60, RECHECK_ERROR),
             previewCheck: z.enum(["off", "visible", "always"], PREVIEW_CHECK_ERROR),
           })
           .partial()

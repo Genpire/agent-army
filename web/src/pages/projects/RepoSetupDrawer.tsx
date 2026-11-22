@@ -25,6 +25,7 @@ import {
   REPO_SETUP_MAX_ENV,
   SETUP_COMMAND_MAX,
   START_COMMAND_MAX,
+  TEST_COMMAND_MAX,
   appUrlError,
   findRepo,
   joinErrors,
@@ -44,6 +45,7 @@ export interface RepoSetupDrawerProps {
 interface FieldErrors {
   repo?: string;
   setupCommand?: string;
+  testCommand?: string;
   startCommand?: string;
   appUrl?: string;
   env?: string;
@@ -60,6 +62,7 @@ export function RepoSetupDrawer({ isOpen, repo, setups, onOpenChange, onOpenRepo
   const { run } = useAction();
   const [repoInput, setRepoInput] = useState("");
   const [setupCommand, setSetupCommand] = useState("");
+  const [testCommand, setTestCommand] = useState("");
   const [startCommand, setStartCommand] = useState("");
   const [appUrl, setAppUrl] = useState("");
   const [envText, setEnvText] = useState("");
@@ -74,6 +77,7 @@ export function RepoSetupDrawer({ isOpen, repo, setups, onOpenChange, onOpenRepo
     const saved = repo ? setups[repo] : undefined;
     setRepoInput(repo ?? "");
     setSetupCommand(saved?.setupCommand ?? "");
+    setTestCommand(saved?.testCommand ?? "");
     setStartCommand(saved?.startCommand ?? "");
     setAppUrl(saved?.appUrl ?? "");
     setEnvText("");
@@ -92,6 +96,7 @@ export function RepoSetupDrawer({ isOpen, repo, setups, onOpenChange, onOpenRepo
   const save = async () => {
     const target = repo ?? repoInput.trim();
     const setup = setupCommand.trim();
+    const test = testCommand.trim();
     const start = startCommand.trim();
     const url = appUrl.trim();
     const { env, errors: envErrors } = parseEnvLines(envText);
@@ -99,6 +104,7 @@ export function RepoSetupDrawer({ isOpen, repo, setups, onOpenChange, onOpenRepo
     const found: FieldErrors = {
       repo: !REPO_RE.test(target) ? REPO_ERROR : alreadySetUp ? `${alreadySetUp} is already set up. Edit it instead.` : undefined,
       setupCommand: setup.length > SETUP_COMMAND_MAX ? `The setup command is limited to ${SETUP_COMMAND_MAX.toLocaleString()} characters.` : undefined,
+      testCommand: test.length > TEST_COMMAND_MAX ? `The test command is limited to ${TEST_COMMAND_MAX.toLocaleString()} characters.` : undefined,
       startCommand: start.length > START_COMMAND_MAX ? `The start command is limited to ${START_COMMAND_MAX} characters.` : undefined,
       appUrl: appUrlError(url),
       env: envErrors.length
@@ -107,8 +113,8 @@ export function RepoSetupDrawer({ isOpen, repo, setups, onOpenChange, onOpenRepo
           ? `At most ${REPO_SETUP_MAX_ENV} variables per repository.`
           : undefined,
     };
-    if (isNew && !setup && !start && !url && !names.length && !Object.values(found).some(Boolean)) {
-      found.form = "Enter a setup command, a start command, an app URL or a variable to save.";
+    if (isNew && !setup && !test && !start && !url && !names.length && !Object.values(found).some(Boolean)) {
+      found.form = "Enter a setup command, a test command, a start command, an app URL or a variable to save.";
     }
     setErrors(found);
     if (Object.values(found).some(Boolean)) return;
@@ -116,7 +122,7 @@ export function RepoSetupDrawer({ isOpen, repo, setups, onOpenChange, onOpenRepo
     const changed = names.length ? ` ${names.length === 1 ? "The variable's value is" : "Variable values are"} stored encrypted and not shown again.` : "";
     const ok = await run(
       async () => {
-        await api.post("/api/repo-setup", { repo: target, setupCommand: setup, startCommand: start, appUrl: url, ...(names.length ? { env } : {}) });
+        await api.post("/api/repo-setup", { repo: target, setupCommand: setup, testCommand: test, startCommand: start, appUrl: url, ...(names.length ? { env } : {}) });
         await refresh();
       },
       { success: `Saved the setup of ${target}.${changed}` },
@@ -202,6 +208,21 @@ export function RepoSetupDrawer({ isOpen, repo, setups, onOpenChange, onOpenRepo
                 hasAutoCorrect={false}
                 hasSpellCheck={false}
                 status={errors.setupCommand ? { type: "error", message: errors.setupCommand } : undefined}
+              />
+              <TextInput
+                label="Test command"
+                value={testCommand}
+                onChange={(v) => {
+                  setTestCommand(v);
+                  clear("testCommand");
+                }}
+                placeholder="e.g. npm test"
+                description="After the team finishes, the platform runs it with bash in the checkout, on the final state of the work, and shows its real result in the pull request next to the team's claims. It must end on its own (no watch mode). Empty: the checks the team says passed are run again."
+                isOptional
+                autoCapitalize="off"
+                hasAutoCorrect={false}
+                hasSpellCheck={false}
+                status={errors.testCommand ? { type: "error", message: errors.testCommand } : undefined}
               />
               <TextInput
                 label="Start command"
