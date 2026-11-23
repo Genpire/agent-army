@@ -519,6 +519,13 @@ export const RoutineSchema = z.object({
   enabled: z.boolean().default(true),
   createdBy: z.string().max(120).default(""),
   createdAt: z.string().optional(),
+  /**
+   * Made or last changed by the owner (in the console, or from their own DM
+   * with Pointer): only such a routine, delivering to the owner alone, may
+   * read the owner's own Slack account (ownSlackAccount). A change by anyone
+   * else clears it.
+   */
+  ownerOnly: z.boolean().optional(),
 });
 export type Routine = z.infer<typeof RoutineSchema>;
 
