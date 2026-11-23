@@ -7,8 +7,9 @@
  * (embeddings, speech, image and video models are left out):
  * - Anthropic: GET https://api.anthropic.com/v1/models (paginated, labels from display_name).
  * - Codex (the OpenAI key): GET https://api.openai.com/v1/models, the GPT, o-series and Codex models.
- * - Gemini CLI (the Gemini key): GET https://generativelanguage.googleapis.com/v1beta/models
- *   (paginated), the models whose supportedGenerationMethods include generateContent.
+ * - Gemini CLI (the Gemini key) and Gemini (Google AI Studio, its own key): GET
+ *   https://generativelanguage.googleapis.com/v1beta/models (paginated), the models whose
+ *   supportedGenerationMethods include generateContent.
  * - DeepSeek: GET https://api.deepseek.com/models.
  * - Kimi: GET https://api.moonshot.ai/v1/models (api.moonshot.cn in China).
  * - Qwen: Model Studio's GET /api/v1/models on the workspace's host (or the region's shared one), paginated.
@@ -366,7 +367,8 @@ const NO_LIVE_LIST: Partial<Record<AiProviderId, string>> = {
 };
 
 /** Whose list it is, for "live from …". */
-const providerSource = (preset: AiPreset): string => (preset.kind === "custom" ? "your endpoint" : preset.short === "Claude" ? "Anthropic" : preset.short);
+const providerSource = (preset: AiPreset): string =>
+  preset.kind === "custom" ? "your endpoint" : preset.short === "Claude" ? "Anthropic" : preset.id === "google-ai" ? "Google" : preset.short;
 
 /**
  * A compatible provider's live models, in the preset's own spelling where it
@@ -480,6 +482,20 @@ type ProviderLister = (conn: ConnectionValues, preset: AiPreset, ctx: ListContex
 
 const bearer = (token: string | undefined) => ({ authorization: `Bearer ${token ?? ""}` });
 
+/** Gemini's models for a key, every page, newest first: Gemini CLI's and the Gemini provider's lists. */
+async function listGemini(key: string, ctx: ListContext): Promise<CatalogModel[]> {
+  const models: CatalogModel[] = [];
+  let token: string | undefined;
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000${token ? `&pageToken=${encodeURIComponent(token)}` : ""}`;
+    const parsed = parseGeminiPage(await getJson(ctx, url, { "x-goog-api-key": key }, "Google"));
+    models.push(...parsed.models);
+    if (!parsed.nextPageToken || parsed.nextPageToken === token) break;
+    token = parsed.nextPageToken;
+  }
+  return newestFirst(models);
+}
+
 const PROVIDER_LISTERS: Partial<Record<AiProviderId, ProviderLister>> = {
   anthropic: async (conn, _preset, ctx) =>
     (await listAnthropicShaped(ctx, "https://api.anthropic.com", { "x-api-key": conn.secrets.apiKey ?? "", "anthropic-version": "2023-06-01" }, "Anthropic", "limit=1000")).models,
@@ -500,6 +516,7 @@ const PROVIDER_LISTERS: Partial<Record<AiProviderId, ProviderLister>> = {
     }
     return withPresetSpelling(newestFirst(models), preset);
   },
+  "google-ai": async (conn, _preset, ctx) => listGemini(conn.secrets.apiKey ?? "", ctx),
   custom: async (conn, preset, ctx) => {
     const settings = effectiveSettings(preset, conn.settings);
     const base = compatibleBaseUrl("custom", settings);
@@ -521,18 +538,7 @@ type EngineLister = (key: string, ctx: ListContext) => Promise<CatalogModel[]>;
 
 const ENGINE_LISTERS: Record<EngineId, EngineLister> = {
   codex: async (key, ctx) => parseOpenAiModels(await getJson(ctx, "https://api.openai.com/v1/models", bearer(key), "OpenAI")),
-  gemini: async (key, ctx) => {
-    const models: CatalogModel[] = [];
-    let token: string | undefined;
-    for (let page = 0; page < MAX_PAGES; page++) {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000${token ? `&pageToken=${encodeURIComponent(token)}` : ""}`;
-      const parsed = parseGeminiPage(await getJson(ctx, url, { "x-goog-api-key": key }, "Google"));
-      models.push(...parsed.models);
-      if (!parsed.nextPageToken || parsed.nextPageToken === token) break;
-      token = parsed.nextPageToken;
-    }
-    return newestFirst(models);
-  },
+  gemini: listGemini,
 };
 
 /** A hash of what a list depends on (the credentials and the address), never the secrets themselves. */

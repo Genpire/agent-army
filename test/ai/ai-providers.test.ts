@@ -8,6 +8,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import { AI_PRESETS } from "../../src/ai/ai-presets.js";
 import {
   type ConnectionValues,
+  GEMINI_BRIDGE_NOT_STARTED,
   anthropicRuntime,
   buildRuntime,
   connectionProblem,
@@ -43,6 +44,7 @@ const CONNECTIONS: Record<AiProviderId, ConnectionValues> = {
   qwen: { secrets: { apiKey: "sk-qwen-secret-0007" }, settings: { region: "ap-southeast-1", workspaceId: "ws-acme" }, models: {} },
   kimi: { secrets: { apiKey: "sk-kimi-secret-0008" }, settings: {}, models: {} },
   zai: { secrets: { apiKey: "zai-key-secret-0009" }, settings: { region: "china" }, models: {} },
+  "google-ai": { secrets: { apiKey: "AQ.Ab8-google-ai-secret-0012" }, settings: {}, models: {} },
   custom: {
     secrets: { authToken: "gateway-token-secret-0010", headers: "cf-aig-authorization: Bearer cf-header-secret-0011" },
     settings: { baseUrl: "https://gateway.example.com/anthropic" },
@@ -92,7 +94,7 @@ describe("provider presets", () => {
       expect(p.fields.length).toBeGreaterThan(0);
       for (const f of p.fields) expect(f.key).toMatch(/^[a-zA-Z][a-zA-Z0-9]{0,40}$/);
       // Every preset that serves non-Claude models says so; the Claude ones do not.
-      expect(p.bestEffort).toBe(["deepseek", "qwen", "kimi", "zai", "custom"].includes(p.id));
+      expect(p.bestEffort).toBe(["deepseek", "qwen", "kimi", "zai", "google-ai", "custom"].includes(p.id));
     }
   });
 });
@@ -231,13 +233,13 @@ describe("provider environments", () => {
 
   it("leave WebSearch out where the provider cannot search", () => {
     const blocked = AI_PROVIDER_IDS.filter((id) => buildRuntime(id, CONNECTIONS[id]).disallowedTools.includes("WebSearch"));
-    expect(blocked.sort()).toEqual(["bedrock", "custom", "kimi", "zai"]);
+    expect(blocked.sort()).toEqual(["bedrock", "custom", "google-ai", "kimi", "zai"]);
     const searching = buildRuntime("custom", { ...CONNECTIONS.custom, settings: { ...CONNECTIONS.custom.settings, webSearch: "on" } });
     expect(searching.disallowedTools).toEqual([]);
   });
 
   it("price non-Claude models for Claude Code's budgets, under both the plain and the [1m] id", () => {
-    for (const id of ["deepseek", "qwen", "kimi", "zai"] as const) {
+    for (const id of ["deepseek", "qwen", "kimi", "zai", "google-ai"] as const) {
       const overrides = buildRuntime(id, CONNECTIONS[id]).managedSettings?.modelPricing?.overrides ?? {};
       expect(Object.keys(overrides).length, id).toBeGreaterThan(0);
       for (const price of Object.values(overrides)) {
@@ -268,6 +270,52 @@ describe("provider environments", () => {
     // Without a key: the service's own Google credentials, no file.
     const ambient = await buildRuntime("vertex", { ...CONNECTIONS.vertex, secrets: {} }).session();
     expect(ambient.env.GOOGLE_APPLICATION_CREDENTIALS).toBeUndefined();
+  });
+
+  it("give Gemini's key to the bridge only: Claude Code gets a token that ends with the session", async () => {
+    const key = CONNECTIONS["google-ai"].secrets.apiKey!;
+    const runtime = buildRuntime("google-ai", CONNECTIONS["google-ai"]);
+    // Without a session: no key, no token, and an address that never resolves.
+    expect(JSON.stringify(runtime.env)).not.toContain(key);
+    expect(runtime.env.ANTHROPIC_BASE_URL).toBe(GEMINI_BRIDGE_NOT_STARTED);
+    expect(runtime.env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+    expect(runtime.env).toMatchObject({
+      ANTHROPIC_API_KEY: "",
+      ANTHROPIC_MODEL: "gemini-4-carbon",
+      ANTHROPIC_DEFAULT_OPUS_MODEL: "gemini-4-carbon",
+      ANTHROPIC_DEFAULT_SONNET_MODEL: "gemini-4-neon",
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: "gemini-3.5-flash-lite",
+      CLAUDE_CODE_SUBAGENT_MODEL: "gemini-4-hydrogen",
+      CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS: "1",
+    });
+    const session = await runtime.session();
+    const base = session.env.ANTHROPIC_BASE_URL!;
+    const token = session.env.ANTHROPIC_AUTH_TOKEN!;
+    // A known token with a bad body is refused before Gemini is called: no network here.
+    const probe = () => fetch(`${base}/v1/messages`, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: "{}" });
+    try {
+      expect(base).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+      expect(token).toMatch(/^gbr_[A-Za-z0-9_-]{43}$/);
+      expect(JSON.stringify(session.env)).not.toContain(key);
+      expect((await probe()).status).toBe(400);
+    } finally {
+      await session.dispose();
+    }
+    expect((await probe()).status).toBe(401);
+    // Each session its own token.
+    const [a, b] = await Promise.all([runtime.session(), runtime.session()]);
+    expect(a.env.ANTHROPIC_AUTH_TOKEN).not.toBe(b.env.ANTHROPIC_AUTH_TOKEN);
+    await Promise.all([a.dispose(), b.dispose()]);
+  });
+
+  it("map Gemini's models, efforts and names", () => {
+    const gemini = buildRuntime("google-ai", CONNECTIONS["google-ai"]);
+    expect(gemini.model("claude-opus-5-5")).toBe("opus");
+    expect(gemini.model("gemini-4-argon")).toBe("gemini-4-argon");
+    expect(gemini.displayModel("")).toBe("Gemini 4 Carbon");
+    expect(gemini.displayModel("claude-haiku-5-5")).toBe("Gemini 3.5 Flash-Lite");
+    expect(["low", "medium", "high", "xhigh", "max"].map((e) => gemini.effort(e as "low"))).toEqual(["low", "medium", "high", "xhigh", "xhigh"]);
+    expect(gemini.managedSettings?.modelPricing?.overrides?.["gemini-4-carbon"]).toEqual({ input: 4, output: 20, cacheRead: 0.2, cacheWrite: 4 });
   });
 
   it("turn files the provider cannot read into a line saying so", () => {
@@ -330,6 +378,15 @@ describe("connection validation", () => {
 
   it("accepts every fixture", () => {
     for (const id of AI_PROVIDER_IDS) expect(problem(id, CONNECTIONS[id]), id).toBeUndefined();
+  });
+
+  it("takes Gemini keys in their old and new formats, and refuses what is plainly not one", () => {
+    expect(problem("google-ai", { secrets: { apiKey: "AIzaSyA-legacy-format-key-0123456789" } })).toBeUndefined();
+    expect(problem("google-ai", { secrets: { apiKey: "AQ.Ab8RN6-new-format-key-0123456789" } })).toBeUndefined();
+    expect(problem("google-ai", {})).toBe("API key is required for Gemini (Google AI Studio).");
+    expect(problem("google-ai", { secrets: { apiKey: "ya29.a0Af-sign-in-token-0123456789" } })).toMatch(/sign-in token/);
+    expect(problem("google-ai", { secrets: { apiKey: "short-key" } })).toMatch(/Gemini API key/);
+    expect(problem("google-ai", { secrets: { apiKey: '{"type": "service_account"}' } })).toMatch(/Gemini API key/);
   });
 
   it("refuses incomplete or wrong values with a clear message", () => {
@@ -557,6 +614,27 @@ describe("testConnection", () => {
     expect(fetch).not.toHaveBeenCalled();
     expect(await testConnection("custom", local, { fetch, env: { ALLOW_PRIVATE_APP_URLS: "1" } })).toEqual({ ok: true });
     expect(fetch).toHaveBeenCalledWith("http://localhost:4000/v1/messages", expect.anything());
+  });
+
+  it("checks Gemini with one SDK turn through the bridge, with a token in place of the key", async () => {
+    const key = CONNECTIONS["google-ai"].secrets.apiKey!;
+    let seen: Record<string, string | undefined> = {};
+    const q = fakeQuery([result()], (options) => {
+      seen = { ...options.env };
+    });
+    expect(await testConnection("google-ai", CONNECTIONS["google-ai"], { queryFn: q.queryFn })).toEqual({ ok: true });
+    expect(q.calls[0]).toMatchObject({ maxTurns: 1, tools: [], settingSources: [] });
+    expect(seen.ANTHROPIC_BASE_URL).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+    expect(seen.ANTHROPIC_AUTH_TOKEN).toBeTruthy();
+    expect(JSON.stringify(seen)).not.toContain(key);
+    // The token ended with the check.
+    const res = await fetch(`${seen.ANTHROPIC_BASE_URL}/v1/messages`, { method: "POST", headers: { "x-api-key": seen.ANTHROPIC_AUTH_TOKEN! }, body: "{}" });
+    expect(res.status).toBe(401);
+
+    const failing = fakeQuery([result({ is_error: true, result: `API Error: 401 rejected ${key}` })]);
+    const r = await testConnection("google-ai", CONNECTIONS["google-ai"], { queryFn: failing.queryFn });
+    expect(r).toEqual({ ok: false, error: expect.stringContaining("Gemini (Google AI Studio) check failed") });
+    expect(JSON.stringify(r)).not.toContain(key);
   });
 
   it("runs one SDK turn for a cloud, with the key file only while it runs", async () => {
