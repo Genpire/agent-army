@@ -7,6 +7,7 @@
  * call, the read-only ones its chat subagents may call, and a rule for
  * Pointer's instructions.
  */
+import type { SlackUserAccess } from "../slack/user-account.js";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { dataSourcesChatIntegration } from "../integrations/data-sources/data-sources.js";
 import { routinesChatIntegration } from "../routines/routines.js";
@@ -44,6 +45,8 @@ export interface ChatIntegrationContext {
   requesterSlackId?: string;
   /** Stores a file in this conversation (e.g. a Jira issue's attachments); absent = not available here. */
   addAttachment?: AddAttachment;
+  /** The owner's own Slack account, only when this request is the owner's (ownSlackAccount in slack/user-account.ts). */
+  slackAccount?: SlackUserAccess;
   redact: (text: string) => string;
 }
 

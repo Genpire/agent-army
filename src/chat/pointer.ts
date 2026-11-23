@@ -23,6 +23,7 @@ import type { NotesRepo } from "./notes.js";
 import { ActivityMapper } from "./pointer-activity.js";
 import { createPointerToolServer, githubToolOptions } from "./pointer-tools.js";
 import { requesterSlackId } from "../slack/slack-tools.js";
+import { ownSlackAccount } from "../slack/user-account.js";
 import type { PointerBrain, PointerBrainDeps, PointerContext, PointerReply, PointerRequest } from "./pointer-types.js";
 import { SKILL_TOOL, type TeamSkills, buildChatAgents, pluginSkillName, rosterText, skillQueryOptions } from "../team/team.js";
 import { configSecrets, makeRedactor } from "../tasks/worker.js";
@@ -420,12 +421,15 @@ export function createPointerBrain(
 
       // The requester's Slack user id: "me" for Slack messages; none in the console.
       const slackSelf = requesterSlackId(req);
+      // The owner's own Slack account, for the owner's requests only.
+      const slackAccount = ownSlackAccount(config, req);
       // GitLab, Bitbucket, Jira, Miro, Slack and apps: each one that cannot be built is left out (chat-integrations.ts).
       const integrations: ChatIntegration[] = await chatIntegrations(config, {
         configRepo: deps.configRepo,
         requester: req.userName || req.userId,
         ...(slackSelf ? { requesterSlackId: slackSelf } : {}),
         addAttachment: ctx.addAttachment,
+        ...(slackAccount ? { slackAccount } : {}),
         redact,
       });
       const connected = integrations.filter((i) => i.server);
