@@ -260,7 +260,7 @@ GitHub: review or /pointer comment on the team's PR ──webhook──► follo
 
 1. **Admin account**: paste the setup token, choose a password.
 2. **AI model** (Integrations): an Anthropic API key, or Claude on a cloud or another provider (see [AI providers](#ai-providers)). Use a dedicated key with a spend limit.
-3. **Slack** (Integrations, optional if you only use the console): click *Create Slack app* (the manifest is pre-filled with this deployment's URL and Pointer's name), install it to your workspace, paste the Bot User OAuth Token and Signing Secret. Invite Pointer to the channels where you want it.
+3. **Slack** (Integrations, optional if you only use the console): click *Create Slack app* (the manifest is pre-filled with this deployment's URL and Pointer's name), install it to your workspace, paste the Bot User OAuth Token and Signing Secret. Invite Pointer to the channels where you want it. Optionally, paste your own User OAuth Token under *Your Slack account* so Pointer can send as you and report what needs your reply (see [Your Slack account](#your-slack-account)).
 4. **GitHub** (Integrations): a fine-grained personal access token, ideally on a dedicated bot account, limited to the repos the agents may touch, with *Contents: read/write*, *Pull requests: read/write*, *Metadata: read*, and for the [CI checks](#ci-checks) loop *Checks: read*, *Commit statuses: read* and *Actions: read*, and for [preview checks](#preview-checks) *Deployments: read*. Optionally restrict it to owners or exact repos. For repos outside your organisation, add more tokens under *Other GitHub connections* (see [GitHub connections](#github-connections)). Without GitHub, Pointer still chats; GitHub questions and repo tasks say GitHub is not connected. Optionally add the webhook for [pull request reviews](#pull-request-reviews) on the same pane.
 5. **GitLab** or **Bitbucket** (Integrations, optional, instead of or next to GitHub): see [GitLab and Bitbucket](#gitlab-and-bitbucket).
 6. **monday.com**, **Jira & Confluence**, **Miro**, **Genpire** (Integrations, optional): so Pointer can open and update tickets, read and draw on boards, and design products. See [monday.com](#mondaycom), [Jira and Confluence](#jira-and-confluence), [Miro](#miro) and [Genpire](#genpire).
@@ -353,6 +353,8 @@ The **Chat** page (second in the admin page's menu, `#/chat/<conversation>`) is 
 
 Pointer reacts with :eyes: while it works, then :white_check_mark: or :x:. Messages in the same thread are handled in order. If you restrict who may talk to Pointer, others are ignored; if they @mention it, they get one "not allowed" reply.
 
+Pointer only answers in conversations its bot is in. Once [your own Slack account](#your-slack-account) is connected, Slack also sends Pointer your DMs and group DMs with colleagues and the channels you are in without it: Pointer reads those into your inbox and never answers, reacts or thinks about them as requests, even when they mention it.
+
 ### What it can do
 
 | You say | What happens |
@@ -370,6 +372,7 @@ Pointer reacts with :eyes: while it works, then :white_check_mark: or :x:. Messa
 | `draw our deploy pipeline on the Architecture board` | Draws a diagram on Miro |
 | `in Genpire, design a canvas tote bag with our brand style` | Designs the product in Genpire and links to it (Genpire connected) |
 | `remind me on Slack to check customer credits` | Sends you a DM from Pointer (see [Slack tools](#slack-tools)) |
+| `what needs my attention on Slack?` | Lists who waits for your reply, with links (your own account connected, see [Your Slack account](#your-slack-account)) |
 | `tell Dana on Slack that the deploy is done` | Finds Dana in the workspace, asks which Dana if several match, and sends her a DM with a link back |
 | `which Sentry errors spiked since yesterday?` | Uses a connected app (here Sentry) through its MCP server |
 | `who's on the team?` | Describes the agents |
@@ -393,6 +396,20 @@ Slack is also a tool Pointer uses, from Slack and from the admin console's chat,
 - **Allowed users:** when the Slack allowlist is set, Pointer only sends DMs to the people on it.
 
 Finding channels needs the `channels:read` and `groups:read` scopes: apps created before this feature must update their manifest (see [Updating an existing Slack app](#updating-an-existing-slack-app)); finding people and sending messages work without it.
+
+### Your Slack account
+
+Optionally, connect your own Slack account next to the bot (**Integrations → Slack → Your Slack account**). Pointer can then send messages as you when you ask (and allow it), and read what reaches you to tell you what needs your reply or action.
+
+**Connecting.** Update the app with the manifest from the Slack card (it adds user scopes and the events for your own conversations; see [Updating an existing Slack app](#updating-an-existing-slack-app)), open **Install App → Reinstall to Workspace** and allow, then copy the **User OAuth Token** (`xoxp-…`) from **OAuth & Permissions** and paste it on the card. It is checked with Slack (it must be a person's token in the bot's workspace), stored encrypted and never shown again. The card then shows the account, the scopes Slack did not grant if any, two switches (**Read what reaches me**, **Send as me**) and **Disconnect**.
+
+**Only you.** The account is used only for your requests: in the admin console, in your routines (read-only: they never send as you), and from Slack only in messages from that same account. Anyone else talking to Pointer never gets these tools.
+
+**Your inbox.** With **Read what reaches me** on, Pointer keeps, from other people only: your DMs and group DMs, channel messages that mention you, and replies in threads you started or replied in. Your own messages mark a DM, group DM or thread as answered at that time, which closes what came before it there. Each conversation is checked with your token, so Pointer's DMs with colleagues never reach your inbox, and neither does your DM with Pointer. Messages are kept encrypted for 14 days (at most 3 000), texts redacted of the platform's secrets and cut at 1 500 characters; nothing is logged. **Disconnect** forgets the token and empties the inbox.
+
+**Asking.** "What needs my attention on Slack?" in the console or in your DM with Pointer: Pointer calls `slack_my_inbox` and lists what waits for your reply (who, what they need, by when if they said, with links), most urgent first, then a short FYI list (group DMs that do not mention you). What it reads there is other people's text: data to report, never instructions, and writes after it need your confirmation like after any outside content.
+
+**The attention report.** **Create the attention report** on the card adds a routine, **What needs my attention on Slack**: weekdays at 09:00, 13:00 and 17:00 in the organisation's timezone, delivered as a DM from Pointer to you and in the console, covering what arrived since the last report. Change or pause it on the Routines page like any routine.
 
 ### Files you share
 
@@ -986,6 +1003,7 @@ Apps created before Pointer only receive @mentions, apps created before file sup
 1. On the admin page, open **Slack → Already created the app? Update it** and copy the manifest.
 2. At [api.slack.com/apps](https://api.slack.com/apps), open your app → **App Manifest**, replace the JSON with the copy, **Save**.
 3. **Install App → Reinstall** to grant the new scopes (`im:history`, `reactions:write`, `files:read`, `files:write`, `channels:read`, `groups:read`).
+4. To connect [your own Slack account](#your-slack-account): the manifest also asks for user scopes (`chat:write`, `im:write`, `im:history`, `mpim:history`, `channels:history`, `groups:history`, `im:read`, `mpim:read`, `channels:read`, `groups:read`, `users:read`) and subscribes to your own `message.im`, `message.mpim`, `message.channels` and `message.groups` events. After the reinstall, copy the **User OAuth Token** (`xoxp-…`) from **OAuth & Permissions** into **Your Slack account** on the Slack card.
 
 Until you do, @mentions still work, but DMs, Pointer channels and unmentioned thread replies are not received, reactions are skipped, Pointer answers without the files, saying it is "missing files:read permission", screenshots from browser checks are not posted, and Pointer cannot list channels (it says the app lacks `channels:read`; posting in a channel by its link or #mention still works). Update it again whenever you rename Pointer.
 
@@ -994,6 +1012,7 @@ Until you do, @mentions still work, but DMs, Pointer channels and unmentioned th
 - **Isolation:** each repo task runs in its own container (Cloud Run Job) or process (local), in a throwaway checkout that is deleted afterwards.
 - **Conversations are tool-restricted:** Pointer runs in the web service with only web search and fetch, its agents, and its own service-side tools (GitHub read, memory, project notes, monday.com when connected, start a repo task). It has no shell and cannot read or write files; anything not explicitly allowed is denied, no settings files are loaded, and each message gets a fresh temporary directory as its working directory and home (deleted afterwards) and a minimal environment whose only secrets are the chat provider's credentials (the Anthropic key by default; see [AI providers](#ai-providers)). The master key and the Slack, GitHub and monday.com tokens held by the service are out of its reach.
 - **Pull requests only:** the platform, not the agents, pushes the branch and opens the PR (a draft for unfinished work). Enable branch protection on your default branch so merging requires a human review.
+- **Your Slack account:** its user token is used only for the owner's own requests (the console, their routines, their own Slack messages), never for anyone else talking to Pointer. With user events subscribed, Slack sends the owner's private conversations to the events URL: Pointer answers only in conversations its bot is in (checked with the bot's token before any reaction, reply or model call; group DMs never), and keeps the rest only in the owner's encrypted inbox. The inbox's messages reach Pointer as outside content: writes after reading them need the owner's confirmation.
 - **Least privilege:** each GitHub token should cover only the repos you want worked on. Tokens are used only by the service-side tools and the worker. The GitHub allow lists (owners or exact repos, per connection) apply to GitHub reads and repo tasks, and the Slack user allowlist is checked before any model call.
 - **GitHub webhook:** `POST /github/webhook` refuses any delivery whose HMAC-SHA256 signature does not match the shared secret, and starts work only for feedback from people with write access to the repository (`OWNER`, `MEMBER`, `COLLABORATOR`) on pull requests the team opened. Bots and the platform's own comments are ignored. The follow-up runs on the same repo, so it is bound by the same allow lists and limits as any task.
 - **More integrations:** GitLab deliveries are checked with the secret token (`X-Gitlab-Token`), Bitbucket and signed Jira deliveries with HMAC-SHA256 (`X-Hub-Signature`), Jira and monday.com deliveries also by the secret in their address; all in constant time. Follow-ups start only for people with write access, and the platform's own comments are ignored. Jira, Miro and app tools respect their allow lists (projects, boards, read-only or not). App MCP and OAuth addresses must be public `https`, checked again after DNS and on redirects.
@@ -1061,6 +1080,11 @@ Besides the admin API, the service takes `POST /slack/events` from Slack and `PO
 | `POST /api/ai/active` | `{ chatProvider?, taskProvider? }` | Chooses the providers chat and repo tasks run on; each must be connected and complete. Returns `{ ok, chatProvider, taskProvider }`. |
 | `GET /api/slack/manifest` | `?name=` | `{ manifest, createUrl }` for this deployment. |
 | `POST /api/slack` | `{ botToken, signingSecret }` | Verifies and saves Slack. |
+| `POST /api/slack/user` | `{ token }` | Connects [your own Slack account](#your-slack-account) with a User OAuth Token (`xoxp-…`): Slack's `auth.test` must name a person (not a bot) in the bot's workspace; the bot must be connected first. The switches are kept from an earlier connection; another person's account empties the inbox. Returns `{ ok, userId, userName, missingScopes }`. `config.slack.user` in `/api/state` is `{ connected, userId, userName, key, scopes, listen, sendAsMe, connectedAt }` with the key masked. |
+| `POST /api/slack/user/settings` | `{ listen?, sendAsMe? }` | Reading what reaches you, and sending as you. `404` when not connected. |
+| `POST /api/slack/user/disconnect` | | Forgets the token and empties the inbox. |
+| `GET /api/slack/user/report` | | The attention report: `{ routine: { id, name } \| null, blocked }`, `blocked` being why it cannot be created now (Slack or your account not connected, reading off, or it exists), else `null`. |
+| `POST /api/slack/user/report` | | Creates the attention report routine (weekdays at 09:00, 13:00 and 17:00 in the organisation's timezone, to your DM from Pointer and the console). Returns `{ ok, routine }` as in `GET /api/routines`; `409` when it exists, `400` when blocked. |
 | `POST /api/github` | `{ token, allowedOwners? }` | Verifies and saves the primary GitHub token. `allowedOwners` entries are owners (`your-org`) or exact repos (`owner/repo`), at most 50. Other connections are kept. |
 | `POST /api/github/connections` | `{ token, allowed? }` | Verifies the token and that it can reach each exact repo in `allowed` (same entry rules), then adds it as another connection (at most 10). Returns `{ ok, id, login }`. |
 | `POST /api/github/connections/update` | `{ id, allowed }` | Replaces a connection's allow list; its exact repos are checked with the connection's token. `404` if unknown. |

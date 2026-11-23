@@ -4,6 +4,7 @@ import { ATTACHMENT_LIMITS } from "../chat/attachments.js";
 import { safeEqual } from "../core/crypto.js";
 import type { ConversationMessage, SlackFileRef } from "../chat/pointer-types.js";
 import { messageText } from "./targeting.js";
+import { SLACK_USER_EVENTS, SLACK_USER_SCOPES } from "./user-account.js";
 
 /** https://api.slack.com/authentication/verifying-requests-from-slack */
 export function verifySlackSignature(opts: {
@@ -27,7 +28,10 @@ export function verifySlackSignature(opts: {
  * existing app). Pointer reads channel, private-channel and DM messages so it
  * can answer without a mention; `app_mention` stays for older installs.
  * channels:read and groups:read let it find a channel by name when asked to
- * post there (slack_list_channels in slack-tools.ts).
+ * post there (slack_list_channels in slack-tools.ts). The user scopes and
+ * events are for the owner's own account (slack/user-account.ts): once the
+ * app is reinstalled, Slack also sends the owner's conversations, which are
+ * read into their inbox (slack/inbox.ts) and never answered.
  */
 export function buildManifest(baseUrl: string, botName: string) {
   return {
@@ -54,12 +58,14 @@ export function buildManifest(baseUrl: string, botName: string) {
           "files:read",
           "files:write",
         ],
+        user: [...SLACK_USER_SCOPES],
       },
     },
     settings: {
       event_subscriptions: {
         request_url: `${baseUrl}/slack/events`,
         bot_events: ["app_mention", "message.channels", "message.groups", "message.im"],
+        user_events: [...SLACK_USER_EVENTS],
       },
       org_deploy_enabled: false,
       socket_mode_enabled: false,
@@ -91,7 +97,7 @@ export function truncate(text: string, max = 3500): string {
 /** Display names rarely change; one users.info call per person per process. */
 const userNames = new Map<string, string>();
 
-export async function userName(client: WebClient, userId: string): Promise<string> {
+export async function userName(client: { users: Pick<WebClient["users"], "info"> }, userId: string): Promise<string> {
   const cached = userNames.get(userId);
   if (cached) return cached;
   try {
@@ -361,5 +367,87 @@ export async function unreact(client: WebClient, channel: string, ts: string, na
     await client.reactions.remove({ channel, timestamp: ts, name });
   } catch {
     // ignored on purpose
+  }
+}
+
+/** Whether Pointer's bot is in a conversation; "unknown" when Slack could not say. */
+export type BotPresence = "member" | "outside" | "unknown";
+
+/** Slack's answers that mean the bot cannot see a conversation. */
+const OUTSIDE_ERRORS = new Set(["channel_not_found", "not_in_channel", "missing_scope", "method_not_supported_for_channel_type"]);
+/** A channel the bot is in is looked up again after this; one it is not in, sooner (it may be invited). */
+const MEMBER_TTL_MS = 5 * 60_000;
+const OUTSIDE_TTL_MS = 30_000;
+const MAX_KNOWN_CONVERSATIONS = 5_000;
+
+/** The bot can read the conversation: its own DM, or a channel it is in. Slack's error otherwise. */
+async function botReads(client: Pick<WebClient, "conversations">, channel: string): Promise<boolean> {
+  await client.conversations.history({ channel, limit: 1 });
+  return true;
+}
+
+/**
+ * Which conversations Pointer's bot is in, asked with the bot's token and
+ * cached. Once the owner's account is connected, Slack also sends the owner's
+ * own conversations: their DMs and group DMs with colleagues and the channels
+ * Pointer is not in. Only the bot's conversations hold requests to Pointer,
+ * whoever Slack names in the event's authorizations.
+ *
+ * A DM is the bot's when the bot can read it (conversations.history with
+ * im:history: the app has no im:read for conversations.info); a channel says
+ * whether the bot is in it (conversations.info), or, for an app without
+ * channels:read, whether the bot can read it. A DM's members never change, so
+ * a DM is looked up once; a channel again after a few minutes, or sooner
+ * after a miss.
+ */
+export class BotConversations {
+  private readonly known = new Map<string, { member: boolean; until: number }>();
+
+  constructor(private readonly now: () => number = Date.now) {}
+
+  /** `bot` (the bot's user id) keeps one app's answers apart from another's. */
+  async presence(client: Pick<WebClient, "conversations">, channel: string, channelType: string | undefined, bot = ""): Promise<BotPresence> {
+    // Group DMs: the app has no mpim scopes, so its bot is never in one.
+    if (channelType === "mpim") return "outside";
+    const key = `${bot}:${channel}`;
+    const hit = this.known.get(key);
+    if (hit && hit.until > this.now()) return hit.member ? "member" : "outside";
+    const dm = channelType === "im" || channel.startsWith("D");
+    let member: boolean;
+    try {
+      member = dm ? await botReads(client, channel) : await this.inChannel(client, channel);
+    } catch (err) {
+      const code = slackErrorCode(err);
+      if (!code || !OUTSIDE_ERRORS.has(code)) return "unknown";
+      member = false;
+    }
+    this.remember(key, member, dm);
+    return member ? "member" : "outside";
+  }
+
+  private async inChannel(client: Pick<WebClient, "conversations">, channel: string): Promise<boolean> {
+    let info: Awaited<ReturnType<WebClient["conversations"]["info"]>>["channel"];
+    try {
+      info = (await client.conversations.info({ channel })).channel;
+    } catch (err) {
+      if (slackErrorCode(err) === "missing_scope") return botReads(client, channel);
+      throw err;
+    }
+    if (info?.is_mpim) return false;
+    return info?.is_im ? botReads(client, channel) : Boolean(info?.is_member);
+  }
+
+  /** What an event shows: the bot joined or left a channel. */
+  note(channel: string, member: boolean, bot = ""): void {
+    this.remember(`${bot}:${channel}`, member, false);
+  }
+
+  private remember(key: string, member: boolean, forever: boolean): void {
+    this.known.delete(key);
+    this.known.set(key, { member, until: forever ? Number.POSITIVE_INFINITY : this.now() + (member ? MEMBER_TTL_MS : OUTSIDE_TTL_MS) });
+    for (const oldest of this.known.keys()) {
+      if (this.known.size <= MAX_KNOWN_CONVERSATIONS) break;
+      this.known.delete(oldest);
+    }
   }
 }

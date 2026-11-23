@@ -12,12 +12,29 @@ const HUMAN_SUBTYPES = new Set(["thread_broadcast", "file_share"]);
 
 export const isDm = (e: SlackMessageEvent): boolean => e.channel_type === "im";
 
-const isThreadReply = (e: SlackMessageEvent): boolean => Boolean(e.thread_ts && e.thread_ts !== e.ts);
+export const isThreadReply = (e: SlackMessageEvent): boolean => Boolean(e.thread_ts && e.thread_ts !== e.ts);
+
+/** A new message a person wrote (not an edit, a join or a bot's post). */
+export function isPersonMessage(e: SlackMessageEvent): e is SlackMessageEvent & { channel: string; ts: string; user: string } {
+  if (e.type !== "message" || !e.channel || !e.ts || !e.user || e.bot_id) return false;
+  return !e.subtype || HUMAN_SUBTYPES.has(e.subtype);
+}
+
+/** The text mentions this user (<@U123> or <@U123|name>). */
+export const mentionsUser = (text: string | undefined, userId: string | undefined): boolean =>
+  Boolean(text && userId && (text.includes(`<@${userId}>`) || text.includes(`<@${userId}|`)));
 
 export function isExplicitMention(e: SlackMessageEvent, botUserId: string | undefined): boolean {
   if (e.type === "app_mention") return true;
-  if (!botUserId || !e.text) return false;
-  return e.text.includes(`<@${botUserId}>`) || e.text.includes(`<@${botUserId}|`);
+  return mentionsUser(e.text, botUserId);
+}
+
+/** The bot joining or leaving a channel, as its join and leave messages show it. */
+export function botMembershipChange(e: SlackMessageEvent, botUserId: string | undefined): "joined" | "left" | undefined {
+  if (e.type !== "message" || !botUserId || e.user !== botUserId) return undefined;
+  if (e.subtype === "channel_join" || e.subtype === "group_join") return "joined";
+  if (e.subtype === "channel_leave" || e.subtype === "group_leave") return "left";
+  return undefined;
 }
 
 /** Spec §1 rules 1–4. "if-pointer-in-thread" needs a Slack lookup, so the caller decides. */

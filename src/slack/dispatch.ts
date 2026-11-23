@@ -8,6 +8,7 @@ import {
   RecentSet,
   type RespondDecision,
   Semaphore,
+  botMembershipChange,
   dedupeKey,
   isDm,
   isExplicitMention,
@@ -25,7 +26,9 @@ import type {
   SlackMessageEvent,
   StartRepoTask,
 } from "../chat/pointer-types.js";
+import type { SlackInbox } from "./inbox.js";
 import {
+  BotConversations,
   downloadSlackFile,
   fetchConversation,
   react,
@@ -57,6 +60,8 @@ function freshState() {
     postedThreads: new RecentSet(),
     conversations: new KeyedQueue(),
     brainSlots: new Semaphore(6),
+    /** The conversations Pointer's bot is in: the only ones that hold requests to it. */
+    bots: new BotConversations(),
   };
 }
 let state = freshState();
@@ -75,6 +80,8 @@ type Incoming = SlackMessageEvent & { channel: string; ts: string; user: string 
 export type DispatchDeps = SlackDeps & {
   /** Caps checked before chat replies and repo tasks; alerts after spend. Absent = no caps (older tests). */
   spending?: Pick<Spending, "checkTask" | "checkChat" | "notify">;
+  /** The owner's Slack inbox (inbox.ts): what reaches their own account. Absent = not kept (older tests). */
+  inbox?: SlackInbox;
 };
 
 interface Ctx {
@@ -89,13 +96,29 @@ interface Ctx {
 
 /**
  * Routes one Slack `message`/`app_mention` event: decide whether Pointer
- * answers, run a command or ask the brain, and reply. Never throws; problems
- * the user should know about are posted in the conversation.
+ * answers, run a command or ask the brain, and reply; and, apart from that,
+ * keep what reaches the owner's own account in their inbox. Never throws;
+ * problems the user should know about are posted in the conversation.
  */
 export async function handleSlackEvent(event: SlackMessageEvent, deps: DispatchDeps): Promise<void> {
   if (!event.channel || !event.ts) return;
   // Queue before the first await so messages in one conversation keep their arrival order.
-  await state.conversations.run(queueKey(event), () => route(event, deps));
+  const routed = state.conversations.run(queueKey(event), () => route(event, deps));
+  await Promise.all([routed, deps.inbox ? capture(event, deps, deps.inbox) : undefined]);
+}
+
+/** Keeps the message in the owner's inbox when it is for them (inbox.ts decides). Never throws, never logs the text. */
+async function capture(event: SlackMessageEvent, deps: DispatchDeps, inbox: SlackInbox): Promise<void> {
+  let redact = (text: string) => text;
+  try {
+    const config = await deps.configRepo.load();
+    const account = config.slack.user;
+    if (!account?.listen || !config.slack.botToken) return;
+    redact = secretsRedactor(config);
+    await inbox.capture(event, { config, client: deps.slack, redact });
+  } catch (err) {
+    console.error("[slack] inbox capture failed:", redact(errorText(err)).slice(0, 300));
+  }
 }
 
 async function route(event: SlackMessageEvent, deps: DispatchDeps): Promise<void> {
@@ -105,12 +128,22 @@ async function route(event: SlackMessageEvent, deps: DispatchDeps): Promise<void
     const botToken = config.slack.botToken;
     if (!botToken) return;
     redact = secretsRedactor(config);
+    const bot = config.slack.botUserId ?? "";
 
+    const change = botMembershipChange(event, bot);
+    if (change) state.bots.note(event.channel!, change === "joined", bot);
     const decision = shouldRespond(event, {
       botUserId: config.slack.botUserId,
       pointerChannels: config.slack.pointerChannels,
     });
     if (decision === "no") return;
+    const slack = deps.slack(botToken);
+    // Once the owner's account is connected, Slack also sends their own conversations (DMs and group DMs
+    // with colleagues, channels Pointer is not in): never requests to Pointer. Checked before anything
+    // is said, reacted or asked; a conversation Slack cannot place is left alone too. `app_mention` is
+    // a bot event only, sent from conversations the app is in (and the one event older apps receive).
+    const ours = event.type === "app_mention" || (await state.bots.presence(slack, event.channel!, event.channel_type, bot)) === "member";
+    if (!ours) return;
     if (state.seen.has(dedupeKey(event))) return;
     state.seen.add(dedupeKey(event));
 
@@ -118,7 +151,7 @@ async function route(event: SlackMessageEvent, deps: DispatchDeps): Promise<void
       e: event as Incoming,
       config,
       deps,
-      slack: deps.slack(botToken),
+      slack,
       botToken,
       mentioned: isExplicitMention(event, config.slack.botUserId),
       redact,

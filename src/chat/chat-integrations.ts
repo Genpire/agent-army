@@ -2,7 +2,8 @@
  * The integrations Pointer uses in chat beyond its own tool server
  * (pointer-tools.ts: GitHub, memory, notes, monday.com, repo tasks): GitLab
  * and Bitbucket code tools, Jira and Confluence, Miro, Slack (finding people
- * and sending messages), and apps connected through their MCP servers. Each
+ * and sending messages), the owner's Slack inbox (their requests only), and
+ * apps connected through their MCP servers. Each
  * one brings an MCP server (in-process or remote), the tool names Pointer may
  * call, the read-only ones its chat subagents may call, and a rule for
  * Pointer's instructions.
@@ -16,6 +17,7 @@ import { codeHostChatIntegrations } from "../integrations/code-hosts/code-host-t
 import type { Config, ConfigRepo } from "../core/config.js";
 import { jiraChatIntegration } from "../integrations/jira/jira.js";
 import { miroChatIntegration } from "../integrations/miro/miro.js";
+import { inboxChatIntegration } from "../slack/inbox-tools.js";
 import { slackChatIntegration } from "../slack/slack-tools.js";
 import type { AddAttachment } from "./pointer-types.js";
 
@@ -70,6 +72,7 @@ export async function chatIntegrations(config: Config, ctx: ChatIntegrationConte
   await add("Jira", () => jiraChatIntegration(config, ctx));
   await add("Miro", () => miroChatIntegration(config, ctx));
   await add("Slack", () => slackChatIntegration(config, ctx));
+  await add("Slack inbox", () => inboxChatIntegration(config, ctx));
   await add("apps", () => appChatIntegrations(config, ctx));
   await add("company data", () => dataSourcesChatIntegration(config, ctx));
   await add("routines", () => routinesChatIntegration(config, ctx));
