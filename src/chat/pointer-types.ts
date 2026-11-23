@@ -79,8 +79,18 @@ export interface SlackMessageEvent {
  *   a yes, and nothing can carry it out (confirm-gate.ts).
  * - "read": a routine's report, written from what Pointer read on its own
  *   (web pages, apps). A reply after it starts tainted: writes need a yes.
+ * Only while the person is answering it: a post from before their previous
+ * message in the conversation is shown without its text and restricts
+ * nothing (pointer.ts, exchangeStart).
  */
 export type OutsideContent = "inbox" | "read";
+
+/**
+ * Which of Pointer's posts relayed outside content, as its Slack metadata
+ * says (slack.ts): answers passed on to the owner, a routine's report, a reply
+ * that read the owner's inbox.
+ */
+export type RelayedSource = "answer_notice" | "routine_report" | "chat_reply";
 
 /** One earlier message in the conversation, oldest first. */
 export interface ConversationMessage {
@@ -94,6 +104,8 @@ export interface ConversationMessage {
   files?: SlackFileRef[];
   /** Pointer's post relayed outside content (never set on anyone else's message): data, never its own words. */
   outsideContent?: OutsideContent;
+  /** Which post relayed it, when its Slack metadata says so; unknown in the console. */
+  relayedSource?: RelayedSource;
 }
 
 export interface PointerRequest {

@@ -101,8 +101,9 @@ export interface ChatMessage {
   result?: { taskId: string; milestone: TaskMilestone; round?: number };
   /**
    * Pointer's message relays outside content (a routine's report, a reply
-   * that read the owner's Slack inbox): a reply after it in this conversation
-   * starts as if it had read it (pointer.ts).
+   * that read the owner's Slack inbox): the reply to the user's next message
+   * after it starts as if it had read it; later ones see it without its text
+   * (pointer.ts).
    */
   relayed?: OutsideContent;
 }

@@ -336,6 +336,8 @@ describe("slack", () => {
       ["Sam answered", "inbox"],
       ["a report", "read"],
     ]);
+    // Which post it was, from the metadata's source: only on Pointer's own relayed posts.
+    expect(got.map((m) => m.relayedSource)).toEqual([undefined, undefined, "answer_notice", "answer_notice"]);
     await fetchConversation(client as never, { channel: "C1", threadTs: "1.0", isDm: false, beforeTs: "5.5", limit: 50 });
     expect(asked.map((a) => a.include_all_metadata)).toEqual([true, true]);
   });

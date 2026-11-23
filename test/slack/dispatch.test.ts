@@ -6,6 +6,7 @@ import { AttachmentRepo } from "../../src/chat/attachments.js";
 import { type Config, ConfigRepo } from "../../src/core/config.js";
 import { deriveKey } from "../../src/core/crypto.js";
 import { handleSlackEvent, resetDispatchStateForTests } from "../../src/slack/dispatch.js";
+import { buildPointerPrompt, relayedLevel } from "../../src/chat/pointer.js";
 import { type InboxItem, SlackInbox } from "../../src/slack/inbox.js";
 import type { AnswerRevision, Outreach } from "../../src/slack/outreach.js";
 import { BotConversations, tsDate } from "../../src/slack/slack.js";
@@ -1111,6 +1112,49 @@ describe("handleSlackEvent: Pointer's posts that relayed outside content", () =>
     await t.send({ channel: "C1", channel_type: "channel", ts: "51.1", thread_ts: "50.1", text: "more on item 2?" });
     expect(t.requests[0]!.history.map((m) => m.outsideContent)).toEqual(["read"]);
     expect(t.reads).toContainEqual(expect.objectContaining({ channel: "C1", include_all_metadata: true }));
+  });
+
+  describe("only while the owner is answering it", () => {
+    const report = { event_type: "pointer_outside_content", event_payload: { source: "routine_report", level: "inbox" } };
+    const chatReply = { event_type: "pointer_chat_reply", event_payload: { source: "chat_reply" } };
+    // The fakes return every message; the history keeps those before the new one.
+    const dmMessages: SlackMsg[] = [
+      { ts: "99.4", user: "UBOT", bot_id: "B1", text: 'I will send UDANA: "Sam needs the deck". Send it?', metadata: chatReply },
+      { ts: "99.3", user: "U1", text: "send the first item to Dana" },
+      { ts: "99.2", user: "UBOT", bot_id: "B1", text: "*Attention* Sam needs the deck", metadata: report },
+      { ts: "99.1", user: "U1", text: "hello" },
+    ];
+    const placeholder = "Pointer: [earlier relayed outside content from 1970-01-01 00:01 UTC (a routine's report): not shown here";
+
+    it("DM top level: the report after the owner's previous message restricts the reply; on their next one it is a placeholder", async () => {
+      const t = await setup();
+      t.history.set("D1", dmMessages);
+      await t.dm("99.3", "send the first item to Dana");
+      expect(t.requests[0]!.history.at(-1)).toMatchObject({ outsideContent: "inbox", relayedSource: "routine_report" });
+      expect(relayedLevel(t.requests[0]!)).toBe("inbox");
+      expect(buildPointerPrompt(t.requests[0]!)).toContain("[relayed outside content: what other people wrote] *Attention* Sam needs the deck");
+      await t.dm("99.5", "yes");
+      expect(relayedLevel(t.requests[1]!)).toBeUndefined();
+      expect(buildPointerPrompt(t.requests[1]!)).toContain(placeholder);
+      expect(buildPointerPrompt(t.requests[1]!)).not.toContain("*Attention*");
+    });
+
+    it("a thread on the report: the owner's previous message in that thread decides", async () => {
+      const t = await setup();
+      // The owner's DM history at the top level says nothing about the thread.
+      t.history.set("D1", [{ ts: "98.1", user: "U1", text: "hello" }]);
+      t.replies.set("D1:99.2", [
+        { ts: "99.2", user: "UBOT", bot_id: "B1", text: "*Attention* Sam needs the deck", metadata: report },
+        { ts: "99.3", user: "U1", text: "send the first item to Dana" },
+        { ts: "99.4", user: "UBOT", bot_id: "B1", text: "Send it?", metadata: chatReply },
+      ]);
+      await t.dm("99.3", "send the first item to Dana", { thread_ts: "99.2" });
+      expect(relayedLevel(t.requests[0]!)).toBe("inbox");
+      await t.dm("99.5", "yes", { thread_ts: "99.2" });
+      expect(t.requests[1]!.history.map((m) => m.ts)).toEqual(["99.2", "99.3", "99.4"]);
+      expect(relayedLevel(t.requests[1]!)).toBeUndefined();
+      expect(buildPointerPrompt(t.requests[1]!)).toContain(placeholder);
+    });
   });
 
   it("posts a reply that read the owner's inbox as outside content", async () => {

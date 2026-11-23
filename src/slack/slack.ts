@@ -2,7 +2,7 @@ import { createHmac } from "node:crypto";
 import { WebClient } from "@slack/web-api";
 import { ATTACHMENT_LIMITS } from "../chat/attachments.js";
 import { safeEqual } from "../core/crypto.js";
-import type { ConversationMessage, OutsideContent, SlackFileRef } from "../chat/pointer-types.js";
+import type { ConversationMessage, OutsideContent, RelayedSource, SlackFileRef } from "../chat/pointer-types.js";
 import { messageText } from "./targeting.js";
 import { SLACK_USER_EVENTS, SLACK_USER_SCOPES } from "./user-account.js";
 
@@ -190,13 +190,24 @@ export function relayedContent(m: Pick<RawMessage, "metadata">): OutsideContent 
   return level === "read" ? "read" : "inbox";
 }
 
+const RELAYED_SOURCES: readonly RelayedSource[] = ["answer_notice", "routine_report", "chat_reply"];
+
+/** Which post relayed the outside content, from its metadata's source; undefined for none or one Pointer does not write. */
+export function relayedSource(m: Pick<RawMessage, "metadata">): RelayedSource | undefined {
+  if (pointerPostKind(m) !== "outside") return undefined;
+  const payload = m.metadata?.event_payload;
+  const source = payload && typeof payload === "object" ? (payload as { source?: unknown }).source : undefined;
+  return RELAYED_SOURCES.find((s) => s === source);
+}
+
 /**
  * The conversation before a new message, oldest first: the thread (via
  * conversations.replies) or, for a top-level DM message, recent DM history.
  * A top-level channel message starts a new thread and has no history.
  * Long threads keep their first message plus the latest ones. Pointer's posts
- * that relayed outside content say so (outsideContent, from their metadata):
- * the reply then starts as if it had read it (pointer.ts). Never throws.
+ * that relayed outside content say so (outsideContent and relayedSource, from
+ * their metadata): a reply while the person is answering one starts as if it
+ * had read it (pointer.ts). Never throws.
  */
 export async function fetchConversation(
   client: WebClient,
@@ -245,6 +256,7 @@ export async function fetchConversation(
       const mine = isPointer(m);
       const files = slackFileRefs(m.files);
       const relayed = mine ? relayedContent(m) : undefined;
+      const source = relayed ? relayedSource(m) : undefined;
       return {
         ts: m.ts,
         userId: m.user,
@@ -253,6 +265,7 @@ export async function fetchConversation(
         isPointer: mine,
         ...(files.length ? { files } : {}),
         ...(relayed ? { outsideContent: relayed } : {}),
+        ...(source ? { relayedSource: source } : {}),
       };
     });
   } catch {

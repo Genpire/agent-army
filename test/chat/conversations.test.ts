@@ -19,6 +19,7 @@ import {
 } from "../../src/chat/conversations.js";
 import { deriveKey } from "../../src/core/crypto.js";
 import { ActivityMapper, toolLabel } from "../../src/chat/pointer-activity.js";
+import { buildPointerPrompt, relayedLevel } from "../../src/chat/pointer.js";
 import type { PointerBrain, PointerContext, PointerReply, PointerRequest } from "../../src/chat/pointer-types.js";
 import { FsStore } from "../../src/core/store.js";
 import { TimelineRecorder } from "../../src/tasks/task-events.js";
@@ -129,6 +130,25 @@ describe("ConversationService", () => {
     await t.service.idle();
     expect(t.calls[1]!.req.history.map((h) => h.outsideContent)).toEqual([undefined, "inbox"]);
     expect(lastPointer((await t.service.view(c.id))!.conversation)?.relayed).toBeUndefined();
+  });
+
+  it("a routine's report restricts only the reply to the owner's next message; later it is a placeholder", async () => {
+    const t = await setup();
+    const c = await created(t.service, "hi");
+    await t.service.idle();
+    expect(await t.service.post(c.id, "*Attention* Sam needs the deck", false, "inbox")).toBe(true);
+    expect((await t.service.send(c.id, "send the first item to Dana")).ok).toBe(true);
+    await t.service.idle();
+    expect(relayedLevel(t.calls[1]!.req)).toBe("inbox");
+    expect(buildPointerPrompt(t.calls[1]!.req)).toContain("[relayed outside content: what other people wrote] *Attention* Sam needs the deck");
+    expect((await t.service.send(c.id, "yes")).ok).toBe(true);
+    await t.service.idle();
+    const req = t.calls[2]!.req;
+    expect(relayedLevel(req)).toBeUndefined();
+    expect(buildPointerPrompt(req)).toMatch(
+      /Pointer: \[earlier relayed outside content from \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC \(what other people wrote\): not shown here/,
+    );
+    expect(buildPointerPrompt(req)).not.toContain("Sam needs the deck");
   });
 
   it("refuses a second message while Pointer answers (409), then sends it with the history", async () => {

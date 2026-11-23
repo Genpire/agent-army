@@ -22,8 +22,9 @@ import type { PointerRequest } from "./pointer-types.js";
  * as pending. Pointer shows the user what it wants to do; when the user's
  * next message in the conversation is a short "yes", the same tool with the
  * same input goes through once. A conversation whose history holds outside
- * content Pointer relayed (an answer passed on to the owner, a routine's
- * report: their posts say so) is tainted from the start of the query. A short "send it" alone lets only the held
+ * content Pointer relayed since the person's previous message (an answer
+ * passed on to the owner, a routine's report: their posts say so) is tainted
+ * from the start of the query. A short "send it" alone lets only the held
  * Slack messages through, and a question ("send it?") is never a yes.
  *
  * A Slack message from Pointer to the person asking ("me", or their own
@@ -251,10 +252,11 @@ export interface ConfirmGateOptions {
   /** The requester's Slack user id (requesterSlackId); absent in the console. A Slack message to them is never held. */
   requesterSlackId?: string;
   /**
-   * The query starts tainted: the conversation so far holds outside content
-   * Pointer relayed (an answer passed on to the owner, a routine's report:
-   * ConversationMessage.outsideContent). Its text is in the prompt as if a
-   * tool had returned it this turn.
+   * The query starts tainted: since the person's previous message, the
+   * conversation holds outside content Pointer relayed (an answer passed on
+   * to the owner, a routine's report: ConversationMessage.outsideContent;
+   * relayedLevel in pointer.ts). Its text is in the prompt as if a tool had
+   * returned it this turn.
    */
   tainted?: boolean;
 }
@@ -373,12 +375,14 @@ function offLabel(tool: string): string {
  * get the inbox (subagentReadOnlyGate in pointer.ts), and none can be started
  * after it.
  *
- * `relayed`: the conversation so far holds what other people wrote, passed on
- * by Pointer (an answer to a message it sent for the owner, a report or reply
- * that read the inbox: ConversationMessage.outsideContent "inbox"). It is in
- * the prompt, so the query is gated from its start, as if it had read the
- * inbox. `onInboxRead` is told when Pointer calls slack_my_inbox: its reply
- * then carries the inbox (PointerReply.readInbox).
+ * `relayed`: since the person's previous message, the conversation holds what
+ * other people wrote, passed on by Pointer (an answer to a message it sent
+ * for the owner, a report or reply that read the inbox:
+ * ConversationMessage.outsideContent "inbox"; relayedLevel in pointer.ts). It
+ * is in the prompt, so the query is gated from its start, as if it had read
+ * the inbox; the reply to their message after this one is not. `onInboxRead`
+ * is told when Pointer calls slack_my_inbox: its reply then carries the inbox
+ * (PointerReply.readInbox).
  */
 export function afterInboxGate(opts: { relayed?: boolean; onInboxRead?: () => void } = {}): HookCallback {
   let inboxRead = false;
@@ -396,7 +400,7 @@ export function afterInboxGate(opts: { relayed?: boolean; onInboxRead?: () => vo
       ? `After reading your Slack inbox, ${offLabel(tool)} is off for the rest of this reply, so that what other people wrote there cannot leave through it. ` +
         "Do not try it again now: answer with what you have, and say it can be done in a new message that does not read the inbox."
       : `This conversation holds what other people wrote, relayed by you earlier (answers passed on to the owner, a report from their inbox), so ${offLabel(tool)} is off for this reply, so that it cannot leave through it. ` +
-        "Do not try it again now: answer with what you have, and say it can be done in a new thread or a new conversation.";
+        "Do not try it again now: answer with what you have, and say they can ask for it again in their next message.";
     return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason } };
   };
 }
