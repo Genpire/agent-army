@@ -1849,9 +1849,42 @@ describe("Pointer brain: confirmation after outside content", () => {
     expect(decisions.splice(0)).toEqual(["allow", "allow", "allow", "deny"]);
     expect(calls[0]!.options.systemPrompt as string).toContain('send to "me"');
 
-    // The console has no Slack user: its id is nobody's, and Pointer is told to find the owner's account.
+    // The console has no Slack user: its id is nobody's, and Pointer is told to send to the owner's name.
     await brain.reply(baseReq({ text: "summarise ACME-12 and DM it to me", userId: "U0ANN001", surface: "web", channel: "web", channelType: "im" }), ctx);
     expect(decisions.splice(0)).toEqual(["allow", "allow", "deny", "deny"]);
-    expect(calls[1]!.options.systemPrompt as string).toContain("find their own Slack account with slack_find_user");
+    expect(calls[1]!.options.systemPrompt as string).toContain("send to their own name or @handle on Slack");
+  });
+
+  it("offers sending as the owner only on the owner's own requests, and holds such a message after outside content", async () => {
+    const deps = await setup();
+    await deps.configRepo.update((c) => {
+      c.slack.user = { token: "xoxp-secret-owner-555555", userId: "U0OWNER01", userName: "Sam", scopes: [], connectedAt: "2026-01-01T00:00:00.000Z", listen: true, sendAsMe: true };
+    });
+    const send = "mcp__slack__slack_send_message";
+    const decisions: string[] = [];
+    const { queryFn, calls } = fakeQuery(async function* (call) {
+      decisions.push(await preToolUse(call.options, "WebFetch", { url: "https://example.com/acme-12" }));
+      decisions.push(await preToolUse(call.options, send, { to: "me", text: "ACME-12 summary" }));
+      decisions.push(await preToolUse(call.options, send, { to: "me", text: "ACME-12 summary", as: "me" }));
+      yield result();
+    });
+    const brain = createPointerBrain(deps, { queryFn });
+    const prompt = (i: number) => calls[i]!.options.systemPrompt as string;
+
+    // The owner on Slack: Pointer's DM to them goes, their own message waits for a yes.
+    await brain.reply(baseReq({ text: "summarise ACME-12 and post it from my account", userId: "U0OWNER01" }), ctx);
+    expect(decisions.splice(0)).toEqual(["allow", "allow", "deny"]);
+    expect(prompt(0)).toContain('The owner connected their own Slack account (Sam) and lets you send as them: pass as "me"');
+
+    // The console is the owner's too, and "me" there is their own account.
+    await brain.reply(baseReq({ text: "summarise ACME-12", surface: "web", channel: "web", channelType: "im", userId: "admin" }), ctx);
+    expect(prompt(1)).toContain('pass as "me"');
+    expect(prompt(1)).toContain('send to "me": a DM from you');
+
+    // Anyone else on Slack never hears of it.
+    await brain.reply(baseReq({ text: "summarise ACME-12", userId: "U0ANN001" }), ctx);
+    expect(prompt(2)).not.toContain('as "me"');
+    expect(prompt(2)).not.toContain("connected their own Slack account");
+    expect(prompt(2)).not.toContain("xoxp-secret-owner-555555");
   });
 });

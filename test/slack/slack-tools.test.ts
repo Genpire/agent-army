@@ -13,14 +13,18 @@ import {
   searchMembers,
   slackChatIntegration,
   slackHandlers,
+  slackToolOptions,
   slackTools,
   splitText,
   type SlackMember,
+  type SlackOwnerClient,
   type SlackToolOptions,
   type SlackToolsClient,
 } from "../../src/slack/slack-tools.js";
+import type { SlackUserAccess } from "../../src/slack/user-account.js";
 
 const TOKEN = "xoxb-test-slack-tools-token";
+const USER_TOKEN = "xoxp-test-owner-user-token";
 const OWNER = "U06OWNER";
 
 /** An error the way @slack/web-api throws a platform error. */
@@ -53,7 +57,15 @@ interface Post {
 }
 
 /** A fake WebClient: users.list in two pages, users.info, chat.postMessage, chat.getPermalink and conversations.list. */
-function fakeSlack(opts: { postError?: string; listError?: ReturnType<typeof slackError>; channelsError?: ReturnType<typeof slackError> } = {}) {
+function fakeSlack(
+  opts: {
+    postError?: string;
+    /** A DM Pointer is not part of: posting there fails as Slack fails it. */
+    notPointersDm?: string;
+    listError?: ReturnType<typeof slackError>;
+    channelsError?: ReturnType<typeof slackError>;
+  } = {},
+) {
   const calls: string[] = [];
   const posts: Post[] = [];
   const client = {
@@ -76,6 +88,7 @@ function fakeSlack(opts: { postError?: string; listError?: ReturnType<typeof sla
       postMessage: async (args: Post) => {
         calls.push(`chat.postMessage:${args.channel}`);
         if (opts.postError) throw slackError(opts.postError);
+        if (args.channel === opts.notPointersDm) throw slackError("channel_not_found");
         posts.push(args);
         // A user id opens the app's DM with that person.
         const channel = /^[UW]/.test(args.channel) ? `D${args.channel.slice(1)}` : args.channel;
@@ -96,6 +109,47 @@ function fakeSlack(opts: { postError?: string; listError?: ReturnType<typeof sla
   };
   return { client: client as unknown as SlackToolsClient, calls, posts };
 }
+
+/** A post with the owner's user token: their own message, so no blocks. */
+interface OwnerPost {
+  channel: string;
+  text: string;
+  blocks?: unknown;
+  unfurl_links?: boolean;
+  unfurl_media?: boolean;
+}
+
+/** A fake WebClient with the owner's user token: conversations.open, chat.postMessage and chat.getPermalink. */
+function fakeOwnerSlack(opts: { postError?: ReturnType<typeof slackError>; openError?: ReturnType<typeof slackError> } = {}) {
+  const calls: string[] = [];
+  const posts: OwnerPost[] = [];
+  const client = {
+    conversations: {
+      open: async (args: { users: string }) => {
+        calls.push(`conversations.open:${args.users}`);
+        if (opts.openError) throw opts.openError;
+        // The owner's own DM with that person.
+        return { ok: true, channel: { id: `D9${args.users.slice(1)}` } };
+      },
+    },
+    chat: {
+      postMessage: async (args: OwnerPost) => {
+        calls.push(`chat.postMessage:${args.channel}`);
+        if (opts.postError) throw opts.postError;
+        posts.push(args);
+        return { ok: true, channel: args.channel, ts: "1700000000.000200" };
+      },
+      getPermalink: async (args: { channel: string; message_ts: string }) => {
+        calls.push(`chat.getPermalink:${args.channel}`);
+        return { ok: true, permalink: `https://acme.slack.com/archives/${args.channel}/p${args.message_ts.replace(".", "")}` };
+      },
+    },
+  };
+  return { client: client as unknown as SlackOwnerClient, calls, posts };
+}
+
+/** The owner's account as ownSlackAccount returns it. */
+const ownerAccount = (sendAsMe = true): SlackUserAccess => ({ token: USER_TOKEN, userId: OWNER, userName: "Sam", listen: true, sendAsMe });
 
 let caches = 0;
 function handlersFor(client: SlackToolsClient | undefined, opts: Partial<SlackToolOptions> = {}) {
@@ -196,7 +250,7 @@ describe("slack_send_message", () => {
     const fromConsole = await handlersFor(web.client, { requester: "Admin (console)" }).slack_send_message({ to: "me", text: "Check customer credits" });
     expect(fromConsole.isError).toBe(true);
     expect(textOf(fromConsole)).toContain('There is no Slack account for "me" here');
-    expect(textOf(fromConsole)).toContain("slack_find_user");
+    expect(textOf(fromConsole)).toContain("Send to the user's own name or @handle");
     expect(web.calls).toEqual([]);
   });
 
@@ -228,7 +282,7 @@ describe("slack_send_message", () => {
     expect(slack.posts.map((p) => p.channel)).toEqual([OWNER]);
   });
 
-  it("refuses bots, deactivated accounts, unknown ids, Pointer itself and names", async () => {
+  it("refuses bots, deactivated accounts, unknown ids, Pointer itself and channel names", async () => {
     const slack = fakeSlack();
     const h = handlersFor(slack.client, { botUserId: "U09POINT" });
     expect(textOf(await h.slack_send_message({ to: "U04DBOT", text: "hi" }))).toContain("is a bot");
@@ -275,6 +329,162 @@ describe("slack_send_message", () => {
     const r = await handlersFor(slack.client).slack_send_message({ to: "C0OPS", text: "hi" });
     expect(r.isError).toBeFalsy();
     expect(textOf(r)).toBe("Sent as a post in channel C0OPS.\nSlack did not return a link to the message.");
+  });
+});
+
+describe("slack_send_message to a name or @handle", () => {
+  it("sends to the one active person a name names, in one call, with no lookup by id", async () => {
+    const slack = fakeSlack();
+    const h = handlersFor(slack.client);
+    const r = await h.slack_send_message({ to: "Dana Levi", text: "The deploy is done." });
+    expect(r.isError).toBeFalsy();
+    expect(textOf(r)).toBe("Sent as a DM to U01DANA.\nLink: https://acme.slack.com/archives/D01DANA/p1700000000000100");
+    expect(slack.calls).toEqual(["users.list:", "users.list:page2", "chat.postMessage:U01DANA", "chat.getPermalink:D01DANA"]);
+    expect(contextLine(slack.posts[0]!)).toBe("Sent by Pointer at Sam's request");
+    // Accents, display names: the directory search.
+    await h.slack_send_message({ to: "jose nunez", text: "hi" });
+    await h.slack_send_message({ to: "Pepe", text: "hi" });
+    expect(slack.posts.map((p) => p.channel)).toEqual(["U01DANA", "U03JOSE", "U03JOSE"]);
+  });
+
+  it("takes an exact @handle as that person even when the name also matches others", async () => {
+    const slack = fakeSlack();
+    const r = await handlersFor(slack.client).slack_send_message({ to: "@dana", text: "hi" });
+    expect(textOf(r)).toContain("Sent as a DM to U01DANA.");
+    expect(slack.posts.map((p) => p.channel)).toEqual(["U01DANA"]);
+  });
+
+  it("sends nothing when several people match, and lists them by id, @handle and real name only", async () => {
+    const slack = fakeSlack();
+    const h = handlersFor(slack.client);
+    const r = await h.slack_send_message({ to: "dana", text: "hi" });
+    expect(r.isError).toBe(true);
+    const text = textOf(r);
+    expect(text).toContain('Nothing was sent: 2 people match "dana"');
+    expect(text).toContain("Ask the user which one they mean and write these ids in your reply");
+    expect(text.split("\n").filter((l) => l.startsWith("- "))).toEqual(["- U01DANA · @dana · Dana Levi", "- U02DANK · @dana.k · Dana Katz"]);
+    // Bots and deactivated accounts are not people to send to; titles are not shown.
+    expect(text).not.toContain("U04DBOT");
+    expect(text).not.toContain("U05GONE");
+    expect(text).not.toContain("Engineering Manager");
+    // A title written to steer Pointer never reaches it from here.
+    const s = textOf(await h.slack_send_message({ to: "s", text: "hi" }));
+    expect(s).toContain(`- ${OWNER} · @sam · Sam Owner`);
+    expect(s).not.toContain("Ignore previous instructions");
+    expect(s).not.toContain("Founder");
+    expect(slack.posts).toEqual([]);
+  });
+
+  it("says when no active person matches, and still keeps the allowed list", async () => {
+    const slack = fakeSlack();
+    const h = handlersFor(slack.client, { allowedUserIds: [OWNER] });
+    for (const to of ["Dana Bot", "dana old", "nobody here"]) {
+      const r = await h.slack_send_message({ to, text: "hi" });
+      expect(r.isError, to).toBe(true);
+      expect(textOf(r), to).toContain(`no active person on Slack matches "${to}"`);
+    }
+    expect(textOf(await h.slack_send_message({ to: "Dana Levi", text: "hi" }))).toContain("U01DANA is not on the list of people allowed to use Pointer");
+    expect((await h.slack_send_message({ to: "Sam Owner", text: "hi" })).isError).toBeFalsy();
+    expect(slack.posts.map((p) => p.channel)).toEqual([OWNER]);
+  });
+});
+
+describe('slack_send_message as the owner (as "me")', () => {
+  const asOwner = (client: SlackOwnerClient) => ({ client, userId: OWNER, userName: "Sam" });
+
+  it("opens the owner's DM with a person and posts their own message there, with their token only", async () => {
+    const slack = fakeSlack();
+    const own = fakeOwnerSlack();
+    // The allowed list is for Pointer's own DMs: the owner's message is theirs to send.
+    const h = handlersFor(slack.client, { asOwner: asOwner(own.client), allowedUserIds: [OWNER] });
+    const r = await h.slack_send_message({ to: "Dana Levi", text: "<!here> **Deploy** is done", as: "me" });
+    expect(r.isError).toBeFalsy();
+    expect(textOf(r)).toBe("Sent from Sam's own Slack account, as a DM to U01DANA.\nLink: https://acme.slack.com/archives/D901DANA/p1700000000000200");
+    expect(own.calls).toEqual(["conversations.open:U01DANA", "chat.postMessage:D901DANA", "chat.getPermalink:D901DANA"]);
+    const post = own.posts[0]!;
+    expect(post.text).toBe("@here *Deploy* is done");
+    // Their own message: no "Sent by Pointer" line.
+    expect(post.blocks).toBeUndefined();
+    expect(JSON.stringify(post)).not.toContain("Sent by");
+    expect(post.unfurl_links).toBe(false);
+    expect(post.unfurl_media).toBe(false);
+    // The bot only read the directory.
+    expect(slack.posts).toEqual([]);
+    expect(slack.calls.filter((c) => !c.startsWith("users.list"))).toEqual([]);
+
+    // A user id is checked with the bot first, like any DM.
+    await h.slack_send_message({ to: "<@U03JOSE>", text: "hi", as: "me" });
+    expect(slack.calls.at(-1)).toBe("users.info:U03JOSE");
+    expect(own.calls.slice(3)).toEqual(["conversations.open:U03JOSE", "chat.postMessage:D903JOSE", "chat.getPermalink:D903JOSE"]);
+
+    // "me" as the owner is their own account, from the console too (no requester id here).
+    expect(textOf(await h.slack_send_message({ to: "me", text: "note", as: "me" }))).toContain(`as a DM to ${OWNER}.`);
+    expect(own.calls.slice(6, 7)).toEqual([`conversations.open:${OWNER}`]);
+  });
+
+  it("posts straight into the owner's own DM or a channel they are in", async () => {
+    const slack = fakeSlack();
+    const own = fakeOwnerSlack();
+    const h = handlersFor(slack.client, { asOwner: asOwner(own.client), allowedUserIds: [OWNER] });
+    const dm = await h.slack_send_message({ to: "D0OWNDM1", text: "On my way", as: "me" });
+    expect(textOf(dm)).toBe("Sent from Sam's own Slack account, as a message in the DM D0OWNDM1.\nLink: https://acme.slack.com/archives/D0OWNDM1/p1700000000000200");
+    const channel = await h.slack_send_message({ to: "<#C0OPS|ops>", text: "Deploying", as: "me" });
+    expect(textOf(channel)).toContain("as a post in channel C0OPS.");
+    expect(own.calls).toEqual(["chat.postMessage:D0OWNDM1", "chat.getPermalink:D0OWNDM1", "chat.postMessage:C0OPS", "chat.getPermalink:C0OPS"]);
+    expect(slack.calls).toEqual([]);
+  });
+
+  it("still refuses Pointer itself, bots and deactivated accounts", async () => {
+    const slack = fakeSlack();
+    const own = fakeOwnerSlack();
+    const h = handlersFor(slack.client, { asOwner: asOwner(own.client), botUserId: "U09POINT" });
+    expect(textOf(await h.slack_send_message({ to: "U09POINT", text: "hi", as: "me" }))).toContain("is Pointer itself");
+    expect(textOf(await h.slack_send_message({ to: "U04DBOT", text: "hi", as: "me" }))).toContain("is a bot");
+    expect(textOf(await h.slack_send_message({ to: "U05GONE", text: "hi", as: "me" }))).toContain("deactivated");
+    expect(own.calls).toEqual([]);
+  });
+
+  it("explains failures with the owner's token in words", async () => {
+    const cases: [ReturnType<typeof slackError>, string][] = [
+      [slackError("missing_scope", { needed: "im:write" }), "connected without the im:write permission. Ask them to reconnect their Slack account"],
+      [slackError("not_in_channel"), "The owner is not a member of that channel"],
+      [slackError("channel_not_found"), "no channel or DM with that id in the owner's account"],
+      [slackError("token_revoked"), "Slack rejected the owner's account token"],
+    ];
+    for (const [err, expected] of cases) {
+      const own = fakeOwnerSlack({ postError: err });
+      const r = await handlersFor(fakeSlack().client, { asOwner: asOwner(own.client) }).slack_send_message({ to: "C0OPS", text: "hi", as: "me" });
+      expect(r.isError).toBe(true);
+      expect(textOf(r)).toContain(expected);
+      expect(textOf(r)).not.toContain(USER_TOKEN);
+    }
+    const opening = fakeOwnerSlack({ openError: slackError("missing_scope", { needed: "im:write" }) });
+    const r = await handlersFor(fakeSlack().client, { asOwner: asOwner(opening.client) }).slack_send_message({ to: "U01DANA", text: "hi", as: "me" });
+    expect(textOf(r)).toContain("reconnect their Slack account");
+    expect(opening.posts).toEqual([]);
+  });
+
+  it('refuses as "me" where sending as the owner is not allowed, without naming the account', async () => {
+    const slack = fakeSlack();
+    const r = await handlersFor(slack.client).slack_send_message({ to: "U01DANA", text: "hi", as: "me" });
+    expect(r.isError).toBe(true);
+    expect(textOf(r)).toBe('Messages here are sent as Pointer: leave out "as".');
+    expect(slack.calls).toEqual([]);
+  });
+
+  it("as Pointer, a DM it is not part of fails with what to do instead", async () => {
+    const slack = fakeSlack({ notPointersDm: "D0OWNDM1" });
+    const owner = await handlersFor(slack.client, { asOwner: asOwner(fakeOwnerSlack().client) }).slack_send_message({ to: "D0OWNDM1", text: "hi" });
+    expect(owner.isError).toBe(true);
+    expect(textOf(owner)).toContain("D0OWNDM1 is a DM Pointer is not part of: most likely the owner's own DM");
+    expect(textOf(owner)).toContain('send with as "me"');
+
+    const other = textOf(await handlersFor(slack.client).slack_send_message({ to: "D0OWNDM1", text: "hi" }));
+    expect(other).toContain("D0OWNDM1 is a DM Pointer is not part of, so Pointer cannot post in it. Send to the person's name, @handle or user id instead");
+    expect(other).not.toContain('as "me"');
+    expect(other).not.toContain("owner");
+    // Pointer's own DM with someone still works.
+    expect((await handlersFor(slack.client).slack_send_message({ to: "D01DANA", text: "hi" })).isError).toBeFalsy();
   });
 });
 
@@ -326,6 +536,13 @@ describe("targets and text", () => {
     expect(isSelfTarget({ text: "me" }, OWNER)).toBe(false);
   });
 
+  it('never takes a message as the owner for a note to themselves: it is their own message', () => {
+    expect(isSelfTarget({ to: "me", as: "pointer" }, OWNER)).toBe(true);
+    expect(isSelfTarget({ to: "me", as: "me" }, OWNER)).toBe(false);
+    expect(isSelfTarget({ to: OWNER, as: "me" }, OWNER)).toBe(false);
+    expect(isSelfTarget({ to: "me", as: "ME" }, undefined)).toBe(false);
+  });
+
   it("splits long text at line breaks or spaces", () => {
     expect(splitText("short", 10)).toEqual(["short"]);
     expect(splitText("aaaa bbbb\ncccc dddd", 12)).toEqual(["aaaa bbbb", "cccc dddd"]);
@@ -360,7 +577,9 @@ describe("slack chat integration", () => {
     expect(i.agentIds).toBeUndefined();
     expect(i.promptRule).toContain("- Slack is connected (workspace Acme 'HQ') and is also a tool");
     expect(i.promptRule).toContain('send to "me"');
-    expect(i.promptRule).toContain("when the name matches several people, ask the user which one before sending");
+    expect(i.promptRule).toContain("give their name or @handle as `to`, with no lookup first");
+    expect(i.promptRule).toContain("When the name matches several people it sends nothing and lists them");
+    expect(i.promptRule).toContain('Use slack_find_user only to answer "who is …" questions');
     expect(i.promptRule).toContain("Never post in a channel unless the user asks for that channel");
     expect(i.promptRule).toContain("You only send DMs to the 2 people allowed to use you.");
     expect(i.promptRule).toContain("reply with the link the tool returns");
@@ -368,10 +587,10 @@ describe("slack chat integration", () => {
     expect(i.promptRule.split("\n").every((l) => l.startsWith("- "))).toBe(true);
   });
 
-  it("tells Pointer in the console to find the owner's own account", () => {
+  it("tells Pointer in the console to send to the owner's name until they connect their account", () => {
     const rule = slackChatIntegration(config({ botToken: TOKEN }), ctx, fakeSlack().client).promptRule;
     expect(rule).toContain("has no Slack account here");
-    expect(rule).toContain("find their own Slack account with slack_find_user");
+    expect(rule).toContain("send to their own name or @handle on Slack");
     expect(rule).not.toContain("allowed to use you");
   });
 
@@ -379,6 +598,45 @@ describe("slack chat integration", () => {
     const defs = slackTools({ cacheKey: "x", pointerName: "Pointer", requester: "Sam", allowedUserIds: [] });
     expect(defs.map((d) => d.name)).toEqual(SLACK_TOOL_NAMES);
     expect(defs.map((d) => d.annotations?.readOnlyHint)).toEqual([true, true, false]);
+  });
+
+  it('offers as "me" only for the owner\'s own requests that allow it, and says nothing of it otherwise', () => {
+    const connected = config({ botToken: TOKEN });
+    const send = (opts: SlackToolOptions | undefined) => slackTools(opts!).find((d) => d.name === "slack_send_message")!;
+
+    const own = fakeOwnerSlack().client;
+    const opts = slackToolOptions(connected, { ...ctx, slackAccount: ownerAccount() }, fakeSlack().client, own);
+    expect(opts?.asOwner).toEqual({ client: own, userId: OWNER, userName: "Sam" });
+    expect(Object.keys(send(opts).inputSchema)).toEqual(["to", "text", "as"]);
+    expect(send(opts).description).toContain('with as "me" it is sent from the owner\'s own Slack account');
+    const rule = slackChatIntegration(connected, { ...ctx, slackAccount: ownerAccount() }, fakeSlack().client, own).promptRule;
+    expect(rule).toContain('The owner connected their own Slack account (Sam) and lets you send as them: pass as "me"');
+    expect(rule).toContain('"from my account", "as me", "in my DM" or "reply to them as me", or give the id of their own DM (D…)');
+    expect(rule.split("\n").every((l) => l.startsWith("- "))).toBe(true);
+
+    // Sending as them turned off, a routine, or someone else's request: no "as", no word of it.
+    for (const c of [{ ...ctx, slackAccount: ownerAccount(false) }, { ...ctx, requesterSlackId: "U01DANA" }]) {
+      const o = slackToolOptions(connected, c, fakeSlack().client);
+      expect(o?.asOwner).toBeUndefined();
+      expect(Object.keys(send(o).inputSchema)).toEqual(["to", "text"]);
+      const text = JSON.stringify({ description: send(o).description, to: send(o).inputSchema.to?.description });
+      expect(text).not.toContain('as \\"me\\"');
+      expect(text).not.toContain("owner");
+      expect(slackChatIntegration(connected, c, fakeSlack().client).promptRule).not.toContain('as "me"');
+    }
+    expect(slackToolOptions(config(), { ...ctx, slackAccount: ownerAccount() })).toBeUndefined();
+  });
+
+  it('takes "me" in the console as the owner\'s own account once they connected it', async () => {
+    const slack = fakeSlack();
+    const opts = slackToolOptions(config({ botToken: TOKEN }), { ...ctx, slackAccount: ownerAccount(false) }, slack.client)!;
+    expect(opts.requesterSlackId).toBe(OWNER);
+    const r = await slackHandlers({ ...opts, cacheKey: `test-${++caches}` }).slack_send_message({ to: "me", text: "Check customer credits" });
+    expect(textOf(r)).toContain(`Sent as a DM to the person asking (${OWNER}).`);
+    expect(slack.posts.map((p) => p.channel)).toEqual([OWNER]);
+    const rule = slackChatIntegration(config({ botToken: TOKEN }), { ...ctx, slackAccount: ownerAccount(false) }, slack.client).promptRule;
+    expect(rule).toContain('send to "me": a DM from you');
+    expect(rule).not.toContain("has no Slack account here");
   });
 });
 
@@ -419,5 +677,41 @@ describe("the confirmation gate on Slack messages", () => {
     expect(denied(await call(next, SLACK_SEND_TOOL, { to: "U02DANK", text: "The deploy is done." }))).toBe(false); // untainted again
     await call(next, "WebFetch", { url: "https://example.com" });
     expect(denied(await call(next, SLACK_SEND_TOOL, input))).toBe(true); // once only
+  });
+
+  it("lets a send by name go through in one call when nothing was read before", async () => {
+    const pending = new PendingActions();
+    const gate = confirmGate({ pending, conversation: CONVO, message: "send to Dana Levi on Slack: the deploy is done", gated, requesterSlackId: OWNER });
+    expect(await call(gate, SLACK_SEND_TOOL, { to: "Dana Levi", text: "The deploy is done." })).toBeUndefined();
+    // Sending, with its own lookup, does not taint the turn.
+    expect(await call(gate, SLACK_SEND_TOOL, { to: "@dana.k", text: "Also done." })).toBeUndefined();
+    expect(pending.take(CONVO)).toEqual([]);
+  });
+
+  it('holds a message as the owner after outside content, even to "me", and lets it through once on "send it"', async () => {
+    const owner = slackChatIntegration(
+      ConfigSchema.parse({ slack: { botToken: TOKEN, allowedUserIds: [], pointerChannels: [] } }),
+      { configRepo: {} as never, requester: "Sam", requesterSlackId: OWNER, slackAccount: ownerAccount(), redact: (t) => t },
+      fakeSlack().client,
+      fakeOwnerSlack().client,
+    );
+    const ownerGated = gatedTools([owner]);
+    const pending = new PendingActions();
+    const asMe = { to: "me", text: "Note to self", as: "me" };
+    const first = confirmGate({ pending, conversation: CONVO, message: "summarise ACME-12 and send it from my account", gated: ownerGated, requesterSlackId: OWNER });
+    // Before anything is read, the owner's own message goes.
+    expect(await call(first, SLACK_SEND_TOOL, { to: "Dana Levi", text: "Hi", as: "me" })).toBeUndefined();
+    await call(first, "mcp__jira__jira_get_issue", { key: "ACME-12" });
+    expect(denied(await call(first, SLACK_SEND_TOOL, asMe))).toBe(true);
+    expect(denied(await call(first, SLACK_SEND_TOOL, { to: OWNER, text: "x", as: "me" }))).toBe(true);
+    expect(denied(await call(first, SLACK_SEND_TOOL, { to: "Dana Levi", text: "Hi", as: "me" }))).toBe(true);
+    // Pointer's own DM to the person asking still goes.
+    expect(await call(first, SLACK_SEND_TOOL, { to: "me", text: "x", as: "pointer" })).toBeUndefined();
+    expect(await call(first, SLACK_SEND_TOOL, { to: "me", text: "x" })).toBeUndefined();
+
+    const next = confirmGate({ pending, conversation: CONVO, message: "send it", gated: ownerGated, requesterSlackId: OWNER });
+    await call(next, "WebFetch");
+    expect(await call(next, SLACK_SEND_TOOL, { ...asMe })).toBeUndefined();
+    expect(denied(await call(next, SLACK_SEND_TOOL, asMe))).toBe(true); // once only
   });
 });

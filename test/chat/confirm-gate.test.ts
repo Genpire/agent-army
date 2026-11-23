@@ -180,6 +180,13 @@ describe("Slack messages", () => {
     const d = await call(gate, SLACK_SEND, input);
     expect(denied(d)).toBe(true);
     expect(d?.permissionDecisionReason).toContain("Slack's member directory");
+    // What Pointer must show, so that a yes repeats the very same call in a later turn.
+    expect(d?.permissionDecisionReason).toContain("Show the user the exact arguments you will pass, quoted, so that their yes repeats the very same call");
+    expect(d?.permissionDecisionReason).toContain("the `to` value exactly as you will send it, the full text, and any other argument you set");
+    // Sending as the owner is never named to anyone here.
+    expect(d?.permissionDecisionReason).not.toContain("`as`");
+    expect(d?.permissionDecisionReason).toContain("Later turns see only the conversation's text, not this turn's tool results");
+    expect(d?.permissionDecisionReason).toContain("the recipient's Slack user id");
     expect(denied(await call(gate, SLACK_SEND, { to: "<#C0OPS|ops>", text: "x" }))).toBe(true);
     expect(pending.take(CONVO)).toEqual([
       { tool: SLACK_SEND, inputHash: inputHash(input) },
@@ -228,6 +235,25 @@ describe("Slack messages", () => {
     expect(denied(await call(next, SLACK_SEND, input))).toBe(true);
   });
 
+  it('holds a message sent as the owner after outside content, whoever it goes to; "send it" lets it through once', async () => {
+    const { pending } = clockedStore();
+    const first = slackGate(pending, "read ACME-12 and DM Dana as me", ME);
+    await call(first, SLACK_FIND, { query: "dana" });
+    for (const to of ["me", ME, `<@${ME}>`, "Dana Levi", "D0OWNDM1"]) {
+      expect(denied(await call(first, SLACK_SEND, { to, text: "x", as: "me" })), to).toBe(true);
+    }
+    // As Pointer, "me" is still the person asking.
+    expect(await call(first, SLACK_SEND, { to: "me", text: "x", as: "pointer" })).toBeUndefined();
+
+    const input = { to: "Dana Levi", text: "x", as: "me" };
+    const next = slackGate(pending, "send it", ME);
+    await call(next, "WebFetch");
+    expect(await call(next, SLACK_SEND, { ...input })).toBeUndefined();
+    expect(denied(await call(next, SLACK_SEND, input))).toBe(true);
+    // Another wording of the same call is another call.
+    expect(denied(await call(next, SLACK_SEND, { to: "Dana Levi", text: "x" }))).toBe(true);
+  });
+
   it("is gated only when Slack is connected", () => {
     const slack: ChatIntegration = {
       key: "slack",
@@ -268,6 +294,48 @@ describe("isConfirmation", () => {
       "نعم من فضلك",
     ]) {
       expect(isConfirmation(text), text).toBe(true);
+    }
+  });
+
+  it("takes a short \"send it\" as a yes, in English and Arabic", () => {
+    for (const text of [
+      "send",
+      "Send it",
+      "send it!",
+      "yes send it",
+      "ok send",
+      "send it now",
+      "post it",
+      "share it",
+      "ابعت",
+      "ابعتها",
+      "ابعته",
+      "ابعثها",
+      "ارسل",
+      "أرسلها",
+      "إرسله",
+      "نفّذ",
+      "يلا ابعتها",
+      "تمام ابعتها",
+    ]) {
+      expect(isConfirmation(text), text).toBe(true);
+    }
+  });
+
+  it("does not take a send with anything more as a yes", () => {
+    for (const text of [
+      "don't send",
+      "do not send it",
+      "send it later",
+      "send to Omar instead",
+      "send it to Omar",
+      "send me the draft first",
+      "لا ترسل",
+      "لا تبعتها",
+      "ابعتها لعمر",
+      "ابعتها بكرة",
+    ]) {
+      expect(isConfirmation(text), text).toBe(false);
     }
   });
 
