@@ -13,6 +13,8 @@ import {
   alertText,
   budgetView,
   chatDecision,
+  providerCapProblem,
+  providerToRun,
   providerViews,
   reachedAlerts,
   taskBudgetFor,
@@ -155,6 +157,64 @@ describe("caps per agent and per provider", () => {
     // What is left of the provider's cap bounds the task's own budget.
     const lowered = taskBudgetFor(b, spendOf({ providers: { kimi: 7 } }), "acme/web", 15, { provider: "kimi" });
     expect(lowered).toEqual({ ok: true, budgetUsd: 3, note: "This task may spend $3.00: what is left of the monthly budget for Kimi (the per-task budget is $15.00)." });
+  });
+
+  it("skips a provider whose cap is used up when its route has another, and refuses only when every one's is", () => {
+    const b = budget({ perProviderUsd: { kimi: 10, anthropic: 20 } });
+    const kimiOut = spendOf({ total: 30, providers: { kimi: 10.2, anthropic: 5 } });
+    const route = { providers: ["kimi", "anthropic"] };
+    expect(taskDecision(b, kimiOut, "acme/web", route)).toEqual({ ok: true });
+    expect(chatDecision(b, kimiOut, route)).toEqual({ ok: true });
+    // The task runs on the first provider with enough left: its cap bounds the task's budget.
+    expect(providerToRun(b, kimiOut, route, "task")).toBe("anthropic");
+    expect(taskBudgetFor(b, kimiOut, "acme/web", 30, route)).toEqual({
+      ok: true,
+      budgetUsd: 15,
+      note: "This task may spend $15.00: what is left of the monthly budget for Claude (the per-task budget is $30.00).",
+    });
+    // A task needs MIN_TASK_USD left of a provider's cap; a chat reply anything.
+    const almost = spendOf({ providers: { kimi: 9.8 } });
+    expect(providerCapProblem(b, almost, "kimi", "task")).toMatch(/^The monthly budget for Kimi is used up: \$9\.80 of the \$10\.00 cap/);
+    expect(providerCapProblem(b, almost, "kimi", "chat")).toBeUndefined();
+    expect(providerCapProblem(b, almost, "deepseek", "task")).toBeUndefined();
+
+    const bothOut = spendOf({ total: 40, providers: { kimi: 10.2, anthropic: 20 } });
+    const task = taskDecision(b, bothOut, "acme/web", route);
+    expect(task).toEqual({
+      ok: false,
+      error:
+        "The monthly budgets of every provider this work can run on are used up: Kimi ($10.20 of $10.00) and Claude ($20.00 of $20.00). New repo tasks are refused until the month ends (UTC). The owner can raise the cap in the admin console under Settings → Spending.",
+    });
+    const chat = chatDecision(b, bothOut, route);
+    expect(!chat.ok && chat.error).toContain("Chat replies are refused");
+    // A route of one keeps the provider's own message.
+    expect(taskDecision(b, bothOut, "acme/web", { providers: ["kimi"] })).toEqual(taskDecision(b, bothOut, "acme/web", { provider: "kimi" }));
+  });
+
+  it("checks each kind of work against its own route through the service, and gives routing the caps", async () => {
+    const { store, tasks, usage } = await usageSetup();
+    const config: Config = ConfigSchema.parse({
+      anthropic: { apiKey: "sk-ant-route-0001" },
+      ai: { chatProvider: "kimi", taskProvider: "kimi", providers: { kimi: { secrets: { apiKey: "sk-kimi-route-0001" } } }, routes: { chat: ["kimi", "anthropic"] } },
+      budget: { perProviderUsd: { kimi: 1 } },
+    });
+    await tasks.save(task(new Date(NOW.getTime() - 60_000), { costUsd: 1.2, provider: "kimi" }));
+    const spending = new Spending({ store, usage, config: async () => config, now: () => NOW });
+    // Chat moves on to Claude; repo tasks have Kimi alone.
+    expect(await spending.checkChat()).toEqual({ ok: true });
+    expect(await spending.checkChat("light")).toEqual({ ok: true });
+    expect((await spending.checkTask("acme/web")).ok).toBe(false);
+    config.ai.routes.tasks = ["kimi", "anthropic"];
+    expect(await spending.checkTask("acme/web")).toEqual({ ok: true });
+    expect(await spending.taskBudget("acme/web", 15)).toEqual({ ok: true, budgetUsd: 15 });
+    // The provider the worker chose bounds the task by its own cap.
+    expect((await spending.taskBudget("acme/web", 15, "kimi")).ok).toBe(false);
+    const caps = await spending.providerCaps("task");
+    expect(caps("kimi")).toMatch(/^The monthly budget for Kimi is used up/);
+    expect(caps("anthropic")).toBeUndefined();
+    // Without caps nothing is read and nothing is skipped.
+    const none = new Spending({ store, usage, config: async () => ConfigSchema.parse({}), now: () => NOW });
+    expect((await none.providerCaps("chat"))("kimi")).toBeUndefined();
   });
 
   it("refuses tasks and chat once Pointer's own cap is used up", () => {

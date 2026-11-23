@@ -2,10 +2,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Options, query } from "@anthropic-ai/claude-agent-sdk";
-import { type ProviderRuntime, isProviderReady, providerRuntime } from "../ai/ai-providers.js";
+import type { ProviderRuntime } from "../ai/ai-providers.js";
+import { type ProviderFailure, RunWatch, acrossRoute, fallbackLine, isRouteReady, routeRuntimes } from "../ai/routing.js";
 import { TRANSCRIPTION } from "../chat/transcribe.js";
 import type { QueryFn } from "../chat/pointer.js";
-import type { Config } from "../core/config.js";
+import type { AiProviderId, Config } from "../core/config.js";
 import { engineUsd } from "../spending/prices.js";
 import { SIZING_MODEL } from "../tasks/sizing.js";
 import { talkSchema } from "./talk-prompt.js";
@@ -20,10 +21,11 @@ import type { TalkProviderId } from "./talk-types.js";
  *   owner chose none, a timeout, and the API's JSON response mode. Priced from
  *   the tokens it reports at Google's list prices (prices.ts); a model with no
  *   price there counts at $0.
- * - "chat": the chat AI provider through the Agent SDK, as a repo task's size
- *   is estimated (sizing.ts): no tools, one turn, a JSON-schema answer, a
- *   tiny budget, an isolated folder and environment, on the cheapest model
- *   (its small tier on another provider) when the owner chose none.
+ * - "chat": the light work route's AI providers through the Agent SDK
+ *   (routing.ts: the next one when one fails for its own reasons), as a repo
+ *   task's size is estimated (sizing.ts): no tools, one turn, a JSON-schema
+ *   answer, a tiny budget, an isolated folder and environment, on the
+ *   cheapest model (its small tier on another provider) when the owner chose none.
  *
  * Neither call ever throws; errors carry the provider's message, never a key.
  */
@@ -34,22 +36,23 @@ export const TALK_TIMEOUT_MS = 45_000;
 /** Room for the JSON answer, and for a model's thinking where it thinks. */
 const GEMINI_MAX_OUTPUT_TOKENS = 4096;
 
-export type TalkChoice = { id: "gemini"; key: string } | { id: "chat"; runtime: ProviderRuntime };
+/** Gemini with its key, or the light work route: `runtimes` in order (routing.ts), `runtime` the first of them. */
+export type TalkChoice = { id: "gemini"; key: string } | { id: "chat"; runtime: ProviderRuntime; runtimes: ProviderRuntime[] };
 
-/** What each provider has: the Gemini key, the chat provider connected and complete. */
+/** What each provider has: the Gemini key, a provider of the light work route connected and complete. */
 export const talkAvailability = (config: Config): Record<TalkProviderId, boolean> => ({
   gemini: Boolean(config.engines.gemini.apiKey),
-  chat: isProviderReady(config, "chat"),
+  chat: isRouteReady(config, "light"),
 });
 
-/** The provider the settings choose, if it is there: "auto" is Gemini when its key is connected, else the chat provider. */
+/** The provider the settings choose, if it is there: "auto" is Gemini when its key is connected, else the light work route. */
 export function chooseTalkProvider(config: Config): TalkChoice | undefined {
   const wanted = config.office.talk.provider;
   const key = config.engines.gemini.apiKey;
   if (key && wanted !== "chat") return { id: "gemini", key };
   if (wanted === "gemini") return undefined;
-  const chat = providerRuntime(config, "chat");
-  return chat.ok ? { id: "chat", runtime: chat.runtime } : undefined;
+  const route = routeRuntimes(config, "light");
+  return route.ok ? { id: "chat", runtime: route.runtimes[0]!, runtimes: route.runtimes } : undefined;
 }
 
 export interface TalkCall {
@@ -69,6 +72,8 @@ export interface TalkOutcome {
   costUsd: number;
   tokens: number;
   error?: string;
+  /** "chat" only: the provider that answered (or was asked last), whose spend the call is. */
+  provider?: AiProviderId;
 }
 
 export interface TalkCallOptions {
@@ -161,9 +166,28 @@ export async function geminiTalk(key: string, call: TalkCall, opts: TalkCallOpti
   return { model: models.at(-1) ?? "", costUsd: 0, tokens: 0, error };
 }
 
-/** One conversation from the chat provider, as estimateTaskSize asks for a size. */
-export async function chatTalk(runtime: ProviderRuntime, call: TalkCall, opts: TalkCallOptions = {}): Promise<TalkOutcome> {
+/**
+ * One conversation from the light work route (a runtime, or several in
+ * order): while one fails for the provider's own reasons (rate limit, credit,
+ * outage), the next is asked. Its cost and tokens are every attempt's.
+ */
+export async function chatTalk(route: ProviderRuntime | ProviderRuntime[], call: TalkCall, opts: TalkCallOptions = {}): Promise<TalkOutcome> {
+  let costUsd = 0;
+  let tokens = 0;
+  const done = await acrossRoute(Array.isArray(route) ? route : [route], async (runtime) => {
+    const attempt = await chatTalkOn(runtime, call, opts);
+    costUsd += attempt.value.costUsd;
+    tokens += attempt.value.tokens;
+    return attempt;
+  });
+  for (const note of done.fallback) console.warn(`[office] ${fallbackLine(note, "took over")}`);
+  return { ...done.value, costUsd, tokens, provider: done.runtime.provider };
+}
+
+/** One conversation from one provider, as estimateTaskSize asks for a size, and the provider failure it ended on, if any. */
+async function chatTalkOn(runtime: ProviderRuntime, call: TalkCall, opts: TalkCallOptions): Promise<{ value: TalkOutcome; failure?: ProviderFailure }> {
   const queryFn: QueryFn = opts.queryFn ?? query;
+  const watch = new RunWatch();
   const model = runtime.model(call.model || SIZING_MODEL);
   const effort = runtime.effort("low");
   const asked = model ?? "";
@@ -197,6 +221,7 @@ export async function chatTalk(runtime: ProviderRuntime, call: TalkCall, opts: T
       env: { PATH: process.env.PATH ?? "", HOME: tmp, LANG: "C.UTF-8", ...session.env, CLAUDE_AGENT_SDK_CLIENT_APP: "agent-army-office/0.1.0" },
     };
     for await (const message of queryFn({ prompt: call.prompt, options })) {
+      watch.feed(message);
       if (message.type !== "result") continue;
       const usage = Object.entries(message.modelUsage ?? {});
       const tokens = usage.reduce((sum, [, u]) => sum + count(u.inputTokens) + count(u.outputTokens) + count(u.cacheReadInputTokens) + count(u.cacheCreationInputTokens), 0);
@@ -205,12 +230,13 @@ export async function chatTalk(runtime: ProviderRuntime, call: TalkCall, opts: T
       else outcome = { ...spent, error: message.subtype === "success" ? "the call failed" : message.subtype };
     }
   } catch (err) {
+    watch.thrown(err);
     outcome = { ...outcome, error: err instanceof Error ? err.message : String(err) };
   } finally {
     clearTimeout(timer);
     await session?.dispose();
     if (tmp) await rm(tmp, { recursive: true, force: true }).catch(() => undefined);
   }
-  if (abort.signal.aborted && outcome.raw === undefined) outcome = { ...outcome, error: "timed out" };
-  return outcome;
+  if (abort.signal.aborted && outcome.raw === undefined) return { value: { ...outcome, error: "timed out" } };
+  return { value: outcome, ...(outcome.raw === undefined && watch.failure ? { failure: watch.failure } : {}) };
 }

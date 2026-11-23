@@ -1,7 +1,8 @@
 /**
  * AI provider admin routes (/api/ai/…): the presets with each one's saved
  * connection (secrets masked), saving and testing a connection, removing one,
- * choosing the providers chat and repo tasks run on, and each provider's
+ * choosing the providers chat and repo tasks run on, each kind of work's
+ * route (its providers in order, routing.ts), and each provider's
  * models (live from the provider where it can, model-catalog.ts). Anthropic's key
  * stays in config.anthropic (POST /api/anthropic keeps working); the others
  * live in config.ai.providers. See ai-providers.ts and ai-presets.ts.
@@ -23,7 +24,19 @@ import {
   testConnection,
 } from "../ai/ai-providers.js";
 import { type ModelCatalog, modelCatalog } from "../ai/model-catalog.js";
-import { AI_PROVIDER_IDS, type AiProviderId, type Config, MODEL_TIERS, type ModelTier, mask } from "../core/config.js";
+import { routeFor } from "../ai/routing.js";
+import {
+  AI_PROVIDER_IDS,
+  type AiProviderId,
+  type Config,
+  MODEL_TIERS,
+  type ModelTier,
+  ROUTE_MAX,
+  WORK_KINDS,
+  type WorkKind,
+  mask,
+  routesView,
+} from "../core/config.js";
 import { configSecrets, makeRedactor } from "../tasks/worker.js";
 import type { IntegrationRouteDeps } from "./types.js";
 
@@ -126,6 +139,38 @@ const ACTIVE = z
   .object({ chatProvider: PROVIDER_ID.optional(), taskProvider: PROVIDER_ID.optional() })
   .strict()
   .refine((x) => x.chatProvider || x.taskProvider, "Choose the provider for chat, for repo tasks, or both.");
+
+/** A kind of work's providers in order; repeats are dropped, none = back to the default (routing.ts routeFor). */
+const ROUTE = z
+  .object({
+    kind: z.enum(WORK_KINDS, { error: `Choose the kind of work: ${WORK_KINDS.join(", ")}.` }),
+    providers: z
+      .array(PROVIDER_ID)
+      .max(50, `A route has at most ${ROUTE_MAX} providers.`)
+      .transform((ids) => [...new Set(ids)])
+      .refine((ids) => ids.length <= ROUTE_MAX, `A route has at most ${ROUTE_MAX} providers.`),
+  })
+  .strict();
+
+/** What each kind of work is called in messages about a provider in use. */
+const KIND_WORDS: Record<WorkKind, string> = { chat: "chat", routines: "routines", tasks: "repo tasks", light: "light work" };
+
+/** The kinds of work that would have no provider left without `id`: chat and tasks by their route, routines and light work by their own. */
+function usesAlone(config: Config, id: AiProviderId): WorkKind[] {
+  return WORK_KINDS.filter((kind) => {
+    const own = kind === "chat" || kind === "tasks" ? routeFor(config, kind) : [...new Set(config.ai.routes[kind] ?? [])];
+    return own.length === 1 && own[0] === id;
+  });
+}
+
+/** `id` first in the kind's own route, when the owner set one (ROUTE_MAX kept). */
+function putFirst(c: Config, kind: WorkKind, id: AiProviderId): void {
+  const own = c.ai.routes[kind];
+  if (own?.length) c.ai.routes[kind] = [id, ...own.filter((p) => p !== id)].slice(0, ROUTE_MAX);
+}
+
+/** A provider's problem for the owner, who connects it themselves. */
+const connectFirst = (problem: string) => problem.replace(/ Ask the owner to .*$/, " Connect it first.");
 
 /** A field's label inside a sentence: "Token" → "token"; names and acronyms ("API key", "Bedrock API key") as they are. */
 function labelInSentence(label: string, preset: AiPreset): string {
@@ -265,37 +310,70 @@ export function aiRoutes(deps: IntegrationRouteDeps, check: ConnectionTestDeps =
     res.json({ ok: true, checkedAt });
   });
 
-  // Forgets a connection; refused while chat or repo tasks run on it.
+  // Forgets a connection and takes it out of every route; refused while a kind of work runs on it alone.
   router.post("/api/ai/providers/:id/delete", requireAdmin, async (req, res) => {
     const id = providerParam(req.params.id);
     if (!id) return void res.status(404).json({ error: "Unknown AI provider." });
     const config = await configRepo.load(true);
     const name = presetFor(id).name;
-    const uses = [config.ai.chatProvider === id ? "chat" : "", config.ai.taskProvider === id ? "repo tasks" : ""].filter(Boolean);
-    if (uses.length) {
-      return void res.status(409).json({ error: `${name} runs ${uses.join(" and ")}. Choose another provider for ${uses.join(" and ")} first.` });
-    }
+    const uses = listed(usesAlone(config, id).map((kind) => KIND_WORDS[kind]));
+    if (uses) return void res.status(409).json({ error: `${name} runs ${uses}. Choose another provider for ${uses} first.` });
     await configRepo.update((c) => {
       if (id === "anthropic") c.anthropic = { apiKey: undefined, model: c.anthropic.model };
       else delete c.ai.providers[id];
+      for (const kind of WORK_KINDS) {
+        const rest = (c.ai.routes[kind] ?? []).filter((p) => p !== id);
+        if (rest.length) c.ai.routes[kind] = rest;
+        else delete c.ai.routes[kind];
+      }
+      // Chat and repo tasks start on their route's first provider (only a route of their own can still hold another).
+      if (c.ai.chatProvider === id && c.ai.routes.chat?.[0]) c.ai.chatProvider = c.ai.routes.chat[0];
+      if (c.ai.taskProvider === id && c.ai.routes.tasks?.[0]) c.ai.taskProvider = c.ai.routes.tasks[0];
     });
     res.json({ ok: true });
   });
 
-  // Chooses the providers chat and repo tasks run on; each must be connected and complete.
+  // Chooses the providers chat and repo tasks run on; each must be connected and complete. A route the owner set starts with it.
   router.post("/api/ai/active", requireAdmin, async (req, res) => {
     const input = body(ACTIVE, req.body);
     if ("error" in input) return void res.status(400).json({ error: input.error });
     const config = await configRepo.load(true);
     for (const id of [input.data.chatProvider, input.data.taskProvider]) {
       const problem = id && providerProblem(config, id);
-      if (problem) return void res.status(400).json({ error: problem.replace(/ Ask the owner to .*$/, " Connect it first.") });
+      if (problem) return void res.status(400).json({ error: connectFirst(problem) });
     }
     const saved = await configRepo.update((c) => {
-      if (input.data.chatProvider) c.ai.chatProvider = input.data.chatProvider;
-      if (input.data.taskProvider) c.ai.taskProvider = input.data.taskProvider;
+      if (input.data.chatProvider) {
+        c.ai.chatProvider = input.data.chatProvider;
+        putFirst(c, "chat", input.data.chatProvider);
+      }
+      if (input.data.taskProvider) {
+        c.ai.taskProvider = input.data.taskProvider;
+        putFirst(c, "tasks", input.data.taskProvider);
+      }
     });
     res.json({ ok: true, chatProvider: saved.ai.chatProvider, taskProvider: saved.ai.taskProvider });
+  });
+
+  // Sets a kind of work's providers in order (an empty list goes back to the default); each must be connected and complete.
+  // Chat and repo tasks start on their route's first provider, so chatProvider and taskProvider follow it.
+  router.post("/api/ai/routes", requireAdmin, async (req, res) => {
+    const input = body(ROUTE, req.body);
+    if ("error" in input) return void res.status(400).json({ error: input.error });
+    const { kind, providers } = input.data;
+    const config = await configRepo.load(true);
+    for (const id of providers) {
+      const problem = providerProblem(config, id);
+      if (problem) return void res.status(400).json({ error: connectFirst(problem) });
+    }
+    const saved = await configRepo.update((c) => {
+      if (providers.length) c.ai.routes[kind] = providers;
+      else delete c.ai.routes[kind];
+      const first = providers[0];
+      if (first && kind === "chat") c.ai.chatProvider = first;
+      if (first && kind === "tasks") c.ai.taskProvider = first;
+    });
+    res.json({ ok: true, routes: routesView(saved) });
   });
 
   return router;

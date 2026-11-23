@@ -34,7 +34,7 @@ import {
   projectNotesRead,
   startRepoTaskTool,
 } from "../../src/chat/pointer-tools.js";
-import type { AddAttachment, PointerRequest, StartRepoTask } from "../../src/chat/pointer-types.js";
+import type { AddAttachment, PointerActivity, PointerRequest, StartRepoTask } from "../../src/chat/pointer-types.js";
 import { FsStore } from "../../src/core/store.js";
 import { SlackInbox } from "../../src/slack/inbox.js";
 import { registerSlackInbox } from "../../src/slack/inbox-tools.js";
@@ -1985,5 +1985,162 @@ describe("Pointer brain: after the owner's Slack inbox", () => {
     await createPointerBrain(deps, { queryFn }).reply(req, ctx);
     expect(Object.keys(calls[0]!.options.mcpServers ?? {})).toContain("slack_inbox");
     expect(decisions).toEqual(["allow", "allow", "deny"]);
+  });
+});
+
+describe("Pointer brain: routes and fallback", () => {
+  const KIMI_KEY = "sk-kimi-pointer-secret-0042";
+  /** Claude and Kimi connected; the chat route Kimi first, then Claude. */
+  const routed = async (patch: (c: import("../../src/core/config.js").Config) => void = () => undefined) => {
+    const deps = await setup();
+    await deps.configRepo.update((c) => {
+      c.ai.providers.kimi = { secrets: { apiKey: KIMI_KEY }, settings: {}, models: {} };
+      c.ai.chatProvider = "kimi";
+      c.ai.routes = { chat: ["kimi", "anthropic"] };
+      patch(c);
+    });
+    return deps;
+  };
+  const onKimi = (call: Call) => call.options.env?.ANTHROPIC_AUTH_TOKEN === KIMI_KEY;
+  const rateLimited = [
+    { type: "stream_event", parent_tool_use_id: null, event: { type: "message_start", message: {} } },
+    { type: "stream_event", parent_tool_use_id: null, event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Let me che" } } },
+    { type: "assistant", parent_tool_use_id: null, error: "rate_limit", message: { content: [{ type: "text", text: "API Error: 429 rate limit" }] } },
+    result({ is_error: true, result: "API Error: 429 rate limit", api_error_status: 429, total_cost_usd: 0.001 }),
+  ];
+  const quiet = () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    return () => {
+      warn.mockRestore();
+      error.mockRestore();
+    };
+  };
+
+  it("moves to the next provider when one fails before any tool ran: the reply is the next one's, the console is told", async () => {
+    const deps = await routed();
+    const { queryFn, calls } = fakeQuery(async function* (call) {
+      if (onKimi(call)) {
+        yield* rateLimited;
+        return;
+      }
+      yield { type: "stream_event", parent_tool_use_id: null, event: { type: "message_start", message: {} } };
+      yield result();
+    });
+    const events: PointerActivity[] = [];
+    const restore = quiet();
+    const reply = await createPointerBrain(deps, { queryFn }).reply(baseReq({ surface: "web" }), { ...ctx, onActivity: (e) => events.push(e) });
+    restore();
+
+    expect(calls).toHaveLength(2);
+    expect(onKimi(calls[0]!)).toBe(true);
+    expect(calls[1]!.options.env?.ANTHROPIC_API_KEY).toBe(SECRETS.apiKey);
+    expect(calls[1]!.options.env?.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+    // Each attempt has its own folder, removed after it.
+    expect(calls[0]!.options.cwd).not.toBe(calls[1]!.options.cwd);
+    for (const call of calls) expect(existsSync(call.options.cwd!)).toBe(false);
+
+    expect(reply).toMatchObject({ text: "Here is the answer.", isError: false, provider: "anthropic", fallback: [{ from: "kimi", to: "anthropic", reason: "rate limited" }] });
+    // The failed attempt's cost counts too.
+    expect(reply.costUsd).toBeCloseTo(0.0431, 10);
+    expect(reply.agentCosts?.pointer?.usd).toBeCloseTo(0.0431, 10);
+
+    // The console drops the failed attempt's partial text, then says what happened.
+    const at = events.findIndex((e) => e.type === "step");
+    expect(events.slice(0, at)).toEqual([{ type: "turn" }, { type: "text", delta: "Let me che" }, { type: "turn" }]);
+    expect(events[at]).toEqual({ type: "step", id: "fallback-1", label: "Kimi failed (rate limited); Claude is answering instead.", kind: "other" });
+    expect(events[at + 1]).toEqual({ type: "step-done", id: "fallback-1", isError: false });
+  });
+
+  it("moves on when the query throws with a provider failure, and adds nothing to the answer", async () => {
+    const deps = await routed();
+    const { queryFn, calls } = fakeQuery(async function* (call) {
+      if (onKimi(call)) throw new Error("API Error: 529 overloaded");
+      yield result();
+    });
+    const restore = quiet();
+    const reply = await createPointerBrain(deps, { queryFn }).reply(baseReq(), ctx);
+    restore();
+    expect(calls).toHaveLength(2);
+    expect(reply.text).toBe("Here is the answer.");
+    expect(reply.fallback).toEqual([{ from: "kimi", to: "anthropic", reason: "overloaded" }]);
+  });
+
+  it("does not move on once a tool ran (a retry could repeat it), and says why", async () => {
+    const deps = await routed();
+    const { queryFn, calls } = fakeQuery(async function* () {
+      yield {
+        type: "assistant",
+        parent_tool_use_id: null,
+        message: { content: [{ type: "tool_use", id: "toolu_1", name: "mcp__slack__slack_send_message", input: { channel: "C1", text: "hi" } }] },
+      };
+      yield { type: "assistant", parent_tool_use_id: null, error: "rate_limit", message: { content: [{ type: "text", text: "API Error: 429" }] } };
+      yield result({ is_error: true, result: "API Error: 429", api_error_status: 429 });
+    });
+    const restore = quiet();
+    const reply = await createPointerBrain(deps, { queryFn }).reply(baseReq(), ctx);
+    restore();
+    expect(calls).toHaveLength(1);
+    expect(reply.isError).toBe(true);
+    expect(reply.provider).toBe("kimi");
+    expect(reply.fallback).toBeUndefined();
+    expect(reply.text).toContain("API Error: 429");
+    expect(reply.text).toContain("Kimi failed (rate limited) after it had started using tools, so Claude did not take over");
+  });
+
+  it("does not move on for the work's own failures, and says what happened when the last provider fails too", async () => {
+    const deps = await routed();
+    const turns = fakeQuery(async function* () {
+      yield result({ subtype: "error_max_turns", is_error: true, result: undefined });
+    });
+    const restore = quiet();
+    const stopped = await createPointerBrain(deps, { queryFn: turns.queryFn }).reply(baseReq(), ctx);
+    expect(turns.calls).toHaveLength(1);
+    expect(stopped.text).toContain("33");
+
+    const down = fakeQuery(async function* () {
+      yield* rateLimited;
+    });
+    const both = await createPointerBrain(deps, { queryFn: down.queryFn }).reply(baseReq(), ctx);
+    restore();
+    expect(down.calls).toHaveLength(2);
+    expect(both.isError).toBe(true);
+    expect(both.provider).toBe("anthropic");
+    expect(both.text).toMatch(/^Claude could not answer: API Error: 429 rate limit\n\nKimi failed \(rate limited\); Claude took over instead\.$/);
+  });
+
+  it("runs routines on the routines route, chat on the chat route", async () => {
+    const deps = await routed((c) => {
+      c.ai.chatProvider = "anthropic";
+      c.ai.routes = { routines: ["kimi"] };
+    });
+    const { queryFn, calls } = fakeQuery(async function* () {
+      yield result();
+    });
+    const brain = createPointerBrain(deps, { queryFn });
+    const routine = await brain.reply(baseReq({ text: "Scheduled routine", userId: "routine", channel: "routine", channelType: "unknown", surface: "routine", budgetUsd: 1 }), ctx);
+    const chat = await brain.reply(baseReq(), ctx);
+    expect(onKimi(calls[0]!)).toBe(true);
+    expect(routine.provider).toBe("kimi");
+    expect(onKimi(calls[1]!)).toBe(false);
+    expect(chat.provider).toBe("anthropic");
+  });
+
+  it("skips a provider whose monthly cap is used up, and refuses when none of the route can run", async () => {
+    const deps = await routed();
+    const { queryFn, calls } = fakeQuery(async function* () {
+      yield result();
+    });
+    const capped = { providerCaps: async () => (provider: string) => (provider === "kimi" ? "Kimi's cap is used up." : undefined) };
+    const reply = await createPointerBrain({ ...deps, spending: capped }, { queryFn }).reply(baseReq(), ctx);
+    expect(calls).toHaveLength(1);
+    expect(onKimi(calls[0]!)).toBe(false);
+    expect(reply.provider).toBe("anthropic");
+    expect(reply.fallback).toBeUndefined();
+
+    const all = { providerCaps: async () => () => "used up" };
+    const refused = await createPointerBrain({ ...deps, spending: all }, { queryFn }).reply(baseReq(), ctx);
+    expect(calls).toHaveLength(1);
+    expect(refused).toMatchObject({ isError: true, text: expect.stringMatching(/^No AI provider can run this\. Kimi: used up Claude: used up/) });
   });
 });

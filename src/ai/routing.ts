@@ -68,8 +68,46 @@ export function routeRuntimes(config: Config, kind: WorkKind, opts: RouteOptions
   return { ok: true, runtimes: usable.map((s) => buildRuntime(s.provider, connectionOf(config, s.provider)!)), skipped };
 }
 
+/** No provider of the route can run, and the route is Claude alone: callers say how to connect Claude in their own words. */
+export const onlyClaudeMissing = (skipped: RouteStep[]): boolean => skipped.length === 1 && skipped[0]?.provider === "anthropic";
+
 /** The route has at least one provider that can run (connected and complete; caps are not checked). */
 export const isRouteReady = (config: Config, kind: WorkKind): boolean => routeSteps(config, kind).some((s) => !s.problem);
+
+/** A provider's problem without the sentence telling people to ask the owner (the owner reads these). */
+export const ownerProblem = (problem: string): string => problem.replace(/ Ask the owner to .*$/, "");
+
+/** One kind of work's route as the console shows it (publicView's ai.routes, POST /api/ai/routes). */
+export interface RouteView {
+  /** The owner set this kind's route (config.ai.routes); else it follows the chat or the task provider. */
+  custom: boolean;
+  /** Its providers in order, caps not checked; `problem` says why one cannot run. */
+  steps: { provider: AiProviderId; name: string; ready: boolean; problem?: string }[];
+}
+
+export function routeView(config: Config, kind: WorkKind): RouteView {
+  return {
+    custom: Boolean(config.ai.routes?.[kind]?.length),
+    steps: routeSteps(config, kind).map((s) => ({
+      provider: s.provider,
+      name: s.name,
+      ready: !s.problem,
+      ...(s.problem ? { problem: ownerProblem(s.problem) } : {}),
+    })),
+  };
+}
+
+/**
+ * The route's providers that are connected and complete, in order, for the
+ * spending caps (budget.ts): the work runs on the first of them whose cap is
+ * not used up. All of them when none is (the work is refused for that, not
+ * for a cap).
+ */
+export function routeProviders(config: Config, kind: WorkKind): AiProviderId[] {
+  const steps = routeSteps(config, kind);
+  const usable = steps.filter((s) => !s.problem);
+  return (usable.length ? usable : steps).map((s) => s.provider);
+}
 
 // ---------- Failures the next provider can make up for ----------
 
@@ -153,3 +191,80 @@ export interface FallbackNote {
 /** "Gemini failed (rate limited); Claude answered instead." */
 export const fallbackLine = (n: FallbackNote, did = "answered"): string =>
   `${presetFor(n.from).short} failed (${n.reason}); ${presetFor(n.to).short} ${did} instead.`;
+
+// ---------- Watching a run, and calls that can move on ----------
+
+/** Content blocks that are a tool being used. */
+const TOOL_BLOCKS = new Set(["tool_use", "server_tool_use", "mcp_tool_use"]);
+/** The results a provider failure ends a run with; any other (a success, the platform's own limits) clears one seen before. */
+const FAILED_RESULTS = new Set(["success", "error_during_execution"]);
+
+/**
+ * Follows one run's messages: whether a tool may have run (a tool use by the
+ * main agent or by a subagent, so running the work again could repeat it),
+ * and the provider failure the run ended on, if it ended on one. A
+ * subagent's failure goes back to the main agent, which may carry on: only
+ * the main agent's and the result's count.
+ */
+export class RunWatch {
+  toolRan = false;
+  private seen: ProviderFailure | undefined;
+  private ended = false;
+
+  feed(message: SDKMessage): void {
+    if (message.type === "stream_event") {
+      const event = message.event;
+      if (event.type === "content_block_start" && TOOL_BLOCKS.has(event.content_block.type)) this.toolRan = true;
+      return;
+    }
+    if (message.type === "assistant") {
+      if (message.message.content.some((block) => TOOL_BLOCKS.has(block.type))) this.toolRan = true;
+      const failure = message.parent_tool_use_id === null ? providerFailure(message) : undefined;
+      if (failure) this.seen = failure;
+      return;
+    }
+    if (message.type === "result") {
+      this.ended = true;
+      const failure = providerFailure(message);
+      if (failure) this.seen = failure;
+      else if (!message.is_error || !FAILED_RESULTS.has(message.subtype)) this.seen = undefined;
+    }
+  }
+
+  /** The query threw: before any result, its text may name a provider failure. */
+  thrown(err: unknown): void {
+    if (!this.ended) this.seen ??= errorFailure(err);
+  }
+
+  /** The provider failure the run ended on, or undefined. */
+  get failure(): ProviderFailure | undefined {
+    return this.seen;
+  }
+}
+
+/** One attempt of a call on one provider: what it gave, and the provider failure it ended on, if any. */
+export interface Attempt<T> {
+  value: T;
+  failure?: ProviderFailure;
+}
+
+/**
+ * A call without side effects (a review, a search, a few lines of talk) on the
+ * route's runtimes in order: while one fails for the provider's own reasons,
+ * the next is asked. Returns the last attempt's value, the runtime that gave
+ * it, and the fallbacks on the way.
+ */
+export async function acrossRoute<T>(
+  runtimes: ProviderRuntime[],
+  call: (runtime: ProviderRuntime) => Promise<Attempt<T>>,
+): Promise<{ value: T; runtime: ProviderRuntime; fallback: FallbackNote[] }> {
+  if (!runtimes.length) throw new Error("A route has at least one provider.");
+  const fallback: FallbackNote[] = [];
+  for (let i = 0; ; i += 1) {
+    const runtime = runtimes[i]!;
+    const attempt = await call(runtime);
+    const next = runtimes[i + 1];
+    if (!attempt.failure || !next) return { value: attempt.value, runtime, fallback };
+    fallback.push({ from: runtime.provider, to: next.provider, reason: attempt.failure.reason });
+  }
+}

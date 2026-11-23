@@ -156,7 +156,7 @@ describe("chatTalk", () => {
     });
     const schema = (options!.outputFormat as { schema: { properties: { lines: { items: { properties: { speaker: { enum: string[] } } } } } } }).schema;
     expect(schema.properties.lines.items.properties.speaker.enum).toEqual(["coder", "qa"]);
-    expect(out).toEqual({ raw: LINES, model: SIZING_MODEL, costUsd: 0.0007, tokens: 1000 });
+    expect(out).toEqual({ raw: LINES, model: SIZING_MODEL, costUsd: 0.0007, tokens: 1000, provider: "anthropic" });
   });
 
   it("gives the CLI an environment of its own: the provider's credentials, none of the service's secrets", async () => {
@@ -191,5 +191,47 @@ describe("chatTalk", () => {
     expect(failed.raw).toBeUndefined();
     const thrown = await chatTalk(anthropicRuntime(ANTHROPIC_KEY), CALL, { queryFn: fakeQuery(new Error("spawn failed")).queryFn });
     expect(thrown.error).toBe("spawn failed");
+  });
+
+  it("moves on along the light work route when a provider fails for its own reasons, counting every attempt", async () => {
+    const kimi = buildRuntime("kimi", { secrets: { apiKey: "sk-kimi-office-0123456789" }, settings: {}, models: {} });
+    const calls: (Options | undefined)[] = [];
+    const answers: SDKMessage[][] = [
+      [result({ is_error: true, api_error_status: 429, total_cost_usd: 0.0001 })],
+      [result({ structured_output: LINES, total_cost_usd: 0.0007 })],
+    ];
+    const queryFn: QueryFn = (params) => {
+      calls.push(params.options);
+      const messages = answers[calls.length - 1] ?? [];
+      return (async function* () {
+        yield* messages;
+      })();
+    };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const out = await chatTalk([kimi, anthropicRuntime(ANTHROPIC_KEY)], CALL, { queryFn });
+    warn.mockRestore();
+    expect(calls).toHaveLength(2);
+    expect(calls[0]!.env?.ANTHROPIC_AUTH_TOKEN).toBe("sk-kimi-office-0123456789");
+    expect(calls[1]!.env?.ANTHROPIC_API_KEY).toBe(ANTHROPIC_KEY);
+    expect(out).toMatchObject({ raw: LINES, provider: "anthropic" });
+    expect(out.costUsd).toBeCloseTo(0.0008, 10);
+    expect(out.error).toBeUndefined();
+
+    // The work's own failure (a budget stop) is not the provider's: nobody else is asked.
+    const budget = fakeQuery([result({ subtype: "error_max_budget_usd", total_cost_usd: 0.05 })]);
+    const stopped = await chatTalk([kimi, anthropicRuntime(ANTHROPIC_KEY)], CALL, { queryFn: budget.queryFn });
+    expect(budget.calls).toHaveLength(1);
+    expect(stopped).toMatchObject({ error: "error_max_budget_usd", provider: "kimi" });
+  });
+
+  it("chooses the light work route, its first provider that is connected", () => {
+    const c = config({ anthropic: true, provider: "chat" });
+    c.ai.routes = { light: ["kimi", "anthropic"] };
+    const choice = chooseTalkProvider(c);
+    expect(choice?.id === "chat" && choice.runtimes.map((r) => r.provider)).toEqual(["anthropic"]);
+    c.ai.providers.kimi = { secrets: { apiKey: "sk-kimi-office-0123456789" }, settings: {}, models: {} };
+    const both = chooseTalkProvider(c);
+    expect(both?.id === "chat" && [both.runtime.provider, ...both.runtimes.map((r) => r.provider)]).toEqual(["kimi", "kimi", "anthropic"]);
+    expect(talkAvailability(c).chat).toBe(true);
   });
 });
