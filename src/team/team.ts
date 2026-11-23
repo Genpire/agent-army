@@ -82,6 +82,18 @@ export const EngineModelSchema = z
   .max(ENGINE_MODEL_MAX, `Model ids are at most ${ENGINE_MODEL_MAX} characters.`)
   .refine((model) => model === "" || ENGINE_MODEL_RE.test(model), ENGINE_MODEL_MESSAGE);
 
+/** The engines an agent's work can run on in repo tasks (engines.ts). */
+export const AGENT_ENGINES = ["claude", "codex", "gemini"] as const;
+export type AgentEngine = (typeof AGENT_ENGINES)[number];
+/** At most this many fallbacks after the agent's own engine. */
+export const AGENT_FALLBACK_MAX = 2;
+/** One step of an agent's fallback: an engine, and the model its CLI runs (empty = the engine's own; ignored for "claude"). */
+export const AgentFallbackSchema = z.object({
+  engine: z.enum(AGENT_ENGINES),
+  model: EngineModelSchema.default(""),
+});
+export type AgentFallback = z.infer<typeof AgentFallbackSchema>;
+
 export const AgentSpecSchema = z.object({
   id: z
     .string()
@@ -113,7 +125,7 @@ export const AgentSpecSchema = z.object({
    * the task provider) or a coding agent CLI it hands the work to (see
    * engines.ts). Chat always runs on the chat provider.
    */
-  engine: z.enum(["claude", "codex", "gemini"]).default("claude"),
+  engine: z.enum(AGENT_ENGINES).default("claude"),
   /**
    * The model its engine CLI runs for this agent (--model), when the engine is
    * Codex or Gemini CLI; empty = the engine's own model (config.engines). So
@@ -121,6 +133,15 @@ export const AgentSpecSchema = z.object({
    * model of the subagent that hands the work over.
    */
   engineModel: EngineModelSchema.default(""),
+  /**
+   * Who takes over in repo tasks, in order, when the agent's engine cannot do
+   * the work: not connected, or a run fails for the engine's own reasons (rate
+   * limit, quota or credit used up, a rejected key, the service down), never
+   * because the work itself failed. "claude" is the team's model on the task
+   * route. Empty = no fallback (an engine that is not connected still leaves
+   * the agent working as Claude, as before).
+   */
+  fallback: z.array(AgentFallbackSchema).max(AGENT_FALLBACK_MAX).default(() => []),
 });
 export type AgentSpec = z.infer<typeof AgentSpecSchema>;
 
@@ -235,6 +256,7 @@ export function defaultTeam(): Team {
         apps: [],
         engine: "claude",
         engineModel: "",
+        fallback: [],
         instructions: `You are the Coder on a software team. You receive one scoped task from Pointer, the orchestrator.
 - Read the relevant code first and confirm the problem is there: find it, or reproduce the bug. If it is not there, or the task does not match the code, change nothing: stop and say what you found (files, commands, output).
 - Match the surrounding style, naming and structure.
@@ -258,6 +280,7 @@ export function defaultTeam(): Team {
         apps: [],
         engine: "claude",
         engineModel: "",
+        fallback: [],
         instructions: `You are the Reviewer. You did not write this change, and you are the last line of defence before a human sees it.
 - Inspect the work with \`git status\` and \`git diff\` (compare against the base branch you are given). Read the surrounding code, not just the diff.
 - Look for: incorrect logic, unhandled edge cases, security issues (injection, authz, secrets, unsafe input), data-loss risks, breaking API changes, missing tests, and violations of the project's conventions.
@@ -281,6 +304,7 @@ export function defaultTeam(): Team {
         apps: [],
         engine: "claude",
         engineModel: "",
+        fallback: [],
         instructions: `You are QA. Your job is to prove the change works, or to show exactly how it does not.
 - Discover how this project builds and tests (package scripts, Makefile, CI workflows) and run the relevant suites.
 - For a bug fix, reproduce the bug first where practical, then confirm the fix. For a feature, exercise the acceptance criteria.
@@ -305,6 +329,7 @@ export function defaultTeam(): Team {
         apps: [],
         engine: "claude",
         engineModel: "",
+        fallback: [],
         instructions: `You are the Failure Reviewer. Others check that the change works; you check only what happens when things go wrong.
 - Inspect the change with \`git diff\` against the base branch you are given, then read the code paths it touches end to end: callers, error handling, writes to storage, calls to other services.
 - Go through this checklist for what the change touches:
@@ -336,6 +361,7 @@ export function defaultTeam(): Team {
         apps: [],
         engine: "claude",
         engineModel: "",
+        fallback: [],
         instructions: `You are the Researcher. You answer one research question thoroughly and honestly.
 - Search broadly first, then read the most authoritative sources (official docs, changelogs, source code, reputable analyses). Prefer recent sources and note dates.
 - Separate facts (with a source URL for each) from your judgement. Flag conflicting sources and anything you could not verify.
@@ -357,6 +383,7 @@ export function defaultTeam(): Team {
         apps: [],
         engine: "claude",
         engineModel: "",
+        fallback: [],
         instructions: `You are the Writer. You turn facts and intent into clear, well-structured text for a specific audience.
 - Ask yourself who reads it and what they must do or decide after reading; write for that. Lead with the point.
 - Use only the facts you were given or can verify; never invent numbers, names or quotes. Mark anything that needs confirming.
@@ -379,6 +406,7 @@ export function defaultTeam(): Team {
         apps: [],
         engine: "claude",
         engineModel: "",
+        fallback: [],
         instructions: `You are HR for a team of AI agents. You make the team fit the work it is actually asked to do.
 - Base every recommendation on evidence: the requests the team got, how they ended (done, blocked, failed, stopped), which agents did the work, how long it took and what it cost.
 - Recommend at most a few changes, each with the reason and the evidence: hire an agent for work nobody fits, sharpen an agent's description or instructions when Pointer picks it wrongly or it keeps failing, give an agent more or less access, retire an agent nobody uses, or add a skill.
@@ -401,6 +429,7 @@ export function defaultTeam(): Team {
         apps: [],
         engine: "claude",
         engineModel: "",
+        fallback: [],
         instructions: `You are the Skills Scout. You find Claude skills: folders with a SKILL.md (name, description, instructions) and optional scripts or reference files, which teach an agent a task.
 - Search where skills are published (Anthropic's skills repository on GitHub, other public repositories and skill directories) for the need you are given.
 - For each candidate give: its name, what it does, its source URL (the folder that holds SKILL.md), its licence, what files it contains, and whether it runs scripts.

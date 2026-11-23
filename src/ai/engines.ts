@@ -194,6 +194,7 @@ export function engineAgentTemplate(id: EngineId, agentId: string, o: { name?: s
     apps: [],
     engine: id,
     engineModel: o.engineModel ?? "",
+    fallback: [],
   };
 }
 

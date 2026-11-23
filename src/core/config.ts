@@ -395,6 +395,19 @@ export const EngineConnectionSchema = z.object({
 });
 export type EngineConnection = z.infer<typeof EngineConnectionSchema>;
 
+/**
+ * The kinds of work a route is set for (config.ai.routes, src/ai/routing.ts):
+ * - chat: Pointer's replies in Slack and the console;
+ * - routines: scheduled routine runs (read-only reports);
+ * - tasks: repo tasks (the team's runs, fix rounds);
+ * - light: short one-shot calls (task sizing, HR review, Skills Scout, the office's talk).
+ */
+export const WORK_KINDS = ["chat", "routines", "tasks", "light"] as const;
+export type WorkKind = (typeof WORK_KINDS)[number];
+/** Providers in one route: the first that can run does; a provider failing (rate limit, credit, outage) hands over to the next. */
+export const ROUTE_MAX = 4;
+export const RouteSchema = z.array(z.enum(AI_PROVIDER_IDS)).max(ROUTE_MAX);
+
 
 // ---------- Email, company data and routines (proactive work) ----------
 
@@ -639,9 +652,16 @@ export const ConfigSchema = z.object({
       chatProvider: z.enum(AI_PROVIDER_IDS).default("anthropic"),
       taskProvider: z.enum(AI_PROVIDER_IDS).default("anthropic"),
       providers: z.partialRecord(z.enum(AI_PROVIDER_IDS), AiProviderConnectionSchema).default({}),
+      /**
+       * Each kind of work's providers in order (routing.ts routeFor). A kind left
+       * out runs on chatProvider (chat, routines, light) or taskProvider (tasks)
+       * alone. When a route is saved, chatProvider and taskProvider follow the
+       * first of the chat and tasks routes.
+       */
+      routes: z.partialRecord(z.enum(WORK_KINDS), RouteSchema).default(() => ({})),
     })
     // A new object each time: zod copies a default only one level deep, and `providers` is written to.
-    .default(() => ({ chatProvider: "anthropic" as const, taskProvider: "anthropic" as const, providers: {} })),
+    .default(() => ({ chatProvider: "anthropic" as const, taskProvider: "anthropic" as const, providers: {}, routes: {} })),
   /** Coding agent CLIs the team can hand work to in repo tasks. */
   // Factory defaults: zod copies a default object only one level deep, so a literal would be shared between configs.
   engines: z

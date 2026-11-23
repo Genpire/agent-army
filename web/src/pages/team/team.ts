@@ -276,6 +276,7 @@ export const NEW_AGENT: AgentDraft = {
   apps: [],
   engine: "claude",
   engineModel: "",
+  fallback: [],
 };
 
 /** The checks AgentSpecSchema runs, with the page's wording. Empty when the draft can be saved. */
@@ -315,6 +316,10 @@ export const toSpec = (id: string, d: AgentDraft): AgentSpec => ({
   engine: d.engine,
   // The CLI's model means nothing for an agent on Claude.
   engineModel: d.engine === "claude" ? "" : d.engineModel.trim(),
+  // In order; the agent's own engine is never its own fallback, and Claude's model is the team's.
+  fallback: (d.fallback ?? [])
+    .filter((f) => f.engine !== d.engine)
+    .map((f) => ({ engine: f.engine, model: f.engine === "claude" ? "" : f.model.trim() })),
 });
 
 export type PointerErrors = Partial<Record<keyof PointerSpec, string>>;
