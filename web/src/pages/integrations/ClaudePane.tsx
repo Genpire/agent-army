@@ -1,7 +1,9 @@
 /**
- * The AI model pane (hub row "claude"): which provider chat and repo tasks
- * run on, each provider's connection (its fields, models and what it can
- * do), and the connected ones with their status. The presets and the saved
+ * The AI model pane (hub row "claude"): which providers each kind of work
+ * runs on, in order (AiRoutes), each provider's connection (its fields,
+ * models and what it can do), and the connected ones with their status. A
+ * provider's "Use for chat" and "Use for repo tasks" put it first in those
+ * routes (the server keeps the two in step). The presets and the saved
  * connections come from GET /api/ai/providers (src/routes/ai.ts); secrets are
  * never sent back, only masked. Each tier's model picker lists the
  * provider's models live where it can (GET /api/ai/providers/:id/models).
@@ -14,8 +16,6 @@ import { HStack } from "@astryxdesign/core/HStack";
 import { Icon } from "@astryxdesign/core/Icon";
 import { Link } from "@astryxdesign/core/Link";
 import { List, ListItem } from "@astryxdesign/core/List";
-import { MetadataList, MetadataListItem } from "@astryxdesign/core/MetadataList";
-import { NavIcon } from "@astryxdesign/core/NavIcon";
 import { Selector, type SelectorOptionData, type SelectorOptionType } from "@astryxdesign/core/Selector";
 import { Spinner } from "@astryxdesign/core/Spinner";
 import { Switch } from "@astryxdesign/core/Switch";
@@ -23,11 +23,11 @@ import { Text } from "@astryxdesign/core/Text";
 import { TextArea } from "@astryxdesign/core/TextArea";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { VStack } from "@astryxdesign/core/VStack";
-import { CheckCircleIcon, CloudIcon, CpuChipIcon, ServerStackIcon, SparklesIcon, XCircleIcon } from "@heroicons/react/24/outline";
+import { CheckCircleIcon, CpuChipIcon, XCircleIcon } from "@heroicons/react/24/outline";
 import { useState } from "react";
-import { BrandLogo } from "../../components/BrandLogo";
 import { ConfirmButton } from "../../components/ConfirmButton";
 import { ModelPicker } from "../../components/ModelPicker";
+import { ProviderLogo } from "../../components/ProviderLogo";
 import { SecretField } from "../../components/SecretField";
 import { capabilityLines, presetModelLabel, providerById, providerStatus, TIER_INFO, tierModels, useAiProviders } from "../../lib/aiProviders";
 import { api } from "../../lib/api";
@@ -36,18 +36,9 @@ import { forgetModelLists } from "../../lib/models";
 import { useConfig } from "../../lib/state";
 import { type AiProviderId, type AiProviderView, type AiProvidersView, MODEL_TIER_OPTIONS, type ModelTier, type PresetField } from "../../lib/types";
 import { useAction } from "../../lib/useAction";
+import { AiRoutes } from "./AiRoutes";
 import type { IntegrationSummary } from "./catalog";
-import { FormActions, FormError, type HeroIcon, PaneHeader, PaneSection, StatusLine, useSave } from "./parts";
-
-/** Logo keys Simple Icons has a mark for (lib/logos.ts); the others get an icon. */
-const BRAND_LOGOS = new Set(["anthropic", "googlecloud", "deepseek", "qwen", "kimi"]);
-const FALLBACK_ICONS: Record<string, HeroIcon> = { bedrock: CloudIcon, foundry: CloudIcon, zai: SparklesIcon, custom: ServerStackIcon };
-
-/** The provider's logo, or an icon for the ones Simple Icons does not carry. */
-function ProviderLogo({ provider }: { provider: Pick<AiProviderView, "logo" | "name"> }) {
-  if (BRAND_LOGOS.has(provider.logo)) return <BrandLogo id={provider.logo} name={provider.name} size="sm" />;
-  return <NavIcon icon={<Icon icon={FALLBACK_ICONS[provider.logo] ?? CpuChipIcon} size="sm" label={provider.name} />} />;
-}
+import { FormActions, FormError, PaneHeader, PaneSection, StatusLine, useSave } from "./parts";
 
 export function ClaudePane({ summary, onBack }: { summary: IntegrationSummary; onBack?: () => void }) {
   const { config } = useConfig();
@@ -71,7 +62,7 @@ export function ClaudePane({ summary, onBack }: { summary: IntegrationSummary; o
         !error && <Spinner label="Loading the AI providers" />
       ) : (
         <>
-          <InUse view={view} />
+          <AiRoutes view={view} reload={reload} />
           <ConnectedProviders view={view} onEdit={setSelectedId} reload={reload} />
           <PaneSection
             title="Set up a provider"
@@ -89,22 +80,6 @@ export function ClaudePane({ summary, onBack }: { summary: IntegrationSummary; o
         </>
       )}
     </VStack>
-  );
-}
-
-/** What chat and repo tasks run on now. */
-function InUse({ view }: { view: AiProvidersView }) {
-  const line = (id: AiProviderId) => {
-    const p = providerById(view, id);
-    if (!p) return <Text>{id}</Text>;
-    const ready = p.configured;
-    return <StatusLine tone={ready ? "success" : "warning"} text={ready ? p.name : `${p.name}: ${p.problem ?? "not set up"}`} />;
-  };
-  return (
-    <MetadataList>
-      <MetadataListItem label="Chat">{line(view.chatProvider)}</MetadataListItem>
-      <MetadataListItem label="Repo tasks">{line(view.taskProvider)}</MetadataListItem>
-    </MetadataList>
   );
 }
 
@@ -445,8 +420,12 @@ function UseFor({ provider: p, view, reload }: { provider: AiProviderView; view:
   const offMessage = canFallBack ? undefined : "Turn on another provider for this to move it there.";
   return (
     <VStack gap={3}>
-      <Heading level={4}>Use it</Heading>
-      {!p.configured && <Text color="secondary">Finish the connection above to use it.</Text>}
+      <VStack gap={1}>
+        <Heading level={4}>Use it</Heading>
+        <Text color="secondary">
+          {p.configured ? "Puts it first for chat or repo tasks. The order, and who takes over when it fails, is under Who does what." : "Finish the connection above to use it."}
+        </Text>
+      </VStack>
       <Switch
         label="Use for chat"
         description={`${p.name} answers in Slack and the console.`}

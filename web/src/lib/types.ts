@@ -3,20 +3,60 @@
  * imports: nothing from the server ends up in the browser bundle), so the
  * page and the API cannot drift apart.
  */
-import type { publicView } from "../../../src/core/config.js";
+import type { AiProviderId, ROUTE_MAX as SERVER_ROUTE_MAX, WorkKind, publicView } from "../../../src/core/config.js";
 import type { MemoryFact } from "../../../src/chat/memory.js";
 import type { NotesRepo, ProjectNotes } from "../../../src/chat/notes.js";
 import type { MondayBoardSummary } from "../../../src/integrations/monday/monday.js";
 import type { ProgressSnapshot } from "../../../src/tasks/progress.js";
 import type { ParallelLimit } from "../../../src/tasks/runner.js";
 import type { CiSummary, Task } from "../../../src/tasks/tasks.js";
-import type { Access, AgentSpec, Effort, PointerSpec, Team } from "../../../src/team/team.js";
+import type { Access, AGENT_FALLBACK_MAX as SERVER_AGENT_FALLBACK_MAX, AgentSpec, Effort, PointerSpec, Team } from "../../../src/team/team.js";
 import type { MonthUsage } from "../../../src/spending/usage.js";
 
-export type { Access, AgentSpec, CiSummary, Effort, MemoryFact, MondayBoardSummary, MonthUsage, ParallelLimit, PointerSpec, ProgressSnapshot, ProjectNotes, Task, Team };
+export type { Access, AgentSpec, CiSummary, Effort, MemoryFact, MondayBoardSummary, MonthUsage, ParallelLimit, PointerSpec, ProgressSnapshot, ProjectNotes, Task, Team, WorkKind };
 
-/** The configuration as the browser sees it: secrets are never included, only whether they are set. */
-export type PublicConfig = ReturnType<typeof publicView>;
+// ---------- Routes: which providers each kind of work runs on, in order (config.ai.routes, src/ai/routing.ts) ----------
+
+/** One provider of a route, in its place: whether it can run now, and why not. */
+export interface RouteStepView {
+  provider: AiProviderId;
+  /** "Gemini", "Claude"… */
+  name: string;
+  ready: boolean;
+  /** Why it is skipped now (not connected, incomplete, its monthly cap used up). */
+  problem?: string;
+}
+
+/** A kind of work's route: the first ready step runs, the next takes over if it fails. */
+export interface RouteView {
+  /** The owner set it; else the default (chat, routines and light work follow the chat provider, repo tasks the task provider). */
+  custom: boolean;
+  steps: RouteStepView[];
+}
+
+export type RoutesView = Record<WorkKind, RouteView>;
+
+/** POST /api/ai/routes: one kind at a time; `[]` puts it back to the default. */
+export interface RouteSaved {
+  ok: true;
+  routes: RoutesView;
+}
+
+/** The kinds of work, in the order the AI model pane shows them (checked against the server's list). */
+export const WORK_KIND_OPTIONS = ["chat", "routines", "tasks", "light"] as const satisfies readonly WorkKind[];
+/** At most this many providers in one route (the server's ROUTE_MAX). */
+export const ROUTE_MAX: typeof SERVER_ROUTE_MAX = 4;
+/** At most this many engines take over from an agent's own (the server's AGENT_FALLBACK_MAX). */
+export const AGENT_FALLBACK_MAX: typeof SERVER_AGENT_FALLBACK_MAX = 2;
+
+type ServerConfig = ReturnType<typeof publicView>;
+
+/**
+ * The configuration as the browser sees it: secrets are never included, only
+ * whether they are set. `ai.routes` is optional for a server that does not
+ * send it yet: the page then shows each kind's default (aiRoutes.ts routesOf).
+ */
+export type PublicConfig = Omit<ServerConfig, "ai"> & { ai: ServerConfig["ai"] & { routes?: RoutesView } };
 export type RepoSetupView = PublicConfig["repoSetup"][string];
 export type GitHubConnectionView = PublicConfig["github"]["extra"][number];
 export type Limits = PublicConfig["limits"];

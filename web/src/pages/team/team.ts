@@ -6,6 +6,7 @@
  */
 import type { SelectorOptionData } from "@astryxdesign/core/Selector";
 import { presetModelLabel, tierModels } from "../../lib/aiProviders";
+import type { AgentEngine } from "../../lib/engines";
 import type { PickerSpecial } from "../../lib/modelPicker";
 import type { ModelSource } from "../../lib/models";
 import {
@@ -126,6 +127,12 @@ export const engineModelSpecials = (engineName: string, engineModel: string): Pi
     description: engineModel ? `${engineModel}, set under Integrations, ${engineName}` : `The CLI's default, until one is set under Integrations, ${engineName}`,
   },
 ];
+
+/** When an agent's fallbacks (AgentSpec.fallback) take over from its engine. */
+export const fallbackHint = (engine: AgentEngine): string =>
+  engine === "claude"
+    ? "Used when Claude is rate limited, out of credit, its key is rejected or it is down — not when the work itself fails."
+    : "Used when the engine is rate limited, out of credit, its key is rejected or it is down — not when the work itself fails. Claude is always the last resort.";
 
 // ---------- Effort ----------
 

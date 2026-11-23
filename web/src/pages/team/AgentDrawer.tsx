@@ -18,7 +18,7 @@ import { VStack } from "@astryxdesign/core/VStack";
 import { type ReactNode, useMemo, useState } from "react";
 import { ConfirmButton } from "../../components/ConfirmButton";
 import { ModelPicker } from "../../components/ModelPicker";
-import { type AgentEngine, ENGINE_NAME, type EngineId, isAgentEngine } from "../../lib/engines";
+import { type AgentEngine, ENGINE_DESCRIPTION, ENGINE_NAME, type EngineId, isAgentEngine } from "../../lib/engines";
 import { href } from "../../lib/router";
 import { useConfig } from "../../lib/state";
 import { ACCESS_OPTIONS, type AgentSpec } from "../../lib/types";
@@ -27,6 +27,8 @@ import { useSkillLibrary } from "../skills/useSkillLibrary";
 import { ACCESS_ICON } from "./AccessToken";
 import { AgentBudgetField, useAgentBudget } from "./AgentBudgetField";
 import { AgentEmoji } from "./AgentEmoji";
+import { AgentFallbackField } from "./AgentFallbackField";
+import { EngineModelField } from "./EngineModelField";
 import {
   ACCESS_INFO,
   AGENT_EFFORT_SELECT_OPTIONS,
@@ -38,7 +40,7 @@ import {
   NEW_AGENT,
   agentErrors,
   agentModelSpecials,
-  engineModelSpecials,
+  fallbackHint,
   fieldStatus,
   hasErrors,
   isAccess,
@@ -170,9 +172,9 @@ function EngineField({ value, onChange }: { value: AgentEngine; onChange: (engin
     };
   };
   const options = [
-    { value: "claude", label: ENGINE_NAME.claude, description: "The team's model" },
-    cli("codex", "OpenAI's coding agent CLI"),
-    cli("gemini", "Google's coding agent CLI"),
+    { value: "claude", label: ENGINE_NAME.claude, description: ENGINE_DESCRIPTION.claude },
+    cli("codex", ENGINE_DESCRIPTION.codex),
+    cli("gemini", ENGINE_DESCRIPTION.gemini),
   ];
   const missing = (["codex", "gemini"] as const).filter((id) => !config.engines[id].connected).map((id) => ENGINE_NAME[id]);
   return (
@@ -188,23 +190,6 @@ function EngineField({ value, onChange }: { value: AgentEngine; onChange: (engin
         </Text>
       )}
     </VStack>
-  );
-}
-
-/** The model the agent's coding agent CLI runs for it (--model), from the engine's list; empty runs the engine's own. */
-function EngineModelField({ engine, value, onChange }: { engine: EngineId; value: string; onChange: (model: string) => void }) {
-  const { config } = useConfig();
-  const name = ENGINE_NAME[engine];
-  return (
-    <ModelPicker
-      label={`${name} model`}
-      source={{ kind: "engine", id: engine }}
-      value={value}
-      onChange={onChange}
-      specials={engineModelSpecials(name, config.engines[engine].model)}
-      description={`The model ${name} runs for this agent. Agents on ${name} can each run a different one.`}
-      isOptional
-    />
   );
 }
 
@@ -367,9 +352,24 @@ function AgentForm({ target, takenIds, lead, models = CLAUDE_CHOICES, onClose, o
 
             <Divider />
             <FormSection title="Engine" description="Who does its work in repo tasks. With Codex or Gemini CLI, the agent hands its assignment to that coding agent, which works in the checkout, and checks what it did. In chat it works like any other agent.">
-              {/* Another engine has other models: its model starts over at the engine's own. */}
-              <EngineField value={draft.engine} onChange={(engine) => setDraft((d) => ({ ...d, engine, engineModel: engine === d.engine ? d.engineModel : "" }))} />
+              {/* Another engine has other models: its model starts over at the engine's own. Its own engine is never its fallback. */}
+              <EngineField
+                value={draft.engine}
+                onChange={(engine) =>
+                  setDraft((d) => ({
+                    ...d,
+                    engine,
+                    engineModel: engine === d.engine ? d.engineModel : "",
+                    fallback: (d.fallback ?? []).filter((f) => f.engine !== engine),
+                  }))
+                }
+              />
               {draft.engine !== "claude" && <EngineModelField engine={draft.engine} value={draft.engineModel} onChange={set("engineModel")} />}
+            </FormSection>
+
+            <Divider />
+            <FormSection title={`If ${ENGINE_NAME[draft.engine]} can't do the work`} description={fallbackHint(draft.engine)}>
+              <AgentFallbackField engine={draft.engine} value={draft.fallback ?? []} onChange={set("fallback")} />
             </FormSection>
 
             <Divider />
