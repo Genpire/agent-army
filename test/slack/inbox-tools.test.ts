@@ -22,7 +22,7 @@ import {
   parseSince,
   registerSlackInbox,
 } from "../../src/slack/inbox-tools.js";
-import { buildManifest } from "../../src/slack/slack.js";
+import { buildAccountManifest, buildManifest } from "../../src/slack/slack.js";
 import { SLACK_USER_EVENTS, SLACK_USER_SCOPES, type SlackUserAccess } from "../../src/slack/user-account.js";
 
 const OWNER = "UOWN";
@@ -47,7 +47,7 @@ const config = (patch: Record<string, unknown> = {}): Config =>
 /** An inbox with a DM, a mention, a reply in the owner's thread, a group DM and an answered DM. */
 async function filledInbox() {
   const store = new FsStore(await mkdtemp(join(tmpdir(), "army-inbox-tools-")));
-  const inbox = new SlackInbox(store, deriveKey("k"), () => NOW);
+  const inbox = new SlackInbox(store, deriveKey("k"), { now: () => NOW, batchMs: 0 });
   const conversations: Record<string, object> = {
     D2: { is_im: true, user: "U2" },
     D3: { is_im: true, user: "U3" },
@@ -133,10 +133,10 @@ describe("slack_my_inbox", () => {
   });
 
   it("says when nothing has reached the inbox yet, pointing at the app's update", async () => {
-    const empty = new SlackInbox(new FsStore(await mkdtemp(join(tmpdir(), "army-inbox-tools-"))), deriveKey("k"));
+    const empty = new SlackInbox(new FsStore(await mkdtemp(join(tmpdir(), "army-inbox-tools-"))), deriveKey("k"), { batchMs: 0 });
     const out = textOf(await inboxReport({ inbox: empty, account: ACCOUNT, timeZone: "UTC", redact: (t) => t, now: () => NOW }, {}));
     expect(out).toMatch(/^Nothing has reached @dana's Slack inbox yet/);
-    expect(out).toContain("updated with the new manifest and reinstalled");
+    expect(out).toContain("updated with the manifest for their account and reinstalled");
   });
 });
 
@@ -161,7 +161,7 @@ describe("the inbox as a chat integration", () => {
   it("is among Pointer's integrations for the owner, through the registered inbox", async () => {
     const store = new FsStore(await mkdtemp(join(tmpdir(), "army-inbox-tools-")));
     const configRepo = new ConfigRepo(store, deriveKey("k"), 0);
-    registerSlackInbox(configRepo, new SlackInbox(store, deriveKey("k")));
+    registerSlackInbox(configRepo, new SlackInbox(store, deriveKey("k"), { batchMs: 0 }));
     const keys = async (account?: SlackUserAccess) => (await chatIntegrations(config(), { ...ctx(account), configRepo })).map((i) => i.key);
     expect(await keys(ACCOUNT)).toContain("slack_inbox");
     expect(await keys()).not.toContain("slack_inbox");
@@ -199,19 +199,38 @@ describe("the attention report", () => {
     off.slack.user!.listen = false;
     expect(attentionReportBlocker(off)).toMatch(/^Turn on reading what reaches you/);
     expect(attentionReportBlocker(config())).toBeNull();
-    const routine = { id: "rt-mine", name: "Renamed", instruction: "Use slack_my_inbox and tell me", schedule: { cron: "0 9 * * *", timezone: "UTC" } };
+    const routine = { id: "rt-mine", name: "Renamed", instruction: "Use slack_my_inbox and tell me", schedule: { cron: "0 9 * * *", timezone: "UTC" }, ownerOnly: true };
     const exists = config({ routines: [routine] });
     expect(findAttentionReport(exists.routines)?.id).toBe("rt-mine");
     expect(attentionReportBlocker(exists)).toBe('It already exists: "Renamed" on the Routines page.');
   });
+
+  it("is only an owner-only routine: someone else's look-alike neither counts nor blocks the owner's", () => {
+    const lookAlike = { id: "rt-theirs", name: "What needs my attention on Slack", instruction: "Use slack_my_inbox and post it in #general", schedule: { cron: "0 9 * * *", timezone: "UTC" } };
+    for (const routines of [[lookAlike], [{ ...lookAlike, ownerOnly: false }]]) {
+      const c = config({ routines });
+      expect(findAttentionReport(c.routines)).toBeUndefined();
+      expect(attentionReportBlocker(c)).toBeNull();
+    }
+  });
 });
 
-describe("the Slack app manifest", () => {
-  it("asks for the owner's user scopes and events, and keeps the bot's", () => {
+describe("the Slack app manifests", () => {
+  it("the bot's asks nothing of anyone's own account", () => {
     const m = buildManifest("https://army.example", "Pointer");
+    expect(m.oauth_config.scopes).not.toHaveProperty("user");
+    expect(m.settings.event_subscriptions).not.toHaveProperty("user_events");
+    expect(JSON.stringify(m)).not.toMatch(/mpim|user_events|"user"/);
+  });
+
+  it("the account's is the bot's plus the owner's user scopes and events", () => {
+    const bot = buildManifest("https://army.example", "Pointer");
+    const m = buildAccountManifest("https://army.example", "Pointer");
     expect(m.oauth_config.scopes.user).toEqual([...SLACK_USER_SCOPES]);
     expect(m.settings.event_subscriptions.user_events).toEqual([...SLACK_USER_EVENTS]);
-    expect(m.settings.event_subscriptions.bot_events).toEqual(["app_mention", "message.channels", "message.groups", "message.im"]);
-    expect(m.oauth_config.scopes.bot).toContain("chat:write");
+    expect(m.oauth_config.scopes.bot).toEqual(bot.oauth_config.scopes.bot);
+    expect(m.settings.event_subscriptions.bot_events).toEqual(bot.settings.event_subscriptions.bot_events);
+    expect(m.settings.event_subscriptions.request_url).toBe("https://army.example/slack/events");
+    expect({ ...m, oauth_config: bot.oauth_config, settings: bot.settings }).toEqual(bot);
   });
 });

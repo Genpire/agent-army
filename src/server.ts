@@ -46,7 +46,7 @@ import { type Runner, createRunner, parallelCap, parallelCapNote, parallelLimit 
 import { SCREENSHOT_NAME_RE, ScreenshotRepo, TASK_ID_RE, screenshotType } from "./tasks/screenshots.js";
 import { SCOUT_NEED_MAX_CHARS, findSkills } from "./skills/skill-scout.js";
 import { type FetchLike, SKILL_LIMITS, SkillLibrary, SkillsPluginCache, skillView } from "./skills/skills.js";
-import { buildManifest, manifestCreateUrl, slackClient, verifySlackSignature } from "./slack/slack.js";
+import { buildAccountManifest, buildManifest, manifestCreateUrl, slackClient, verifySlackSignature } from "./slack/slack.js";
 import { createStore } from "./core/store.js";
 import { detectPublicUrl, publicUrlWarning } from "./core/public-url.js";
 import { readTimeline } from "./tasks/task-events.js";
@@ -634,11 +634,12 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
     res.json({ ok: true });
   });
 
+  // The bot's manifest; with ?account=1 the one for the owner's own account (its user scopes and events, see buildAccountManifest).
   app.get("/api/slack/manifest", requireAdmin, async (req, res) => {
     const config = await configRepo.load();
     const requested = String(req.query.name ?? "").trim();
     const name = (requested || config.team.pointer.name).slice(0, 35);
-    const manifest = buildManifest(baseUrl(req), name);
+    const manifest = req.query.account === "1" ? buildAccountManifest(baseUrl(req), name) : buildManifest(baseUrl(req), name);
     res.json({ manifest, createUrl: manifestCreateUrl(manifest) });
   });
 

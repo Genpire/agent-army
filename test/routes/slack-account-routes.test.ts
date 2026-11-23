@@ -2,7 +2,7 @@ import { mkdtemp } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Store } from "../../src/core/store.js";
 import { createApp } from "../../src/server.js";
 import { SLACK_USER_SCOPES } from "../../src/slack/user-account.js";
@@ -20,11 +20,19 @@ const ACCOUNTS: Record<string, { auth: Record<string, unknown> | string; person?
   "xoxp-revoked-token-4444": { auth: "token_revoked" },
   "xoxp-workflow-bot-5555": { auth: { user_id: "UWF", team_id: "T1" }, person: { is_bot: true } },
   "xoxp-second-person-6666": { auth: { user_id: "UNEW", user: "sam", team_id: "T1", response_metadata: { scopes: [...SLACK_USER_SCOPES] } }, person: { name: "sam" } },
+  // Slack does not answer when this one is revoked.
+  "xoxp-stubborn-token-7777": { auth: { user_id: "USTB", user: "rita", team_id: "T1", response_metadata: { scopes: [...SLACK_USER_SCOPES] } }, person: { name: "rita" } },
 };
+
+/** The user tokens auth.revoke was called with. */
+const revoked: string[] = [];
 
 function fakeSlack(token: string) {
   if (token.startsWith("xoxb-")) {
-    return { auth: { test: async () => ({ ok: true, user_id: "UTESTBOT", team_id: "T1" }) }, users: { info: async () => ({ user: {} }) } };
+    return {
+      auth: { test: async () => ({ ok: true, user_id: "UTESTBOT", team_id: "T1" }), revoke: async () => Promise.reject(new Error("the bot's token is never revoked")) },
+      users: { info: async () => ({ user: {} }) },
+    };
   }
   const account = ACCOUNTS[token];
   return {
@@ -33,6 +41,11 @@ function fakeSlack(token: string) {
         if (!account) throw slackError("invalid_auth");
         if (typeof account.auth === "string") throw slackError(account.auth);
         return { ok: true, ...account.auth };
+      },
+      revoke: async () => {
+        revoked.push(token);
+        if (token === "xoxp-stubborn-token-7777") throw slackError("ratelimited");
+        return { ok: true, revoked: true };
       },
     },
     users: { info: async () => ({ ok: true, user: account?.person ?? {} }) },
@@ -112,10 +125,16 @@ describe("the owner's Slack account API", () => {
   it("turns listening and sending as the owner on and off, and keeps them on a reconnect", async () => {
     expect((await (await post("/api/slack/user/settings", {})).json()).error).toBe("Send listen or sendAsMe.");
     expect((await post("/api/slack/user/settings", { listen: "yes" })).status).toBe(400);
+    await store.put("slack/inbox.enc", "x");
     expect((await post("/api/slack/user/settings", { sendAsMe: false })).status).toBe(200);
+    expect(await inboxBlob()).toBe(1);
+    // Reading off: what was kept is deleted.
     expect((await post("/api/slack/user/settings", { listen: false })).status).toBe(200);
+    expect(await inboxBlob()).toBe(0);
     expect(await account()).toMatchObject({ listen: false, sendAsMe: false });
-    await connect("xoxp-good-token-1111");
+    // The same token again: nothing to revoke.
+    expect((await connect("xoxp-good-token-1111")).body).not.toHaveProperty("previousRevoked");
+    expect(revoked).toEqual([]);
     expect(await account()).toMatchObject({ listen: false, sendAsMe: false });
     expect((await (await get("/api/slack/user/report")).json()).blocked).toMatch(/^Turn on reading what reaches you/);
     expect((await post("/api/slack/user/report", {})).status).toBe(400);
@@ -134,28 +153,75 @@ describe("the owner's Slack account API", () => {
       deliver: { email: [], slack: "UOWN", console: true },
       scheduleText: "Weekdays at 09:00, 13:00 and 17:00",
       enabled: true,
+      ownerOnly: true,
     });
     expect(routine.instruction).toContain("slack_my_inbox");
     const status = await (await get("/api/slack/user/report")).json();
     expect(status).toEqual({ routine: { id: routine.id, name: routine.name }, blocked: 'It already exists: "What needs my attention on Slack" on the Routines page.' });
     const again = await post("/api/slack/user/report", {});
     expect(again.status).toBe(409);
-    expect((await (await get("/api/routines")).json()).routines).toHaveLength(1);
+    const { routines } = await (await get("/api/routines")).json();
+    expect(routines).toHaveLength(1);
+    // Stored owner-only: only such a routine may read the owner's inbox.
+    expect(routines[0]).toMatchObject({ id: routine.id, ownerOnly: true, deliver: { email: [], slack: "UOWN", console: true } });
   });
 
-  it("starts an empty inbox for another person's account, and empties it on disconnect", async () => {
+  it("starts an empty inbox for another person's account, revokes the token it replaces, and on disconnect", async () => {
     await store.put("slack/inbox.enc", "x");
     await connect("xoxp-good-token-1111");
     expect(await inboxBlob()).toBe(1);
-    expect((await connect("xoxp-second-person-6666")).status).toBe(200);
+    const second = await connect("xoxp-second-person-6666");
+    expect(second).toMatchObject({ status: 200, body: { userId: "UNEW", previousRevoked: true } });
+    expect(revoked).toEqual(["xoxp-good-token-1111"]);
     expect(await inboxBlob()).toBe(0);
     expect(await account()).toMatchObject({ userId: "UNEW", userName: "sam" });
 
     await store.put("slack/inbox.enc", "x");
-    expect((await post("/api/slack/user/disconnect", {})).status).toBe(200);
+    const res = await post("/api/slack/user/disconnect", {});
+    expect(await res.json()).toEqual({ ok: true, revoked: true });
+    expect(revoked).toEqual(["xoxp-good-token-1111", "xoxp-second-person-6666"]);
     expect(await inboxBlob()).toBe(0);
     expect(await account()).toEqual({ connected: false });
     expect((await post("/api/slack/user/settings", { listen: true })).status).toBe(404);
     expect((await (await get("/api/slack/user/report")).json()).blocked).toBe("Connect your Slack account first.");
+  });
+
+  it("disconnects even when Slack does not confirm the revoke, and says so without the token", async () => {
+    revoked.length = 0;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      expect((await connect("xoxp-stubborn-token-7777")).status).toBe(200);
+      // Replacing it: the new account is connected, and the page hears the old token may live on.
+      expect((await connect("xoxp-good-token-1111")).body).toMatchObject({ ok: true, userId: "UOWN", previousRevoked: false });
+      expect(await account()).toMatchObject({ connected: true, userId: "UOWN" });
+      expect((await connect("xoxp-stubborn-token-7777")).body).toMatchObject({ ok: true, previousRevoked: true });
+
+      const res = await post("/api/slack/user/disconnect", {});
+      expect(await res.json()).toEqual({ ok: true, revoked: false });
+      expect(await account()).toEqual({ connected: false });
+      expect(revoked).toEqual(["xoxp-stubborn-token-7777", "xoxp-good-token-1111", "xoxp-stubborn-token-7777"]);
+      const logged = warn.mock.calls.map((a) => a.join(" "));
+      expect(logged.filter((l) => l.includes("revoke"))).toEqual([
+        "[slack] could not revoke the owner's Slack token: ratelimited",
+        "[slack] could not revoke the owner's Slack token: ratelimited",
+      ]);
+      expect(logged.join("\n")).not.toContain("xoxp-");
+      // Nothing connected: nothing to revoke.
+      expect(await (await post("/api/slack/user/disconnect", {})).json()).toEqual({ ok: true, revoked: true });
+      expect(revoked).toHaveLength(3);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("serves the bot's manifest without user scopes or events, and the account's with them", async () => {
+    const bot = (await (await get("/api/slack/manifest")).json()).manifest;
+    expect(bot.oauth_config.scopes.user).toBeUndefined();
+    expect(bot.settings.event_subscriptions.user_events).toBeUndefined();
+    const own = (await (await get("/api/slack/manifest?account=1")).json()).manifest;
+    expect(own.oauth_config.scopes.user).toEqual([...SLACK_USER_SCOPES]);
+    expect(own.settings.event_subscriptions.user_events).toEqual(["message.im", "message.mpim", "message.channels", "message.groups"]);
+    expect(own.oauth_config.scopes.bot).toEqual(bot.oauth_config.scopes.bot);
+    expect(own.settings.event_subscriptions.request_url).toBe(`${base}/slack/events`);
   });
 });
