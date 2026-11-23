@@ -64,6 +64,23 @@ export const REPO_SETUP_MAX_ENV = 100;
  * (an older config must keep loading): setupEnv leaves them out at runtime,
  * and the worker logs their names. What the owner saves is RepoSetupSchema.
  */
+/** The owner's own Slack account: see config.slack.user. */
+export const SlackUserAccountSchema = z.object({
+  /** A user token (xoxp-…) from the Slack app's OAuth & Permissions page. */
+  token: z.string().min(1),
+  /** Who it belongs to (auth.test): the only person who may use it. */
+  userId: z.string().regex(/^[UW][A-Z0-9]{2,30}$/),
+  userName: z.string().max(80).default(""),
+  /** The user scopes Slack granted (auth.test's x-oauth-scopes). */
+  scopes: z.array(z.string().max(60)).max(60).default([]),
+  connectedAt: z.string(),
+  /** Read what reaches the owner (DMs, mentions, their threads) into their Slack inbox (slack/inbox.ts). */
+  listen: z.boolean().default(true),
+  /** Pointer may send messages as the owner when they ask it to. */
+  sendAsMe: z.boolean().default(true),
+});
+export type SlackUserAccountConfig = z.infer<typeof SlackUserAccountSchema>;
+
 export const StoredRepoSetupSchema = z.object({
   setupCommand: z.string().max(2000).default(""),
   /** The owner's test command (e.g. npm test): the platform runs it after the team finishes (recheck.ts). Empty = the team's passing checks. */
@@ -553,6 +570,13 @@ export const ConfigSchema = z.object({
       allowedUserIds: z.array(z.string()).default([]),
       /** Channels where Pointer answers every message, without an @mention. */
       pointerChannels: z.array(z.string().regex(CHANNEL_RE, "Channel IDs look like C012ABCDEF")).default([]),
+      /**
+       * The owner's own Slack account (a user token, xoxp-): Pointer reads what
+       * reaches them (DMs, mentions, their threads) and, when they allow it,
+       * sends as them. Only the owner may use it (ownSlackAccount in
+       * slack/user-account.ts): from the console, or from Slack as that user.
+       */
+      user: SlackUserAccountSchema.optional(),
     })
     .default({ allowedUserIds: [], pointerChannels: [] }),
   github: z
@@ -746,6 +770,18 @@ export function publicView(c: Config) {
       botUserId: c.slack.botUserId ?? null,
       allowedUserIds: c.slack.allowedUserIds,
       pointerChannels: c.slack.pointerChannels,
+      user: c.slack.user
+        ? {
+            connected: true,
+            userId: c.slack.user.userId,
+            userName: c.slack.user.userName,
+            key: mask(c.slack.user.token),
+            scopes: c.slack.user.scopes,
+            listen: c.slack.user.listen,
+            sendAsMe: c.slack.user.sendAsMe,
+            connectedAt: c.slack.user.connectedAt,
+          }
+        : { connected: false },
     },
     github: {
       connected: Boolean(c.github.token),

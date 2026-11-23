@@ -381,6 +381,7 @@ export function configSecrets(c: Config): (string | undefined)[] {
     c.anthropic.apiKey,
     c.slack.botToken,
     c.slack.signingSecret,
+    c.slack.user?.token,
     c.monday.token,
     c.monday.automation.webhookSecret,
     c.github.webhookSecret,
