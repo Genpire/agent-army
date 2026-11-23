@@ -1,7 +1,14 @@
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { HookCallback } from "@anthropic-ai/claude-agent-sdk";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PendingActions, confirmGate, gatedTools } from "../../src/chat/confirm-gate.js";
-import { ConfigSchema, type Config } from "../../src/core/config.js";
+import { ConfigRepo, ConfigSchema, type Config } from "../../src/core/config.js";
+import { deriveKey } from "../../src/core/crypto.js";
+import { FsStore } from "../../src/core/store.js";
+import { SlackInbox } from "../../src/slack/inbox.js";
+import { registerSlackInbox } from "../../src/slack/inbox-tools.js";
 import {
   SLACK_LIMITS,
   SLACK_SEND_TOOL,
@@ -504,6 +511,87 @@ describe('slack_send_message as the owner (as "me")', () => {
     expect(other).not.toContain("owner");
     // Pointer's own DM with someone still works.
     expect((await handlersFor(slack.client).slack_send_message({ to: "D01DANA", text: "hi" })).isError).toBeFalsy();
+  });
+});
+
+describe("slack_send_message for the owner: answers reach them", () => {
+  const connected = ConfigSchema.parse({ slack: { botToken: TOKEN, botUserId: "UBOT", allowedUserIds: [], pointerChannels: [] } });
+  /** The fake's messages are sent at this ts: the inbox's clock is a minute later. */
+  const SENT = new Date(1_700_000_000_000 + 60_000);
+
+  async function withInbox() {
+    const store = new FsStore(await mkdtemp(join(tmpdir(), "army-slack-tools-")));
+    const configRepo = new ConfigRepo(store, deriveKey("k"), 0);
+    const inbox = new SlackInbox(store, deriveKey("k"), { now: () => SENT, batchMs: 0 });
+    registerSlackInbox(configRepo, inbox);
+    const kept = async () => (await inbox.list({ since: new Date(0), openOnly: false, ownerId: OWNER })).outreach.map(({ open: _o, answers: _a, ...o }) => o);
+    const ctx = (extra: Record<string, unknown> = {}) => ({ configRepo, requester: "Sam", redact: (t: string) => t.replaceAll("sk-live-secret-1", "[redacted]"), ...extra });
+    return { inbox, kept, ctx };
+  }
+  const send = (opts: SlackToolOptions | undefined, args: { to: string; text: string; as?: "pointer" | "me" }) =>
+    slackHandlers({ ...opts!, cacheKey: `test-${++caches}` }).slack_send_message(args);
+
+  it("keeps what Pointer sends as itself from the owner's own conversation, and says the answer is passed on", async () => {
+    const t = await withInbox();
+    const slack = fakeSlack();
+    const opts = slackToolOptions(connected, t.ctx({ slackAccount: ownerAccount(), ownerConversation: true }), slack.client, fakeOwnerSlack().client);
+    expect(opts?.recordOutreach).toBeDefined();
+    const r = await send(opts, { to: "Dana Levi", text: "Can you send the **deck**? Key: sk-live-secret-1" });
+    expect(textOf(r)).toBe(
+      "Sent as a DM to U01DANA.\nLink: https://acme.slack.com/archives/D01DANA/p1700000000000100\nAnswers to it are passed on to the owner (their Slack inbox, slack_my_inbox).",
+    );
+    expect(await t.kept()).toEqual([
+      { id: "D01DANA:1700000000.000100", channel: "D01DANA", ts: "1700000000.000100", where: "dm", recipient: "U01DANA", recipientName: "Dana", requester: "Sam", text: "Can you send the **deck**? Key: [redacted]" },
+    ]);
+
+    // A post in a channel: named from the listing Pointer read, else by its id.
+    await send(opts, { to: "C0OPS", text: "Who has the staging keys?" });
+    expect((await t.kept()).find((o) => o.channel === "C0OPS")).toMatchObject({ where: "channel", recipient: "C0OPS", recipientName: "C0OPS" });
+    const listed = slackHandlers({ ...opts!, cacheKey: "listed-channels" });
+    await listed.slack_list_channels({});
+    await listed.slack_send_message({ to: "G0PRIV", text: "And here?" });
+    expect((await t.kept()).find((o) => o.channel === "G0PRIV")).toMatchObject({ where: "channel", recipientName: "#ops-private" });
+  });
+
+  it("keeps nothing sent as the owner, to the owner, outside their own conversation, or without their account listening", async () => {
+    const t = await withInbox();
+    const own = fakeOwnerSlack();
+    const opts = slackToolOptions(connected, t.ctx({ slackAccount: ownerAccount(), ownerConversation: true }), fakeSlack().client, own.client);
+    // As "me": the answer reaches the owner's own account already.
+    expect(textOf(await send(opts, { to: "Dana Levi", text: "hi", as: "me" }))).not.toContain("passed on");
+    // Pointer's DM to the owner themselves.
+    expect(textOf(await send(opts, { to: "me", text: "note to self" }))).not.toContain("passed on");
+    expect(await t.kept()).toEqual([]);
+
+    const cases = [
+      // Someone else's request (no account in it), or a routine's: not the owner's conversation.
+      t.ctx({ requesterSlackId: "U01DANA", ownerConversation: false }),
+      t.ctx({ slackAccount: { ...ownerAccount(), sendAsMe: false }, ownerConversation: false }),
+      // Listening off, or no account connected.
+      t.ctx({ slackAccount: { ...ownerAccount(), listen: false }, ownerConversation: true }),
+      t.ctx({ ownerConversation: true }),
+    ];
+    for (const c of cases) {
+      const o = slackToolOptions(connected, c, fakeSlack().client);
+      expect(o?.recordOutreach).toBeUndefined();
+      expect(textOf(await send(o, { to: "U01DANA", text: "hi" }))).not.toContain("passed on");
+    }
+    // No inbox registered for this deployment.
+    expect(slackToolOptions(connected, { configRepo: {} as never, requester: "Sam", slackAccount: ownerAccount(), ownerConversation: true, redact: (s: string) => s })?.recordOutreach).toBeUndefined();
+    expect(await t.kept()).toEqual([]);
+  });
+
+  it("still reports the send when the message could not be kept", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const slack = fakeSlack();
+      const r = await handlersFor(slack.client, { recordOutreach: async () => Promise.reject(new Error("the store is full")) }).slack_send_message({ to: "U01DANA", text: "hi" });
+      expect(r.isError).toBeFalsy();
+      expect(textOf(r)).toBe("Sent as a DM to U01DANA.\nLink: https://acme.slack.com/archives/D01DANA/p1700000000000100");
+      expect(warn.mock.calls.map((c) => c.join(" "))).toEqual(["[slack] a message sent for the owner was not kept, so its answer will not reach them: the store is full"]);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 

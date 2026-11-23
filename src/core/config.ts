@@ -79,6 +79,11 @@ export const SlackUserAccountSchema = z.object({
   listen: z.boolean().default(true),
   /** Pointer may send messages as the owner when they ask it to. */
   sendAsMe: z.boolean().default(true),
+  /**
+   * Pointer DMs the owner right away when someone answers a message it sent
+   * for them (slack/outreach.ts); the answers are in their inbox either way.
+   */
+  notifyAnswers: z.boolean().default(true),
 });
 export type SlackUserAccountConfig = z.infer<typeof SlackUserAccountSchema>;
 
@@ -807,6 +812,7 @@ export function publicView(c: Config) {
             scopes: c.slack.user.scopes,
             listen: c.slack.user.listen,
             sendAsMe: c.slack.user.sendAsMe,
+            notifyAnswers: c.slack.user.notifyAnswers,
             connectedAt: c.slack.user.connectedAt,
           }
         : { connected: false },

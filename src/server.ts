@@ -67,6 +67,7 @@ import { routinesRoutes } from "./routes/routines.js";
 import { slackAccountRoutes } from "./routes/slack-account.js";
 import { SlackInbox } from "./slack/inbox.js";
 import { registerSlackInbox } from "./slack/inbox-tools.js";
+import { AnswerNotifier } from "./slack/outreach.js";
 import { normalizeTimeZone } from "./routines/cron.js";
 import { registerRoutineService } from "./routines/routines.js";
 import { consoleThreads } from "./routines/runner.js";
@@ -321,7 +322,9 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
   // The owner's Slack inbox: what reaches their own account, for slack_my_inbox and the attention report.
   const inbox = new SlackInbox(store, masterKey);
   registerSlackInbox(configRepo, inbox);
-  const slackDeps: SlackDeps & { web: WebThreads; spending: Spending; inbox: SlackInbox } = {
+  // Answers to messages Pointer sent for the owner: a DM to the owner as they arrive (slack/outreach.ts).
+  const answers = new AnswerNotifier({ configRepo, slack: slackFactory });
+  const slackDeps: SlackDeps & { web: WebThreads; spending: Spending; inbox: SlackInbox; answers: AnswerNotifier } = {
     configRepo,
     tasks,
     runner,
@@ -333,6 +336,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
     web: conversations,
     spending,
     inbox,
+    answers,
   };
 
   // The setup token creates the admin account on first run and resets its
@@ -1475,7 +1479,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
     res.status(500).json({ error: "Something went wrong on the server." });
   });
 
-  return { app, runner, store, conversations, automation, routines, inbox, stopAcceptingWork };
+  return { app, runner, store, conversations, automation, routines, inbox, answers, stopAcceptingWork };
 }
 
 /** The stored key of a repo's setup: repo names are compared without letter case. */
@@ -1506,7 +1510,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   // Checkouts of workers killed with an earlier process (older than the job's deadline: no worker runs longer).
   void removeStaleWorkFolders({ dirs: workFolderDirs(process.env), maxAgeMs: staleWorkFolderAgeMs(process.env) });
   const port = Number(process.env.PORT ?? 8080);
-  const { app, runner, store, routines, inbox, stopAcceptingWork } = await createApp();
+  const { app, runner, store, routines, inbox, answers, stopAcceptingWork } = await createApp();
   // The local runner's workers stopped with the earlier process: their tasks are marked failed before anything
   // new starts. Cloud Run job tasks go on across a restart of this service.
   if (runner.kind === "local") {
@@ -1530,9 +1534,17 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
       server,
       stopAccepting: stopAcceptingWork,
       // The owner's inbox writes changes about a second after they arrive: what is still queued is saved.
+      // Then the answers collected for a notice to the owner (those just saved included) are sent.
       finish: [
         { run: () => routines.scheduler.stop(), timeoutMs: 3_000 },
-        { run: () => inbox.flush(), timeoutMs: 3_000 },
+        {
+          run: async () => {
+            await inbox.flush();
+            await new Promise((resolve) => setImmediate(resolve));
+            await answers.flush();
+          },
+          timeoutMs: 3_000,
+        },
       ],
     }).finally(() =>
       exitLikeSignal(signal),
