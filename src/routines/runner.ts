@@ -272,7 +272,7 @@ export class RoutineRunner {
     };
     try {
       // The spending caps, before any model call.
-      const allowed = (await this.deps.spending?.checkChat()) ?? { ok: true as const };
+      const allowed = (await this.deps.spending?.checkChat("routines")) ?? { ok: true as const };
       if (!allowed.ok) return await finish({ status: "skipped", note: [run.note, `Skipped: ${allowed.error}`].filter(Boolean).join(" ") });
 
       const state = await this.deps.repo.state(routine.id);

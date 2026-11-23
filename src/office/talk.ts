@@ -154,7 +154,8 @@ export class OfficeTalk {
     const people = req.people.map((id) => team.get(id)).filter((p): p is TalkPerson => p !== undefined);
     if (!people.length) return UNAVAILABLE;
     if (!this.takeRateSlot(now)) return LIMIT;
-    if (!(await this.capsAllow(config, choice, people, now))) return LIMIT;
+    const allowed = await this.capsAllow(config, choice, people, now);
+    if (!allowed) return LIMIT;
     if (!(await this.reserve(talkDay(now), config.office.talk.dailyMax))) return LIMIT;
 
     const redact = makeRedactor(configSecrets(config));
@@ -166,8 +167,8 @@ export class OfficeTalk {
       model: config.office.talk.model,
     };
     const opts = { fetch: this.deps.fetch, queryFn: this.deps.queryFn, timeoutMs: this.deps.timeoutMs };
-    const outcome = choice.id === "gemini" ? await geminiTalk(choice.key, call, opts) : await chatTalk(choice.runtimes, call, opts);
-    this.recordSpend(outcome, choice, people);
+    const outcome = allowed.id === "gemini" ? await geminiTalk(allowed.key, call, opts) : await chatTalk(allowed.runtimes, call, opts);
+    this.recordSpend(outcome, allowed, people);
 
     const lines = outcome.error === undefined ? parseTalk(outcome.raw, people, redact) : undefined;
     if (!lines) {
@@ -197,21 +198,26 @@ export class OfficeTalk {
     return true;
   }
 
-  /** No cap that applies is used up: the monthly one, the provider's, or a speaker's own. A failed lookup never blocks (as Spending). */
-  private async capsAllow(config: Config, choice: TalkChoice, people: TalkPerson[], now: number): Promise<boolean> {
-    if (!this.deps.usage || !capsApply(config.budget)) return true;
+  /**
+   * The choice with what the caps allow, or undefined when a cap that applies
+   * is used up: the monthly one, a speaker's own, or the provider's. On the
+   * light work route a provider whose cap is used up is skipped, as other
+   * light work does; the talk stops only when every one is. A failed lookup
+   * never blocks (as Spending).
+   */
+  private async capsAllow(config: Config, choice: TalkChoice, people: TalkPerson[], now: number): Promise<TalkChoice | undefined> {
+    if (!this.deps.usage || !capsApply(config.budget)) return choice;
     try {
       const usage = await this.deps.usage.month(new Date(now), { chatProvider: config.ai.chatProvider });
       const usedUp = (s: CapStatus | null) => s !== null && s.remainingUsd <= 0;
-      const provider = choice.id === "gemini" ? "gemini" : choice.runtime.provider;
-      return !(
-        usedUp(monthlyStatus(config.budget, usage)) ||
-        usedUp(providerStatus(config.budget, usage, provider)) ||
-        people.some((p) => usedUp(agentStatus(config.budget, usage, p.id)))
-      );
+      if (usedUp(monthlyStatus(config.budget, usage)) || people.some((p) => usedUp(agentStatus(config.budget, usage, p.id)))) return undefined;
+      if (choice.id === "gemini") return usedUp(providerStatus(config.budget, usage, "gemini")) ? undefined : choice;
+      const runtimes = choice.runtimes.filter((r) => !usedUp(providerStatus(config.budget, usage, r.provider)));
+      const [first] = runtimes;
+      return first ? { ...choice, runtime: first, runtimes } : undefined;
     } catch (err) {
       console.error(`[office] spend not checked: ${(err instanceof Error ? err.message : String(err)).slice(0, 200)}`);
-      return true;
+      return choice;
     }
   }
 
