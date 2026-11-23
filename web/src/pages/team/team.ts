@@ -305,6 +305,23 @@ export function agentErrors(d: AgentDraft): AgentErrors {
   return errors;
 }
 
+/**
+ * The fallback to save, as the server keeps it (TeamSaveSchema): none for an
+ * agent on Claude (Claude is the last resort; the repo tasks route orders its
+ * providers), never the agent's own engine, nothing after Claude, and Claude
+ * on the team's model.
+ */
+export function toFallback(d: Pick<AgentDraft, "engine" | "fallback">): AgentSpec["fallback"] {
+  if (d.engine === "claude") return [];
+  const kept: AgentSpec["fallback"] = [];
+  for (const f of d.fallback ?? []) {
+    if (f.engine === d.engine || kept.some((k) => k.engine === f.engine)) continue;
+    kept.push({ engine: f.engine, model: f.engine === "claude" ? "" : f.model.trim() });
+    if (f.engine === "claude") break;
+  }
+  return kept;
+}
+
 /** The spec to save: trimmed, with the emoji normalised. */
 export const toSpec = (id: string, d: AgentDraft): AgentSpec => ({
   id,
@@ -323,10 +340,7 @@ export const toSpec = (id: string, d: AgentDraft): AgentSpec => ({
   engine: d.engine,
   // The CLI's model means nothing for an agent on Claude.
   engineModel: d.engine === "claude" ? "" : d.engineModel.trim(),
-  // In order; the agent's own engine is never its own fallback, and Claude's model is the team's.
-  fallback: (d.fallback ?? [])
-    .filter((f) => f.engine !== d.engine)
-    .map((f) => ({ engine: f.engine, model: f.engine === "claude" ? "" : f.model.trim() })),
+  fallback: toFallback(d),
 });
 
 export type PointerErrors = Partial<Record<keyof PointerSpec, string>>;

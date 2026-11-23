@@ -1844,7 +1844,8 @@ export async function main(): Promise<void> {
             permissionMode: "dontAsk",
             settingSources: ["project"], // loads the project's own CLAUDE.md
             // The shell guard, and each agent's budget for this task (it also matches engine runs to their agents).
-            hooks: { PreToolUse: [{ matcher: "Bash", hooks: [bashGuard] }, { hooks: [spend.hook] }] },
+            // engines.hooks: an engine agent keeps off its own Claude tools while a CLI of its line still works (engines.ts).
+            hooks: { PreToolUse: [{ matcher: "Bash", hooks: [bashGuard] }, { hooks: [spend.hook] }, ...(engines?.hooks ?? [])] },
             outputFormat: { type: "json_schema", schema: REPORT_SCHEMA },
             maxTurns: config.limits.maxTurns,
             maxBudgetUsd: opts.budgetUsd,

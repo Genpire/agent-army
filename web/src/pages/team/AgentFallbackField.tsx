@@ -37,7 +37,11 @@ export interface AgentFallbackFieldProps {
  * model its CLI runs. Claude is always offered; a CLI that is not connected
  * can be chosen and is skipped until it is.
  */
-export function AgentFallbackField({ engine, value, onChange }: AgentFallbackFieldProps) {
+/** Claude is the last resort: nothing comes after it (the server refuses that), so it is kept last. */
+const claudeLast = (fallback: AgentFallback[]): AgentFallback[] => [...fallback.filter((f) => f.engine !== "claude"), ...fallback.filter((f) => f.engine === "claude")];
+
+export function AgentFallbackField({ engine, value, onChange: change }: AgentFallbackFieldProps) {
+  const onChange = (fallback: AgentFallback[]) => change(claudeLast(fallback));
   const { config } = useConfig();
   const ready = (e: AgentEngine) => engineReady(config, e);
   const taken = value.map((f) => f.engine);

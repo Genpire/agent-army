@@ -367,10 +367,15 @@ function AgentForm({ target, takenIds, lead, models = CLAUDE_CHOICES, onClose, o
               {draft.engine !== "claude" && <EngineModelField engine={draft.engine} value={draft.engineModel} onChange={set("engineModel")} />}
             </FormSection>
 
-            <Divider />
-            <FormSection title={`If ${ENGINE_NAME[draft.engine]} can't do the work`} description={fallbackHint(draft.engine)}>
-              <AgentFallbackField engine={draft.engine} value={draft.fallback ?? []} onChange={set("fallback")} />
-            </FormSection>
+            {/* An agent on Claude has no fallback of its own: Claude is the last resort, and the repo tasks route orders its providers. */}
+            {draft.engine !== "claude" && (
+              <>
+                <Divider />
+                <FormSection title={`If ${ENGINE_NAME[draft.engine]} can't do the work`} description={fallbackHint(draft.engine)}>
+                  <AgentFallbackField engine={draft.engine} value={draft.fallback ?? []} onChange={set("fallback")} />
+                </FormSection>
+              </>
+            )}
 
             <Divider />
             <FormSection title="Model and effort">
