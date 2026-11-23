@@ -51,7 +51,7 @@ import { createStore } from "./core/store.js";
 import { detectPublicUrl, publicUrlWarning } from "./core/public-url.js";
 import { readTimeline } from "./tasks/task-events.js";
 import { TaskRepo } from "./tasks/tasks.js";
-import { SKILL_NAME_RE, TeamSchema, defaultTeam } from "./team/team.js";
+import { SKILL_NAME_RE, TeamSaveSchema, defaultTeam } from "./team/team.js";
 import { rememberConsoleUrl } from "./integrations/tickets/ticket-sync.js";
 import { checkAnthropic, checkGithub, checkSlack } from "./core/validate.js";
 import { UsageRepo } from "./spending/usage.js";
@@ -1055,7 +1055,8 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
   });
 
   app.post("/api/team", requireAdmin, async (req, res) => {
-    const parsed = TeamSchema.safeParse(req.body);
+    // An agent's fallback too (team.ts fallbackProblem): each engine once, never its own, nothing after Claude.
+    const parsed = TeamSaveSchema.safeParse(req.body);
     if (!parsed.success) return void res.status(400).json({ error: teamError(parsed.error, req.body) });
     await configRepo.update((c) => {
       c.team = parsed.data;

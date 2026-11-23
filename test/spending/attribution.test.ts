@@ -232,6 +232,21 @@ describe("TaskSpend (per-task caps)", () => {
     expect(await callHook(spend, preToolUse(tool, { agentType: "codex-coder", input: { task: "More." } }))).toMatchObject({ hookSpecificOutput: { permissionDecision: "deny" } });
   });
 
+  it("counts a second run in one call, the next CLI of an agent's line taking over, for the agent whose own tool it is", async () => {
+    const { spend } = setup({ "codex-coder": 0.5 });
+    spend.startRun();
+    const tool = "mcp__engines__gemini_run_as_codex-coder";
+    await callHook(spend, preToolUse(tool, { agentType: "codex-coder", agentId: "a4", input: { task: "Add a test." } }));
+    expect(spend.engines.begin({ engine: "gemini", tool, task: "Add a test.", model: "gemini-4-pro", agent: "codex-coder" })).toBeDefined();
+    // The hook saw one call: the second run is matched by its owner alone, and held to the same cap.
+    const second = spend.engines.begin({ engine: "codex", tool, task: "Add a test.", model: "gpt-5.1-codex", agent: "codex-coder" })!;
+    expect(second.update({ input: 1_000_000, output: 0 }, "gpt-5.1-codex")).toBe(true);
+    second.end({ input: 1_000_000, output: 0 }, "gpt-5.1-codex");
+    expect(spend.live()["codex-coder"]).toMatchObject({ engines: { codex: { tokens: 1_000_000 } } });
+    // An owner the task does not have is not taken at its word.
+    expect(spend.engines.begin({ engine: "gemini", tool: "mcp__engines__gemini_run_as_ghost", task: "x", model: "", agent: "ghost" })).toBeUndefined();
+  });
+
   it("never stops a run whose model has no price (tokens only), and finds the only agent of an engine without a hook", () => {
     const { spend } = setup({ "codex-coder": 0.01 });
     spend.startRun();

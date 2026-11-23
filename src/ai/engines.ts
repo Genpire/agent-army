@@ -7,9 +7,20 @@
  * The CLIs run from an in-process MCP server ("engines"), one tool per engine
  * and mode: `<engine>_run` for agents that change things, `<engine>_run_read_only`
  * for agents that only look. An agent with a model of its own for the CLI
- * (AgentSpec.engineModel) gets a tool of its own, `<engine>_run_as_<agent>` or
- * `<engine>_read_as_<agent>`, which runs the CLI with that --model; the others
- * share the engine's tools and its model. An engine runs only inside its own sandbox (Codex,
+ * (AgentSpec.engineModel) or a fallback (AgentSpec.fallback) gets a tool of
+ * its own, `<engine>_run_as_<agent>` or `<engine>_read_as_<agent>`, which runs
+ * the CLI with that --model; the others share the engine's tools and its model.
+ *
+ * Each agent has a line (engine-fallback.ts): its engine, its fallback, then
+ * Claude. The task starts it on the first CLI of the line that can run here;
+ * when a run fails for the engine's own reasons (a rate limit, quota or credit
+ * used up, a rejected key, the service down, a missing model), the same tool
+ * call hands the assignment to the next CLI, from the checkout as it is, and
+ * the engine stays down for the rest of the task. When no CLI is left, the
+ * tool tells the agent to do the work itself: its own Claude tools are in its
+ * definition, held back by a PreToolUse hook (RepoTaskEngines.hooks) until then.
+ *
+ * An engine runs only inside its own sandbox (Codex,
  * where the container allows it) or when the owner allowed it to run without
  * one (EngineConnection.allowUnsandboxed; Gemini CLI has none here). Unsandboxed,
  * its commands run as the worker's user, outside the shell guard: they can read
@@ -36,23 +47,37 @@ import { constants } from "node:fs";
 import { access, lstat, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { delimiter, dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { isDeepStrictEqual, promisify } from "node:util";
-import { type AgentDefinition, type McpServerConfig, createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
+import { type AgentDefinition, type HookCallback, type HookCallbackMatcher, type McpServerConfig, createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { type Config, ENGINE_IDS, type EngineId } from "../core/config.js";
 import { type AgentSpec, type Team, enabledAgents } from "../team/team.js";
 import { gitRunner, makeRedactor } from "../tasks/worker.js";
+import { type EngineFailure, FAILURE_SAID, type LineStep, agentLine, engineFailure, engineFailureOf, failureScope } from "./engine-fallback.js";
 import { GEMINI_SYSTEM_SETTINGS, GEMINI_SYSTEM_SETTINGS_PATH } from "./gemini-settings.js";
 
 /** What a repo task gets for its engine agents. */
 export interface RepoTaskEngines {
   /** In-process MCP servers (Options.mcpServers, top level), by key. */
   servers: Record<string, McpServerConfig>;
-  /** The subagent for an agent whose engine is not "claude"; undefined when its engine is not connected or cannot run in this task (the agent then works as Claude). */
+  /**
+   * The subagent for an agent whose engine is not "claude"; undefined when no
+   * CLI of its line (its engine, then its fallback) is connected and can run
+   * in this task (the agent then works as Claude).
+   */
   agentDefinition(agent: AgentSpec, base: AgentDefinition): AgentDefinition | undefined;
   /** Every tool name engine agents may call, for allowedTools. */
   allToolNames: string[];
-  /** Lines for the orchestrator's instructions: which agents work through which CLI. */
+  /** Lines for the orchestrator's instructions: which agents work through which CLI, and who takes over. */
   promptRule: string;
+  /**
+   * For Options.hooks.PreToolUse, next to the worker's own. An engine agent
+   * has its own Claude tools (to do the work itself once no CLI can), but may
+   * use only its run tool and its read-only checks (Read, Glob, Grep, and Bash
+   * when its access has it) while a CLI of its line still works: the rest are
+   * denied until every CLI of its line is unavailable in this task. Without
+   * these hooks nothing but the prompt holds an engine agent to that.
+   */
+  hooks?: HookCallbackMatcher[];
 }
 
 export interface EngineDeps {
@@ -78,8 +103,13 @@ export interface EngineDeps {
 
 /** What the worker tracks of engine runs (attribution.ts, budget.ts). */
 export interface EngineSpend {
-  /** A run of `engine` is starting for this tool call (`tool` and its `task`, matched to the agent that made it); undefined: not tracked. */
-  begin(o: { engine: EngineId; tool: string; task: string; model: string }): EngineRunSpend | undefined;
+  /**
+   * A run of `engine` is starting for this tool call (`tool` and its `task`,
+   * matched to the agent that made it); undefined: not tracked. `agent`: the
+   * agent whose own tool it is, known without matching (a second run in one
+   * call, when the next CLI of its line takes over, has no call of its own to match).
+   */
+  begin(o: { engine: EngineId; tool: string; task: string; model: string; agent?: string }): EngineRunSpend | undefined;
 }
 
 /** One tracked run. */
@@ -137,9 +167,11 @@ export const engineToolName = (id: EngineId, mode: EngineMode) => `mcp__${ENGINE
 const agentToolBase = (id: EngineId, mode: EngineMode, agentId: string) => `${id}_${mode === "write" ? "run" : "read"}_as_${agentId}`;
 /** The tool an agent with its own engine model calls, e.g. mcp__engines__gemini_run_as_gemini-2. */
 export const agentEngineToolName = (id: EngineId, mode: EngineMode, agentId: string) => `mcp__${ENGINES_SERVER}__${agentToolBase(id, mode, agentId)}`;
-/** The tool an engine agent calls: its own when it has a model of its own, else the engine's for its mode. */
-export const engineToolFor = (id: EngineId, agent: Pick<AgentSpec, "id" | "access" | "engineModel">) =>
-  agent.engineModel ? agentEngineToolName(id, engineMode(agent), agent.id) : engineToolName(id, engineMode(agent));
+/** An agent with a model of its own for its CLI, or a fallback, has a tool of its own: its line is not the engine's alone. */
+export const hasOwnTool = (agent: Pick<AgentSpec, "engineModel"> & { fallback?: AgentSpec["fallback"] }) => Boolean(agent.engineModel) || Boolean(agent.fallback?.length);
+/** The tool an engine agent calls (`id`: the first CLI of its line that runs in this task): its own, else the engine's for its mode. */
+export const engineToolFor = (id: EngineId, agent: Pick<AgentSpec, "id" | "access" | "engineModel"> & { fallback?: AgentSpec["fallback"] }) =>
+  hasOwnTool(agent) ? agentEngineToolName(id, engineMode(agent), agent.id) : engineToolName(id, engineMode(agent));
 
 export const DEFAULT_TIMEOUT_MIN = 20;
 export const MAX_TIMEOUT_MIN = 60;
@@ -451,6 +483,8 @@ interface RunState {
   usage?: TokenUsage;
   /** The CLI's own account of why the run failed. */
   failure?: string;
+  /** The error class it named with it (Gemini CLI's error.type: TerminalQuotaError…). */
+  failureType?: string;
   /** The last error it reported along the way (retries, warnings). */
   lastError?: string;
   /** Gemini: a tool call ended the message being streamed; the next text starts a new one. */
@@ -550,7 +584,11 @@ export const parseGeminiEvent: LineParser = (event, state) => {
   if (type === "result") {
     const stats = (event.stats ?? {}) as Record<string, unknown>;
     state.usage = { input: num(stats.input_tokens), output: num(stats.output_tokens), cached: num(stats.cached) };
-    if (str(event.status) === "error") state.failure = keep(str((event.error as { message?: unknown } | undefined)?.message) || "the run failed", ERROR_KEEP_CHARS);
+    if (str(event.status) === "error") {
+      const error = (event.error ?? {}) as { message?: unknown; type?: unknown };
+      state.failure = keep(str(error.message) || "the run failed", ERROR_KEEP_CHARS);
+      if (str(error.type)) state.failureType = keep(str(error.type), 100);
+    }
     return undefined;
   }
   return undefined;
@@ -790,13 +828,13 @@ export const usageText = (u: TokenUsage) => `${thousands(u.input)} in${u.cached 
 
 const cap = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 40).trimEnd()}\n… (cut at ${max} characters)` : text);
 
-/** The assignment as the CLI gets it: the platform's ground rules, then the agent's words. */
-export function cliPrompt(task: string, mode: EngineMode): string {
+/** The assignment as the CLI gets it: the platform's ground rules, what an engine before it left (when it takes over), then the agent's words. */
+export function cliPrompt(task: string, mode: EngineMode, takeover?: string): string {
   const rules =
     mode === "read"
       ? "Work read-only in this repository checkout: read and search the code, do not change any file."
       : "Work only in this repository checkout. Do not commit, push, or change git settings or remotes: the platform commits and publishes your changes.";
-  return `${rules} Never write secrets, tokens or keys into files or output. When you are done, end with a short summary: what you changed or found, the files involved, and the checks you ran with their results.\n\n${task}`;
+  return `${rules} Never write secrets, tokens or keys into files or output. When you are done, end with a short summary: what you changed or found, the files involved, and the checks you ran with their results.\n\n${takeover ? `${takeover}\n\n` : ""}${task}`;
 }
 
 /**
@@ -814,19 +852,28 @@ export function redactStrings(value: unknown, redact: (text: string) => string, 
   return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, redactStrings(v, redact, depth + 1)]));
 }
 
+/** What one run gives back: the summary for the agent, and why it failed when that was the engine's own doing (engine-fallback.ts). */
+export interface EngineRunResult {
+  ok: boolean;
+  text: string;
+  /** The engine could not do the work for its own reasons (not the work's): the next step of the agent's line may take over. */
+  failure?: EngineFailure;
+}
+
 /**
  * Runs one assignment through an engine and returns the summary for the
- * agent (capped and redacted). Never throws.
+ * agent (capped and redacted). Never throws. `takeover`: what an engine
+ * before it left, for the CLI (when it takes over within one call).
  */
 export async function runEngine(
   runner: EngineRunner,
-  o: { task: string; mode: EngineMode; timeoutMin: number; deps: EngineDeps; root: string; signal?: AbortSignal; gitHome: string; spend?: EngineRunSpend },
-): Promise<{ ok: boolean; text: string }> {
+  o: { task: string; mode: EngineMode; timeoutMin: number; deps: EngineDeps; root: string; signal?: AbortSignal; gitHome: string; spend?: EngineRunSpend; takeover?: string },
+): Promise<EngineRunResult> {
   const { info } = runner;
   const ownKey = makeRedactor([runner.key]);
   const redact = (text: string) => ownKey(o.deps.redact(text));
   // Redacted before it is cut, so a cut never leaves part of a secret.
-  const finish = (ok: boolean, text: string) => ({ ok, text: cap(redact(text), SUMMARY_MAX_CHARS) });
+  const finish = (ok: boolean, text: string, failure?: EngineFailure): EngineRunResult => ({ ok, text: cap(redact(text), SUMMARY_MAX_CHARS), ...(failure ? { failure } : {}) });
 
   // Checked again before each run: the checkout may have changed since the task started.
   const refusal = await runner.refuse(o.mode);
@@ -834,7 +881,11 @@ export async function runEngine(
     const why = `${info.label} was not started: ${refusal}.`;
     o.deps.note(redact(why).slice(0, NOTE_MAX_CHARS * 2));
     o.spend?.end(undefined, runner.model);
-    return finish(false, `${why} ${o.mode === "read" ? "Do the assignment with your own tools instead." : "Say so in your report, so the work can go to another agent."}`);
+    return finish(
+      false,
+      `${why} ${o.mode === "read" ? "Do the assignment with your own tools instead." : "Say so in your report, so the work can go to another agent."}`,
+      engineFailureOf("cannot_run", oneLine(redact(refusal), 200)),
+    );
   }
   // Its agent's budget for this task (the worker's caps): the run is stopped, its process group killed, once it is reached.
   const budgetStop = new AbortController();
@@ -866,7 +917,7 @@ export async function runEngine(
       args,
       cwd: o.deps.repoDir,
       env,
-      input: cliPrompt(o.task, o.mode),
+      input: cliPrompt(o.task, o.mode, o.takeover),
       timeoutMs,
       signal,
       backstop: backstop ? { command: backstop, seconds: Math.ceil(timeoutMs / 1000) + BACKSTOP_MARGIN_S } : undefined,
@@ -908,6 +959,14 @@ export async function runEngine(
             ? state.failure || state.lastError || `it exited with ${run.code === null ? `signal ${run.signal}` : `code ${run.code}`}`
             : state.failure;
     const ok = !why;
+    // Why it failed, when that was the engine's own doing: a CLI that could not start, or one whose own words say so.
+    // Never a timeout, a stop (its agent's budget, the task) or a failure the CLI did not explain.
+    const failure =
+      ok || run.timedOut || run.aborted
+        ? undefined
+        : run.spawnError
+          ? engineFailureOf("cannot_run", oneLine(redact(`it could not start (${run.spawnError})`), 200))
+          : engineFailure({ engine: info.id, code: run.code, failure: state.failure, failureType: state.failureType, lastError: state.lastError, stderr: redact(run.stderrTail) });
 
     // What changed in the checkout: the worker's hardened git, read-only and lock-free.
     const git = gitRunner({ host: { gitAuthArgs: () => [] }, cwd: o.deps.repoDir, home: o.gitHome, redact });
@@ -946,7 +1005,7 @@ export async function runEngine(
       dropped ? `${dropped} output line${dropped === 1 ? "" : "s"} over ${LINE_MAX_CHARS / 1024} KB ${dropped === 1 ? "was" : "were"} left out.` : "",
       !ok && errorTail ? `The end of its error output:\n${errorTail}` : "",
     ];
-    return finish(ok, parts.filter(Boolean).join("\n\n"));
+    return finish(ok, parts.filter(Boolean).join("\n\n"), failure);
   } catch (err) {
     const message = `${info.label} failed: ${err instanceof Error ? err.message : String(err)}`;
     o.deps.note(redact(message).slice(0, NOTE_MAX_CHARS));
@@ -970,73 +1029,144 @@ export async function probeCodexSandbox(command: string, root: string): Promise<
 
 // ---------- The repo task's engines ----------
 
-const names = (agents: AgentSpec[]) => agents.map((a) => a.name).join(", ");
+const names = (agents: Pick<AgentSpec, "name">[]) => agents.map((a) => a.name).join(", ");
+const verb = (many: unknown[], one: string, more: string) => (many.length === 1 ? one : more);
+const capitalized = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 
-/** The subagent of an agent that works through an engine: it hands the work over and checks it (through its own tool when it has a model of its own). */
-export function engineAgentDefinition(agent: AgentSpec, base: AgentDefinition, id: EngineId): AgentDefinition {
-  const info = ENGINES[id];
+/** The read-only checks an engine agent makes while a CLI works for it: Bash only when its access has it. */
+const checkTools = (agent: Pick<AgentSpec, "access">) => ["Read", "Glob", "Grep", ...(agent.access !== "read" ? ["Bash"] : [])];
+
+/** What an engine agent's definition says of its line in this task. */
+export interface EngineLineInfo {
+  /** The CLI it works through now. */
+  id: EngineId;
+  /** Its run tool's full name. */
+  toolName: string;
+  /** The CLIs that take over after it, in order ("Codex (gpt-6.2-sol)"). */
+  then?: string[];
+  /** Its line names Claude: the team's model, not the cheapest tier, is the agent's own model (it may do the work itself). */
+  claude?: boolean;
+}
+
+/**
+ * The subagent of an agent that works through an engine: it hands the work
+ * over and checks it. It has its own Claude tools too (never more than its
+ * base definition's), for when no CLI of its line can work; the hooks
+ * (RepoTaskEngines.hooks) hold them back until then.
+ */
+export function engineAgentDefinition(agent: AgentSpec, base: AgentDefinition, line: EngineLineInfo): AgentDefinition {
+  const info = ENGINES[line.id];
   const mode = engineMode(agent);
-  const toolName = engineToolFor(id, agent);
   const bash = agent.access !== "read";
+  const then = line.then?.length ? `, the same call hands the assignment to ${line.then.join(", then ")}, and its result says which did the work. When none can` : "";
   const prompt = `You are ${agent.name}, the team's ${agent.role}. You work through ${info.label}, ${info.vendor}'s coding agent, which runs in the task's checkout${mode === "read" ? " read-only" : " and can read, edit files and run commands there"}. ${info.label} does the work; you hand it the assignment and check what it did.
 
 How you work:
-1. Send the whole assignment to ${toolName} in one call: everything you were given (the goal, files, constraints, how to check the result), with the parts of your own instructions below that apply. Do not do the work yourself first, and do not split it into many small calls.
-2. When it returns, verify the result yourself, read-only: Read and Grep the files it changed${bash ? ", and look at `git status` and `git diff`" : ""}. Never edit files yourself${bash ? " or run commands that change anything" : ""}.
+1. Send the whole assignment to ${line.toolName} in one call: everything you were given (the goal, files, constraints, how to check the result), with the parts of your own instructions below that apply. Do not do the work yourself first, and do not split it into many small calls.
+2. When it returns, verify the result yourself, read-only: Read and Grep the files it changed${bash ? ", and look at `git status` and `git diff`" : ""}. Never edit files yourself${bash ? " or run commands that change anything" : ""} while a coding agent CLI works for you.
 3. If it failed or missed part of the assignment, call it once more with exactly what is missing. If it still cannot do it, say so plainly.
 4. Report back: what changed (each file and a sentence), what you verified, and anything left undone or failing.
 
+When ${info.label} itself cannot work (a rate limit, its quota or credit used up, a rejected key, the service down)${then}, the tool says so: from then on, do the assignment yourself with your own tools, which stay closed to you until then. Start from the checkout as it is, and say in your report that you did the work yourself and why. A failure of the work itself (a wrong change, failing tests) is not that: follow step 3.
+
 Your own instructions:
 ${base.prompt}`;
+  // The engine does the heavy lifting: the task provider's cheapest tier hands work over and checks it. A line that names Claude gets the team's model, as Claude would.
+  const model = line.claude ? base.model : (base.model ?? "haiku");
   return {
     description: base.description,
-    tools: [toolName, "Read", "Glob", "Grep", ...(bash ? ["Bash"] : [])],
+    // Its own tools after the run tool and the checks; an agent whose base definition lists none (all tools) gets the checks only.
+    tools: [...new Set([line.toolName, ...checkTools(agent), ...(base.tools ?? [])])],
     prompt,
-    // The engine does the heavy lifting: the task provider's cheapest tier hands work over and checks it.
-    model: base.model ?? "haiku",
+    ...(model ? { model } : {}),
     ...(base.effort !== undefined ? { effort: base.effort } : {}),
     background: false,
-    // No mcpServers: the engines server is the query's own (top level), and its tools reach subagents through `tools`, as in chat.
+    // Its own servers (browser, apps), for its own tools. The engines server is the query's (top level): its tools reach subagents through `tools`, as in chat.
+    ...(base.mcpServers ? { mcpServers: base.mcpServers } : {}),
+    ...(base.skills ? { skills: base.skills } : {}),
   };
 }
 
-/** The orchestrator's rule: which agents work through which CLI. */
-function enginePromptRule(groups: { id: EngineId; agents: AgentSpec[] }[]): string {
-  const lines = groups.flatMap(({ id, agents }) =>
-    agents.map(
-      (a) =>
-        `- ${a.id} (${a.name}, ${a.role}) works through ${ENGINES[id].label}${a.engineModel ? ` on ${a.engineModel}` : ""} and ${engineMode(a) === "read" ? "looks only" : "changes files"}.`,
-    ),
-  );
+/** A CLI of an agent's line as people read it: "Codex", "Codex (gpt-6.2-sol)". */
+const stepText = (id: EngineId, model: string) => `${ENGINES[id].label}${model ? ` (${model})` : ""}`;
+
+/** The orchestrator's rule: which agents work through which CLI, and who takes over. */
+function enginePromptRule(entries: { agent: AgentSpec; steps: LineStep[] }[]): string {
+  const lines = entries.map(({ agent: a, steps }) => {
+    const [first, ...rest] = steps as [LineStep, ...LineStep[]];
+    const line = `- ${a.id} (${a.name}, ${a.role}) works through ${ENGINES[first.engine].label}${first.model ? ` on ${first.model}` : ""} and ${engineMode(a) === "read" ? "looks only" : "changes files"}`;
+    return rest.length ? `${line}; if ${ENGINES[first.engine].label} is unavailable, the work moves to ${rest.map((s) => stepText(s.engine, s.model)).join(", then ")}.` : `${line}.`;
+  });
   return [
     "Coding agent CLIs: these agents hand their assignment to a coding agent CLI that works in the checkout like any coding agent (it reads code, edits files and runs commands), then check the result and report back.",
     ...lines,
     "Give each one a complete, self-contained assignment (the goal, files, constraints, how to check it), as you would any coding agent; review what they changed like any other agent's work. Do not call the mcp__engines__* tools yourself: hand the work to these agents.",
+    "When a CLI fails for its own reasons (a rate limit, its quota or credit used up, a rejected key, an outage), the agent's tool hands the assignment to the next CLI of its line in the same call, and when none is left the agent does the work itself as Claude; its report says who did the work. A failure of the work itself never moves it.",
   ].join("\n");
 }
 
-/** Undefined when no enabled agent uses a connected engine. */
+/** A CLI some agent's line names: whether it can run in this task, and in which modes. */
+interface EngineSetup {
+  /** No run can start: no key, or no CLI in the image. */
+  missing?: "not connected" | "not installed";
+  makeRunner?: (model: string) => EngineRunner;
+  /** The engine's own model (config.engines). */
+  model: string;
+  /** Why a run in a mode would be refused (no sandbox and not allowed, the image, the checkout's own settings). */
+  refusal: Partial<Record<EngineMode, string>>;
+  sandboxed: boolean;
+}
+
+/** One CLI of a run tool's line, with the runner for its model. */
+interface ToolStep {
+  id: EngineId;
+  runner: EngineRunner;
+}
+
+/** A run tool and the line it works through, with what the task has learned about it. */
+interface ToolLine {
+  /** Its full name. */
+  tool: string;
+  mode: EngineMode;
+  steps: ToolStep[];
+  /** The agents that call it (one, for an agent's own tool). */
+  agents: AgentSpec[];
+  /** The agent whose own tool it is. */
+  own?: string;
+  /** Steps that could not run here (refused, or could not start), for the rest of the task. */
+  skipped: Map<number, EngineFailure>;
+  /** Steps already said to be down in the timeline. */
+  noted: Set<number>;
+}
+
+/** What a run tool's line depends on: an agent changed in any of it has no tool in this task. */
+const lineKey = (a: AgentSpec) => JSON.stringify([a.engine, a.engineModel, a.fallback ?? [], a.access]);
+
+/** Undefined when no enabled agent has a CLI of its line that can run in this task. */
 export async function repoTaskEngines(config: Config, deps: EngineDeps): Promise<RepoTaskEngines | undefined> {
-  const usedBy = (id: EngineId) => enabledAgents(config.team).filter((a) => a.engine === id);
-  const active: { id: EngineId; runner: EngineRunner; makeRunner: (model: string) => EngineRunner; agents: AgentSpec[] }[] = [];
+  const engineAgents = enabledAgents(config.team).filter((a) => a.engine !== "claude");
+  const lines = new Map(engineAgents.map((a) => [a.id, agentLine(a)]));
+  const stepsOf = (a: AgentSpec) => lines.get(a.id)?.steps ?? [];
   let root: string | undefined;
   const privateRoot = async () => {
     root ??= await mkdtemp(join(deps.workRoot, "engines-"));
     return root;
   };
 
+  // Every CLI a line names, whoever's: whether it can run here, and in which modes.
+  const setups = new Map<EngineId, EngineSetup>();
   for (const id of ENGINE_IDS) {
-    const agents = usedBy(id);
-    if (!agents.length) continue;
+    const users = engineAgents.filter((a) => stepsOf(a).some((s) => s.engine === id));
+    if (!users.length) continue;
     const info = ENGINES[id];
     const conn = config.engines[id];
     if (!conn.apiKey) {
-      deps.note(`${info.label} is not connected: ${names(agents)} work${agents.length === 1 ? "s" : ""} as Claude in this task.`);
+      setups.set(id, { missing: "not connected", model: conn.model, refusal: {}, sandboxed: false });
       continue;
     }
     const command = await findCommand(deps.commands?.[id] ?? info.command);
     if (!command) {
-      deps.note(`${info.label} left out: its CLI (${info.command}) is not installed in this image, so ${names(agents)} work${agents.length === 1 ? "s" : ""} as Claude in this task.`);
+      setups.set(id, { missing: "not installed", model: conn.model, refusal: {}, sandboxed: false });
       continue;
     }
     const options: RunnerOptions = { command, key: conn.apiKey, model: conn.model, repoDir: deps.repoDir, allowUnsandboxed: conn.allowUnsandboxed };
@@ -1049,88 +1179,249 @@ export async function repoTaskEngines(config: Config, deps: EngineDeps): Promise
       const systemSettings = deps.geminiSettings ?? { path: GEMINI_SYSTEM_SETTINGS_PATH, checkOwner: true };
       makeRunner = (model) => geminiRunner({ ...options, model, systemSettings });
     }
-    // The engine's own model; an agent with an engineModel gets a runner of its own with that one (below).
+    // What would refuse a run (no sandbox and not allowed, the image, the checkout's own settings): no line starts on it in that mode.
+    const refusal: Partial<Record<EngineMode, string>> = {};
     const runner = makeRunner(conn.model);
-    // What would refuse a run (no sandbox and not allowed, the image, the checkout's own settings): those agents work as Claude, as they could not hand their work over.
-    const refused = new Map<string, AgentSpec[]>();
-    const usable: AgentSpec[] = [];
-    for (const mode of ["write", "read"] as const) {
-      const inMode = agents.filter((a) => engineMode(a) === mode);
-      if (!inMode.length) continue;
+    for (const mode of new Set(users.map(engineMode))) {
       const reason = await runner.refuse(mode);
-      if (reason) refused.set(reason, [...(refused.get(reason) ?? []), ...inMode]);
-      else usable.push(...inMode);
+      if (reason) refusal[mode] = reason;
     }
-    for (const [reason, left] of refused) {
-      deps.note(`${info.label} left out: ${reason}. ${names(left)} work${left.length === 1 ? "s" : ""} as Claude in this task.`);
-    }
-    if (!usable.length) continue;
-    if (id === "codex") deps.note(sandboxed ? "Codex runs in its own sandbox." : "Codex runs without its sandbox, as the owner allows: the task container is the only boundary.");
-    else deps.note("Gemini CLI runs with no sandbox, as the owner allows: the task container is the only boundary.");
-    active.push({ id, runner, makeRunner, agents: usable });
+    setups.set(id, { makeRunner, model: conn.model, refusal, sandboxed });
   }
+  const runsHere = (id: EngineId, mode: EngineMode) => {
+    const setup = setups.get(id);
+    return Boolean(setup?.makeRunner) && !setup?.refusal[mode];
+  };
+  // Each agent's line in this task: the CLIs of it that can run here, in order; Claude after them.
+  const live = new Map(engineAgents.map((a) => [a.id, stepsOf(a).filter((s) => runsHere(s.engine, engineMode(a)))]));
+
+  /** Where the agents go that `id` cannot take in this task: their own engine's agents to the next CLI of their line or to Claude; the others only lose it from their fallback. */
+  const whereTheyGo = (id: EngineId, agents: AgentSpec[]) => {
+    const own = agents.filter((a) => a.engine === id);
+    const parts: string[] = [];
+    const toClaude = own.filter((a) => !live.get(a.id)?.length);
+    if (toClaude.length) parts.push(`${names(toClaude)} ${verb(toClaude, "works", "work")} as Claude in this task`);
+    const moved = new Map<string, AgentSpec[]>();
+    for (const a of own) {
+      const start = live.get(a.id)?.[0];
+      if (start) moved.set(stepText(start.engine, start.model), [...(moved.get(stepText(start.engine, start.model)) ?? []), a]);
+    }
+    for (const [to, list] of moved) parts.push(`${names(list)} ${verb(list, "starts", "start")} on ${to} in this task`);
+    const fallbackOnly = agents.filter((a) => a.engine !== id);
+    if (fallbackOnly.length) parts.push(`it is left out of ${fallbackOnly.length === 1 ? `${fallbackOnly[0]!.name}'s fallback` : `the fallback of ${names(fallbackOnly)}`}`);
+    return parts.join("; ");
+  };
+
+  // Engine by engine: who a CLI that cannot run here leaves where, then how it runs when some line has it.
+  for (const id of ENGINE_IDS) {
+    const setup = setups.get(id);
+    if (!setup) continue;
+    const info = ENGINES[id];
+    const byReason = new Map<string, AgentSpec[]>();
+    for (const a of engineAgents) {
+      if (!stepsOf(a).some((s) => s.engine === id) || runsHere(id, engineMode(a))) continue;
+      const reason = setup.missing ?? setup.refusal[engineMode(a)] ?? "";
+      byReason.set(reason, [...(byReason.get(reason) ?? []), a]);
+    }
+    for (const [reason, agents] of byReason) {
+      const where = whereTheyGo(id, agents);
+      if (setup.missing === "not connected") deps.note(`${info.label} is not connected: ${where}.`);
+      else if (setup.missing === "not installed") deps.note(`${info.label} left out: its CLI (${info.command}) is not installed in this image, so ${where}.`);
+      else deps.note(`${info.label} left out: ${reason}. ${capitalized(where)}.`);
+    }
+    if (!engineAgents.some((a) => live.get(a.id)?.some((s) => s.engine === id))) continue;
+    if (id === "codex") deps.note(setup.sandboxed ? "Codex runs in its own sandbox." : "Codex runs without its sandbox, as the owner allows: the task container is the only boundary.");
+    else deps.note("Gemini CLI runs with no sandbox, as the owner allows: the task container is the only boundary.");
+  }
+
+  const active = engineAgents.filter((a) => live.get(a.id)?.length);
   if (!active.length) return undefined;
 
   const engineRoot = await privateRoot();
   const gitHome = join(engineRoot, "git-home");
   await mkdir(gitHome, { recursive: true, mode: 0o700 });
 
+  // The run tools, engine by engine (the one each line starts on): the engine's shared tools for the agents on its own model with no
+  // fallback (one per mode), then a tool of its own for each other agent, which runs its whole line.
+  const runnerFor = (s: LineStep) => {
+    const setup = setups.get(s.engine)!;
+    return setup.makeRunner!(s.model || setup.model);
+  };
+  const newLine = (tool: string, mode: EngineMode, steps: ToolStep[], agents: AgentSpec[], own?: string): ToolLine => ({
+    tool,
+    mode,
+    steps,
+    agents,
+    ...(own ? { own } : {}),
+    skipped: new Map(),
+    noted: new Set(),
+  });
+  const toolLines: ToolLine[] = [];
+  for (const id of ENGINE_IDS) {
+    const starting = active.filter((a) => live.get(a.id)![0]!.engine === id);
+    const shared = starting.filter((a) => !hasOwnTool(a));
+    for (const mode of [...new Set(shared.map(engineMode))]) {
+      toolLines.push(newLine(engineToolName(id, mode), mode, [{ id, runner: runnerFor({ engine: id, model: "" }) }], shared.filter((a) => engineMode(a) === mode)));
+    }
+    for (const a of starting.filter((x) => hasOwnTool(x))) {
+      const mode = engineMode(a);
+      const steps = live.get(a.id)!.map((s) => ({ id: s.engine, runner: runnerFor(s) }));
+      toolLines.push(newLine(engineToolFor(id, a), mode, steps, [a], a.id));
+    }
+  }
+  /** Each engine agent of this task: its tool's line, what it was set up from, and what it may use while a CLI works. */
+  const byAgent = new Map<string, { line: ToolLine; key: string; allowed: Set<string> }>();
+  for (const line of toolLines) for (const a of line.agents) byAgent.set(a.id, { line, key: lineKey(a), allowed: new Set([line.tool, ...checkTools(a)]) });
+
+  // What the task has learned: engines (a refused key, no credit) and models (a rate limit, a quota, an outage, a missing model) that are down.
+  const down = new Map<string, EngineFailure>();
+  const modelKey = (s: ToolStep) => `${s.id} ${s.runner.model}`;
+  const downOf = (line: ToolLine, i: number): EngineFailure | undefined => {
+    const step = line.steps[i]!;
+    return line.skipped.get(i) ?? down.get(step.id) ?? down.get(modelKey(step));
+  };
+  /** The step of a line that works now; undefined = none: the agent works as Claude. */
+  const current = (line: ToolLine): number | undefined => {
+    for (let i = 0; i < line.steps.length; i++) if (!downOf(line, i)) return i;
+    return undefined;
+  };
+  const markDown = (line: ToolLine, i: number, failure: EngineFailure) => {
+    const step = line.steps[i]!;
+    const scope = failureScope(failure.kind);
+    if (scope === "line") line.skipped.set(i, failure);
+    else down.set(scope === "engine" ? step.id : modelKey(step), failure);
+  };
+
+  const label = (s: ToolStep) => ENGINES[s.id].label;
+  const said = (s: ToolStep, f: EngineFailure) => `${FAILURE_SAID[f.kind]}${f.kind === "model" && s.runner.model ? ` ${s.runner.model}` : ""}`;
+  const asClaude = (line: ToolLine) => `${names(line.agents)} ${verb(line.agents, "works", "work")} as Claude from now on`;
+  const note = (text: string) => deps.note(deps.redact(text).slice(0, NOTE_MAX_CHARS * 2));
+  const unavailable = (s: ToolStep, f: EngineFailure) => `${label(s)} is unavailable for the rest of this task (${f.reason}${f.detail ? `: ${f.detail}` : ""}).`;
+
+  /** One call of a run tool: the line's CLIs in turn, from the one that works now, until one does the work or fails at it; none left = the agent's turn. */
+  const runLine = async (line: ToolLine, args: { task: string; timeoutMin?: number }, signal?: AbortSignal) => {
+    const reply = (ok: boolean, text: string) => ({ content: [{ type: "text" as const, text: cap(text, SUMMARY_MAX_CHARS + 2_000) }], ...(ok ? {} : { isError: true }) });
+    const moves: { step: ToolStep; failure: EngineFailure; ran: boolean }[] = [];
+    let i = current(line);
+    // CLIs down before this call (an earlier call, or another agent's run on the same engine): straight past them, said once.
+    for (let j = 0; j < (i ?? line.steps.length); j++) {
+      const step = line.steps[j]!;
+      const failure = downOf(line, j)!;
+      moves.push({ step, failure, ran: false });
+      if (line.noted.has(j)) continue;
+      line.noted.add(j);
+      const next = i === undefined ? undefined : line.steps[i];
+      note(`${label(step)} is unavailable in this task (${failure.reason}); ${next ? `${label(next)} takes over for ${names(line.agents)}` : asClaude(line)}.`);
+    }
+    while (i !== undefined) {
+      const step = line.steps[i]!;
+      const ran = moves.filter((m) => m.ran);
+      // Matched to its agent by the tool's full name and the task (an agent's own tool says whose it is); priced at the model this run uses.
+      const spend = deps.spend?.begin({ engine: step.id, tool: line.tool, task: args.task, model: step.runner.model, ...(line.own ? { agent: line.own } : {}) });
+      const result = await runEngine(step.runner, {
+        task: args.task,
+        mode: line.mode,
+        timeoutMin: args.timeoutMin ?? DEFAULT_TIMEOUT_MIN,
+        deps,
+        root: engineRoot,
+        gitHome,
+        signal,
+        spend,
+        ...(ran.length
+          ? {
+              takeover: `Another coding agent started on this assignment and could not finish it (${ran.map((m) => `${label(m.step)}: ${m.failure.reason}`).join("; ")}).${line.mode === "write" ? " The checkout may already hold some of its changes (see git status and git diff): keep what is right and do the rest." : ""}`,
+            }
+          : {}),
+      });
+      if (!result.failure || signal?.aborted) {
+        const before = moves.length ? `${moves.map((m) => unavailable(m.step, m.failure)).join(" ")} ${label(step)} took the assignment over, from the checkout as it was; its run follows.\n\n` : "";
+        return reply(result.ok, `${before}${result.text}`);
+      }
+      // The engine's own failure: it is down for the rest of the task, and the next CLI of the line takes the same assignment.
+      markDown(line, i, result.failure);
+      line.noted.add(i);
+      moves.push({ step, failure: result.failure, ran: true });
+      const next = current(line);
+      note(`${label(step)} ${said(step, result.failure)} for ${names(line.agents)}; ${next === undefined ? asClaude(line) : `${label(line.steps[next]!)} takes over`}.`);
+      i = next;
+    }
+    // None left: the agent does the work itself, its own tools open from now on (the hooks).
+    const first = moves[0]!.step;
+    return reply(
+      true,
+      `${moves.map((m) => unavailable(m.step, m.failure)).join(" ")} No coding agent CLI can work for you for the rest of this task.
+
+Do the assignment yourself now, with your own tools: they are open to you from now on. Start from the checkout as it is${line.mode === "write" ? " (`git status` and `git diff` show anything a CLI changed before it stopped)" : ""}, do the whole assignment as your own instructions say, and say in your report that you did the work yourself because ${label(first)} was unavailable. Do not call ${line.tool} again in this task.`,
+    );
+  };
+
   const input = {
     task: z.string().trim().min(1).max(TASK_MAX_CHARS).describe("The whole assignment, self-contained: the goal, files, constraints and how to check the result"),
     timeoutMin: z.number().int().min(1).max(MAX_TIMEOUT_MIN).optional().describe(`Minutes before the run is stopped (default ${DEFAULT_TIMEOUT_MIN})`),
   };
-  /** One run tool: the engine's shared one for a mode (the engine's model), or an agent's own (its model). */
-  const runTool = (id: EngineId, name: string, mode: EngineMode, runner: EngineRunner) => {
-    const info = ENGINES[id];
-    const on = runner.model ? ` It runs ${runner.model}.` : "";
+  /** One run tool: the engine's shared one for a mode (the engine's model), or an agent's own (its line, each CLI on its model). */
+  const runTool = (line: ToolLine) => {
+    const first = line.steps[0]!;
+    const info = ENGINES[first.id];
+    const on = first.runner.model ? ` It runs ${first.runner.model}.` : "";
+    const after = line.steps.slice(1).map((s) => stepText(s.id, s.runner.model));
+    const then = after.length ? ` Should ${info.label} be unavailable (a rate limit, quota or credit used up, a rejected key, an outage), ${after.join(", then ")} takes the assignment over in the same call.` : "";
     return tool(
-      name,
-      mode === "read"
-        ? `Hand an assignment to ${info.label} (${info.vendor}'s coding agent), read-only: it reads and searches the task's checkout and answers, without changing files.${on} Send the whole assignment in one call. Returns its final message and the state of the checkout.`
-        : `Hand an assignment to ${info.label} (${info.vendor}'s coding agent), which works in the task's checkout: reads code, edits files, runs commands.${on} Send the whole assignment in one call. Returns what it did: the files changed (git status, diff stat), its final message, and any failure.`,
+      line.tool.slice(`mcp__${ENGINES_SERVER}__`.length),
+      line.mode === "read"
+        ? `Hand an assignment to ${info.label} (${info.vendor}'s coding agent), read-only: it reads and searches the task's checkout and answers, without changing files.${on}${then} Send the whole assignment in one call. Returns its final message and the state of the checkout.`
+        : `Hand an assignment to ${info.label} (${info.vendor}'s coding agent), which works in the task's checkout: reads code, edits files, runs commands.${on}${then} Send the whole assignment in one call. Returns what it did: the files changed (git status, diff stat), its final message, and any failure.`,
       input,
-      async (args, extra) => {
-        const signal = (extra as { signal?: AbortSignal } | undefined)?.signal;
-        // Matched to its agent by this tool's full name and the task; priced at the model this run uses (the agent's own, else the engine's).
-        const spend = deps.spend?.begin({ engine: id, tool: `mcp__${ENGINES_SERVER}__${name}`, task: args.task, model: runner.model });
-        const result = await runEngine(runner, { task: args.task, mode, timeoutMin: args.timeoutMin ?? DEFAULT_TIMEOUT_MIN, deps, root: engineRoot, gitHome, signal, spend });
-        return { content: [{ type: "text" as const, text: result.text }], ...(result.ok ? {} : { isError: true }) };
-      },
-      { annotations: { readOnlyHint: mode === "read", destructiveHint: mode === "write", openWorldHint: true }, alwaysLoad: true },
+      async (args, extra) => runLine(line, args, (extra as { signal?: AbortSignal } | undefined)?.signal),
+      { annotations: { readOnlyHint: line.mode === "read", destructiveHint: line.mode === "write", openWorldHint: true }, alwaysLoad: true },
     );
   };
 
-  const tools: ReturnType<typeof runTool>[] = [];
-  const allToolNames: string[] = [];
-  /** Each engine agent of this task: its engine and the tool it calls. */
-  const byAgent = new Map<string, { id: EngineId; toolName: string }>();
-  for (const { id, runner, makeRunner, agents } of active) {
-    // The engine's shared tools, one per mode its agents on the engine's own model need.
-    const shared = agents.filter((a) => !a.engineModel);
-    for (const mode of [...new Set(shared.map(engineMode))]) {
-      tools.push(runTool(id, toolBase(id, mode), mode, runner));
-      allToolNames.push(engineToolName(id, mode));
-    }
-    // An agent on a model of its own gets its own tool and runner: two agents on one engine can each run another model.
-    for (const a of agents.filter((x) => x.engineModel)) {
-      const mode = engineMode(a);
-      tools.push(runTool(id, agentToolBase(id, mode, a.id), mode, makeRunner(a.engineModel)));
-      allToolNames.push(agentEngineToolName(id, mode, a.id));
-    }
-    for (const a of agents) byAgent.set(a.id, { id, toolName: engineToolFor(id, a) });
-  }
+  /** The engine agents whose engine definition the latest run of the team got, by id: the hooks hold only them. */
+  const gated = new Map<string, { line: ToolLine; allowed: Set<string> }>();
+  const gate: HookCallback = async (input) => {
+    if (input.hook_event_name !== "PreToolUse" || !input.agent_type) return {};
+    const entry = gated.get(input.agent_type);
+    if (!entry || entry.allowed.has(input.tool_name)) return {};
+    const i = current(entry.line);
+    // Every CLI of its line is down: the agent does the work itself.
+    if (i === undefined) return {};
+    const checks = [...entry.allowed].filter((t) => t !== entry.line.tool).join(", ");
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: `${label(entry.line.steps[i]!)} does your work in this task: hand it the assignment with ${entry.line.tool}, and check what it did with ${checks}. Your other tools open only if no coding agent CLI can work for you; the tool says so when that happens.`,
+      },
+    };
+  };
 
+  // A call may run each CLI of its line in turn, each up to its timeout.
+  const longest = Math.max(...toolLines.map((l) => l.steps.length));
   return {
     servers: {
-      [ENGINES_SERVER]: createSdkMcpServer({ name: ENGINES_SERVER, version: "1.0.0", tools, alwaysLoad: true, timeout: (MAX_TIMEOUT_MIN + 5) * 60_000 }),
+      [ENGINES_SERVER]: createSdkMcpServer({ name: ENGINES_SERVER, version: "1.0.0", tools: toolLines.map(runTool), alwaysLoad: true, timeout: (MAX_TIMEOUT_MIN * longest + 5) * 60_000 }),
     },
     agentDefinition: (agent, base) => {
       const entry = byAgent.get(agent.id);
-      // Only as the task set it up: the same engine, and the tool it has (a changed model would have none).
-      return entry && agent.engine === entry.id && engineToolFor(entry.id, agent) === entry.toolName ? engineAgentDefinition(agent, base, entry.id) : undefined;
+      const i = entry ? current(entry.line) : undefined;
+      // Only as the task set it up (a changed line or access has no tool here), and while a CLI of its line works: once none does, it works as Claude.
+      if (!entry || entry.key !== lineKey(agent) || i === undefined) {
+        gated.delete(agent.id);
+        return undefined;
+      }
+      gated.set(agent.id, entry);
+      const steps = entry.line.steps;
+      return engineAgentDefinition(agent, base, {
+        id: steps[i]!.id,
+        toolName: entry.line.tool,
+        then: steps.slice(i + 1).map((s) => stepText(s.id, s.runner.model)),
+        claude: lines.get(agent.id)?.claude ?? false,
+      });
     },
-    allToolNames,
-    promptRule: enginePromptRule(active),
+    allToolNames: toolLines.map((l) => l.tool),
+    promptRule: enginePromptRule(toolLines.flatMap((l) => l.agents.map((agent) => ({ agent, steps: live.get(agent.id)! })))),
+    hooks: [{ hooks: [gate] }],
   };
 }
 

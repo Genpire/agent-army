@@ -215,6 +215,44 @@ export const TeamSchema = z
   });
 export type Team = z.infer<typeof TeamSchema>;
 
+const ENGINE_NAMES: Record<AgentEngine, string> = { claude: "Claude", codex: "Codex", gemini: "Gemini CLI" };
+
+/**
+ * Why an agent's fallback cannot be saved (the step at `index`), or undefined.
+ * Each engine once, never the agent's own, nothing after Claude (the last
+ * resort: what came after it would never run). A CLI that is not connected
+ * may be in it: a task skips it.
+ */
+export function fallbackProblem(a: Pick<AgentSpec, "engine" | "fallback">): { index: number; message: string } | undefined {
+  const seen = new Set<AgentEngine>();
+  for (const [index, f] of a.fallback.entries()) {
+    if (f.engine === a.engine) return { index, message: `${ENGINE_NAMES[f.engine]} is the agent's own engine, so it cannot be its fallback.` };
+    if (seen.has(f.engine)) return { index, message: `${ENGINE_NAMES[f.engine]} is in the fallback twice.` };
+    if (seen.has("claude")) return { index, message: "Nothing can come after Claude in a fallback: Claude is the last resort." };
+    seen.add(f.engine);
+  }
+  return undefined;
+}
+
+/**
+ * The team as the owner saves it: TeamSchema with each agent's fallback
+ * checked (fallbackProblem) and tidied: an agent on Claude has none (Claude
+ * is the last resort), and Claude in a fallback runs the team's model. A
+ * stored team loads with TeamSchema alone.
+ */
+export const TeamSaveSchema = TeamSchema.superRefine((team, ctx) => {
+  team.agents.forEach((a, i) => {
+    if (a.engine === "claude") return;
+    const problem = fallbackProblem(a);
+    if (problem) ctx.addIssue({ code: "custom", path: ["agents", i, "fallback", problem.index, "engine"], message: problem.message });
+  });
+}).transform(
+  (team): Team => ({
+    ...team,
+    agents: team.agents.map((a) => ({ ...a, fallback: a.engine === "claude" ? [] : a.fallback.map((f) => ({ engine: f.engine, model: f.engine === "claude" ? "" : f.model })) })),
+  }),
+);
+
 /** Rules appended to every agent working inside a repository checkout (worker). */
 export const REPO_RULES = `
 Ground rules for every role:
@@ -515,7 +553,7 @@ export function buildRepoAgents(team: Team, opts: RepoAgentOptions = {}): Record
         ...(servers.length ? { mcpServers: servers } : {}),
         ...skillsFor(a, opts.skills),
       };
-      // An agent that works through a coding agent CLI (engines.ts); its own Claude definition when that engine is not connected.
+      // An agent that works through a coding agent CLI (engines.ts); its own Claude definition when no CLI of its line (its engine, its fallback) can run.
       const viaEngine = a.engine !== "claude" ? opts.engines?.agentDefinition(a, base) : undefined;
       return [a.id, viaEngine ?? base];
     }),
