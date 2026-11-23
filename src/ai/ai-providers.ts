@@ -332,6 +332,14 @@ export function providerRuntime(config: Config, scope: ProviderScope): ProviderR
   return { ok: true, runtime: buildRuntime(id, connectionOf(config, id)!) };
 }
 
+/**
+ * The credential values of a session's environment (a key, or the Gemini
+ * bridge's session token), for the redactors: a session token is not in the
+ * config, so configSecrets alone would not hide it.
+ */
+export const sessionSecrets = (env: Record<string, string>): string[] =>
+  ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_FOUNDRY_API_KEY", "AWS_BEARER_TOKEN_BEDROCK"].map((name) => env[name] ?? "").filter((v) => v.length >= 6);
+
 /** Anthropic's API with this key, as before providers existed. */
 export function anthropicRuntime(apiKey: string): ProviderRuntime {
   return buildRuntime("anthropic", { secrets: { apiKey }, settings: {}, models: {} });

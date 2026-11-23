@@ -21,7 +21,7 @@ import { providerLabel, runtimePrices } from "../spending/prices.js";
 import { TaskSpend } from "../spending/task-spend.js";
 import { type Screenshot, browserAvailable, browserServer, collectScreenshots } from "./browser.js";
 import { type CiOutcome, type WaitOptions, ciFailureDetails, ciFixPrompt, ciSummary, ciSummaryLine, storedCiSummary, waitForChecks } from "./ci.js";
-import { type ProviderRuntime, type ProviderSession, secretParts } from "../ai/ai-providers.js";
+import { type ProviderRuntime, type ProviderSession, secretParts, sessionSecrets } from "../ai/ai-providers.js";
 import { type FallbackNote, type ProviderFailure, RunWatch, fallbackLine, onlyClaudeMissing, ownerProblem, routeRuntimes } from "../ai/routing.js";
 import { repoTaskApps } from "../integrations/apps/apps.js";
 import { redactStrings, repoTaskEngines, runCli } from "../ai/engines.js";
@@ -1560,6 +1560,8 @@ export async function main(): Promise<void> {
     // secrets (master key, Slack and GitHub tokens), only the owner's variables for
     // this repository, which cannot override the platform's own names.
     providerSession = await runtime.session();
+    // The session's own credential (the Gemini bridge's token) is hidden like the config's.
+    redactor = makeRedactor([...configSecrets(config), ...host.secrets(), ...sessionSecrets(providerSession.env)]);
     // Names reserved after they were saved (ANTHROPIC_BASE_URL, HTTPS_PROXY, AWS_…) are left out: they would
     // redirect Claude Code itself, and the platform's key with it. Their names only are logged.
     const repoVars = setupEnv(setup);
@@ -1908,6 +1910,7 @@ export async function main(): Promise<void> {
       const session = await next.session();
       await providerSession?.dispose();
       providerSession = session;
+      redactor = makeRedactor([...configSecrets(config), ...host.secrets(), ...sessionSecrets(session.env)]);
       runtime = next;
       agentEnv = agentEnvWith(session.env);
       runConfig = runConfigOn(next);
