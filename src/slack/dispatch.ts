@@ -144,7 +144,9 @@ async function route(event: SlackMessageEvent, deps: DispatchDeps): Promise<void
     // is said, reacted or asked; a conversation Slack cannot place is left alone too. Without the
     // account Slack sends only the bot's conversations, so nothing is looked up. `app_mention` is a
     // bot event only, sent from conversations the app is in (and the one event older apps receive).
-    if (config.slack.user && event.type !== "app_mention") {
+    // Also when Slack delivered it through a person's account with none connected here: the window between
+    // installing the account's manifest and pasting its token, or a token whose revoke failed.
+    if ((config.slack.user || event.viaPerson) && event.type !== "app_mention") {
       const presence = await state.bots.presence(slack, event.channel!, event.channel_type, bot);
       if (presence !== "member") return void logNotAnswered(event.channel!, presence);
     }

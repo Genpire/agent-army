@@ -207,24 +207,10 @@ export function slackAccountRoutes(
     const config = await configRepo.load(true);
     const blocked = attentionReportBlocker(config);
     if (blocked) return void res.status(findAttentionReport(config.routines) ? 409 : 400).json({ error: blocked });
-    const result = await routines.create(attentionReportDraft(config, config.slack.user!.userId), "Admin (console)");
+    // Owner-only: only such a routine, reporting to the owner alone, may read the owner's inbox.
+    const result = await routines.create(attentionReportDraft(config, config.slack.user!.userId), "Admin (console)", { ownerOnly: true });
     if (!result.ok) return void res.status(result.status).json({ error: result.error });
-    // Owner-only: only such a routine may read the owner's inbox. The routines service's create takes no such
-    // option yet, so the mark is set on the stored routine, as the service stores it. Unmarked, it goes.
-    const id = result.routine.id;
-    let marked = false;
-    try {
-      await configRepo.update((c) => {
-        const stored = c.routines.find((r) => r.id === id);
-        if (!stored) return;
-        stored.ownerOnly = true;
-        marked = true;
-      });
-    } finally {
-      if (!marked) await routines.remove(id);
-    }
-    if (!marked) return void res.status(409).json({ error: "The routine changed while it was being created. Try again." });
-    res.json({ ok: true, routine: { ...result.routine, ownerOnly: true } });
+    res.json({ ok: true, routine: result.routine });
   });
 
   return router;

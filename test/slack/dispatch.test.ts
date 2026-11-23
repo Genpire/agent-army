@@ -823,6 +823,20 @@ describe("handleSlackEvent: the owner's own conversations are never requests to 
     expect(t.infoCalls).toEqual([]);
   });
 
+  it("checks a delivery that came through a person's account even with no account connected here", async () => {
+    // The window between installing the account's manifest and pasting its token, or a token whose revoke failed.
+    const t = await setup();
+    t.hidden.add("D9");
+    const quiet = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    try {
+      await t.send({ channel: "D9", channel_type: "im", ts: "1.1", user: "U2", text: "help me with the deploy", viaPerson: true });
+      await t.send({ channel: "D1", channel_type: "im", ts: "1.2", user: "U1", text: "hi Pointer", viaPerson: true });
+    } finally {
+      quiet.mockRestore();
+    }
+    expect(t.requests.map((r) => r.channel)).toEqual(["D1"]);
+  });
+
   it("logs each message it leaves unanswered as one line, without its text or sender", async () => {
     const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);

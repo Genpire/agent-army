@@ -415,7 +415,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
   const seenEvents = new Set<string>();
   app.post("/slack/events", express.raw({ type: "*/*", limit: "1mb" }), async (req, res) => {
     const rawBody = Buffer.isBuffer(req.body) ? req.body.toString("utf8") : "";
-    let payload: { type?: string; challenge?: string; event_id?: string; event?: SlackMessageEvent };
+    let payload: { type?: string; challenge?: string; event_id?: string; event?: SlackMessageEvent; authorizations?: { is_bot?: boolean }[] };
     try {
       payload = JSON.parse(rawBody);
     } catch {
@@ -453,7 +453,9 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
     res.status(200).send("ok");
     const event = payload.type === "event_callback" ? payload.event : undefined;
     if (event?.type === "message" || event?.type === "app_mention") {
-      void handleSlackEvent(event, slackDeps).catch((err) => console.error("[slack] event failed:", String(err)));
+      // Delivered through a person's account (user events): the conversation may not be the bot's (dispatch.ts checks).
+      const viaPerson = Array.isArray(payload.authorizations) && payload.authorizations.some((a) => a?.is_bot === false);
+      void handleSlackEvent({ ...event, ...(viaPerson ? { viaPerson } : {}) }, slackDeps).catch((err) => console.error("[slack] event failed:", String(err)));
     }
   });
 
@@ -1471,7 +1473,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
     res.status(500).json({ error: "Something went wrong on the server." });
   });
 
-  return { app, runner, store, conversations, automation, routines, stopAcceptingWork };
+  return { app, runner, store, conversations, automation, routines, inbox, stopAcceptingWork };
 }
 
 /** The stored key of a repo's setup: repo names are compared without letter case. */
@@ -1502,7 +1504,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   // Checkouts of workers killed with an earlier process (older than the job's deadline: no worker runs longer).
   void removeStaleWorkFolders({ dirs: workFolderDirs(process.env), maxAgeMs: staleWorkFolderAgeMs(process.env) });
   const port = Number(process.env.PORT ?? 8080);
-  const { app, runner, store, routines, stopAcceptingWork } = await createApp();
+  const { app, runner, store, routines, inbox, stopAcceptingWork } = await createApp();
   // The local runner's workers stopped with the earlier process: their tasks are marked failed before anything
   // new starts. Cloud Run job tasks go on across a restart of this service.
   if (runner.kind === "local") {
@@ -1522,7 +1524,15 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   // the new instance takes over at once, then end as the signal would have (see exitLikeSignal).
   const shutdown = (signal: NodeJS.Signals) => {
     console.log(`[server] ${signal}: finishing the requests in flight, then stopping`);
-    void drain({ server, stopAccepting: stopAcceptingWork, finish: [{ run: () => routines.scheduler.stop(), timeoutMs: 3_000 }] }).finally(() =>
+    void drain({
+      server,
+      stopAccepting: stopAcceptingWork,
+      // The owner's inbox writes changes about a second after they arrive: what is still queued is saved.
+      finish: [
+        { run: () => routines.scheduler.stop(), timeoutMs: 3_000 },
+        { run: () => inbox.flush(), timeoutMs: 3_000 },
+      ],
+    }).finally(() =>
       exitLikeSignal(signal),
     );
   };

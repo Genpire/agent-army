@@ -43,6 +43,12 @@ export interface SlackMessageEvent {
   user_team?: string;
   /** Files uploaded with the message (subtype "file_share"). */
   files?: SlackFileRef[];
+  /**
+   * Set by the events route, not by Slack: the delivery named a person's
+   * account in its authorizations (a user token's events), so the
+   * conversation may not be the bot's.
+   */
+  viaPerson?: boolean;
 }
 
 /** One earlier message in the conversation, oldest first. */
