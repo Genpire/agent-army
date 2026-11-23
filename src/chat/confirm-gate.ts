@@ -22,8 +22,9 @@ import type { PointerRequest } from "./pointer-types.js";
  * next message in the conversation is a short "yes", the same tool with the
  * same input goes through once.
  *
- * A Slack message to the person asking ("me", or their own Slack user id)
- * is not held: it reaches nobody else.
+ * A Slack message from Pointer to the person asking ("me", or their own
+ * Slack user id) is not held: it reaches nobody else. One sent as the owner
+ * (as "me") always is: it is their own message, to someone.
  *
  * Not gated: Jira, monday.com and Miro writes, and start_repo_task. They are
  * bounded by allow lists, visible where they land (the issue, item or board
@@ -41,7 +42,7 @@ import type { PointerRequest } from "./pointer-types.js";
 export const PENDING_TTL_MS = 15 * 60_000;
 const MAX_PENDING_PER_CONVERSATION = 20;
 const MAX_CONVERSATIONS = 1_000;
-/** A confirmation is a short message: "yes", "ok go ahead", "نعم تمام". */
+/** A confirmation is a short message: "yes", "ok go ahead", "send it", "نعم تمام". */
 const MAX_CONFIRMATION_WORDS = 4;
 
 /** Writes that reach future prompts and repo tasks: always gated after outside content. */
@@ -63,8 +64,10 @@ export const ROUTINE_GATED_TOOLS = ROUTINE_WRITE_TOOLS;
  * taints a query; every other tool does, the Agent/Task tool included
  * (subagents read outside content and report it back), and so does Slack's
  * member directory (names and titles are written by people). memory_save,
- * project_notes_add and slack_send_message only echo what Pointer wrote:
- * without them here, "remember A and B" would need a confirmation for B.
+ * project_notes_add and slack_send_message only echo what Pointer wrote
+ * (slack_send_message also, when a name matches several people, their ids,
+ * @handles and real names, never titles): without them here, "remember A
+ * and B" would need a confirmation for B.
  */
 export const TRUSTED_TOOLS: ReadonlySet<string> = new Set([
   "mcp__pointer__repo_task_status",
@@ -126,14 +129,23 @@ export const inputHash = (input: unknown): string =>
     .update(JSON.stringify(canonical(input ?? null)))
     .digest("hex");
 
-/** Words that say yes. Arabic is matched after the normalisation in confirmationWords. */
+/**
+ * Words that say yes, "send it" included (Pointer has just shown the message
+ * it will send). Arabic is matched after the normalisation in
+ * confirmationWords: أرسلها is written ارسلها here, نفّذ is نفذ.
+ */
 const YES_WORDS = new Set([
   "yes", "y", "yeah", "yep", "yup", "ok", "okay", "sure", "confirm", "confirmed", "approve", "approved", "proceed", "go", "do", "lgtm",
+  "send", "post", "share",
   "نعم", "اه", "ايوه", "ايوا", "ايو", "تمام", "موافق", "موافقه", "اعمل", "اعملها", "اكيد", "ماشي",
+  "ابعت", "ابعتها", "ابعته", "ابعث", "ابعثها", "ابعثه", "ارسل", "ارسلها", "ارسله", "نفذ",
 ]);
-/** Words that may go with a yes ("go ahead", "do it", "yes please"). Anything else ("no", "but", "not") makes it not a confirmation. */
+/**
+ * Words that may go with a yes ("go ahead", "do it", "send it now"). Anything
+ * else ("no", "but", "not", "later", "to") makes it not a confirmation.
+ */
 const FILLER_WORDS = new Set([
-  "ahead", "it", "that", "this", "please", "pls", "thanks", "thank", "you", "then", "so", "fine",
+  "ahead", "it", "that", "this", "please", "pls", "thanks", "thank", "you", "then", "so", "fine", "now",
   "من", "فضلك", "لو", "سمحت", "شكرا", "يلا",
 ]);
 
@@ -152,7 +164,7 @@ function confirmationWords(text: string): string[] {
     .filter(Boolean);
 }
 
-/** A short yes in English or Arabic, and nothing else: "Yes!", "ok go ahead", "do it 👍", "نعم", "تمام، اعمل". */
+/** A short yes in English or Arabic, and nothing else: "Yes!", "ok go ahead", "do it 👍", "send it", "نعم", "تمام، اعمل", "ابعتها". */
 export function isConfirmation(text: string): boolean {
   const words = confirmationWords(text);
   if (words.length === 0 || words.length > MAX_CONFIRMATION_WORDS) return false;
@@ -224,7 +236,10 @@ const deny = (tool: string): SyncHookJSONOutput => ({
     permissionDecision: "deny",
     permissionDecisionReason:
       `Not done: this turn read outside content (web pages, code hosts, tickets, boards, apps, Slack's member directory or a team member's report), so ${tool} needs the user's confirmation first. ` +
-      "Do not call it again now. Show the user exactly what you want to save or do (quote the arguments) and ask them to confirm. " +
+      "Do not call it again now. Show the user the exact arguments you will pass, quoted, so that their yes repeats the very same call " +
+      "(for a Slack message: the `to` value exactly as you will send it, the full text, and any other argument you set), and ask them to confirm. " +
+      "Later turns see only the conversation's text, not this turn's tool results, so write in your reply everything the call needs, " +
+      "such as the recipient's Slack user id when you know it. " +
       "If they reply yes, call the same tool with exactly the same arguments, without reading anything first.",
   },
 });
@@ -264,7 +279,7 @@ export function confirmGate({ pending, conversation, message, gated, requesterSl
     if (input.hook_event_name !== "PreToolUse" || input.agent_id) return {};
     const tool = input.tool_name;
     try {
-      // A Slack message to the person asking reaches nobody else: never held, and no confirmation used up.
+      // Pointer's Slack message to the person asking reaches nobody else: never held, and no confirmation used up.
       const toSelf = tool === SLACK_SEND_TOOL && isSelfTarget(input.tool_input, requesterSlackId);
       const denied = gated.has(tool) && !toSelf ? check(tool, input.tool_input) : undefined;
       if (denied) return denied;
