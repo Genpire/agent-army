@@ -456,6 +456,58 @@ describe("HrService.review", () => {
     expect(a.ok).toBe(true);
     expect(b).toMatchObject({ ok: false, status: 409 });
   });
+
+  it("runs on the light work route: the next provider reviews when one fails for its own reasons, each attempt's cost on its provider", async () => {
+    const KIMI = "sk-kimi-hr-secret-0042";
+    const s = await setup({
+      mutate: (c) => {
+        c.ai.providers.kimi = { secrets: { apiKey: KIMI }, settings: {}, models: {} };
+        c.ai.routes = { light: ["kimi", "anthropic"] };
+      },
+    });
+    const calls: Options[] = [];
+    const queryFn: QueryFn = (params) => {
+      calls.push(params.options ?? {});
+      const onKimi = params.options?.env?.ANTHROPIC_AUTH_TOKEN === KIMI;
+      return (async function* () {
+        if (onKimi) {
+          yield result({ is_error: true, result: "API Error: 429", api_error_status: 429, total_cost_usd: 0.02 });
+          return;
+        }
+        yield result({ structured_output: { summary: "The team fits.", proposals: [] } });
+      })();
+    };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const hr = new HrService({ store: s.store, tasks: s.tasks, usage: s.usage, spending: { checkChat: s.checkChat, notify: s.notify }, config: () => s.configRepo.load(true), updateConfig: (m) => s.configRepo.update(m), queryFn, now: () => NOW });
+    const r = await hr.review();
+    warn.mockRestore();
+    expect(calls).toHaveLength(2);
+    expect(r.ok && r.review.summary).toBe("The team fits.");
+    expect(r.ok && r.review.costUsd).toBeCloseTo(0.33, 10);
+    expect(s.checkChat).toHaveBeenCalledWith("light");
+    const providers = (await s.usage.month(NOW)).providers.map((p) => [p.provider, p.usd]);
+    expect(providers).toEqual(expect.arrayContaining([["kimi", 0.02], ["anthropic", 0.31]]));
+
+    // A provider whose monthly cap is used up is skipped.
+    const capped: Options[] = [];
+    const skip = new HrService({
+      store: s.store,
+      tasks: s.tasks,
+      usage: s.usage,
+      spending: { checkChat: s.checkChat, notify: s.notify, providerCaps: async () => (p: string) => (p === "kimi" ? "Kimi's cap is used up." : undefined) },
+      config: () => s.configRepo.load(true),
+      updateConfig: (m) => s.configRepo.update(m),
+      queryFn: (params) => {
+        capped.push(params.options ?? {});
+        return (async function* () {
+          yield result({ structured_output: { summary: "Fine.", proposals: [] } });
+        })();
+      },
+      now: () => NOW,
+    });
+    expect((await skip.review()).ok).toBe(true);
+    expect(capped.map((o) => o.env?.ANTHROPIC_API_KEY)).toEqual([API_KEY]);
+  });
 });
 
 describe("review storage", () => {

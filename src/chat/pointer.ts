@@ -10,7 +10,8 @@ import {
   query,
 } from "@anthropic-ai/claude-agent-sdk";
 import type { ContentBlockParam } from "@anthropic-ai/sdk/resources";
-import { defaultModel, fitContentBlocks, providerRuntime } from "../ai/ai-providers.js";
+import { type ProviderRuntime, type ProviderSession, defaultModel, fitContentBlocks } from "../ai/ai-providers.js";
+import { type FallbackNote, RunWatch, fallbackLine, routeRuntimes } from "../ai/routing.js";
 import { type AttachmentInfo, type AttachmentRepo, type PromptFile, type ThreadRef, classify, toContentBlocks } from "./attachments.js";
 import { type ChatIntegration, chatIntegrations, subagentIntegrationTools } from "./chat-integrations.js";
 import { PendingActions, afterInboxGate, confirmGate, conversationKey, gatedTools } from "./confirm-gate.js";
@@ -25,10 +26,10 @@ import { createPointerToolServer, githubToolOptions } from "./pointer-tools.js";
 import { INBOX_TOOL_NAME } from "../slack/inbox-tools.js";
 import { requesterSlackId } from "../slack/slack-tools.js";
 import { ownSlackAccount, ownerConversation } from "../slack/user-account.js";
-import type { PointerBrain, PointerBrainDeps, PointerContext, PointerReply, PointerRequest } from "./pointer-types.js";
+import type { PointerActivity, PointerBrain, PointerBrainDeps, PointerContext, PointerReply, PointerRequest } from "./pointer-types.js";
 import { SKILL_TOOL, type TeamSkills, buildChatAgents, pluginSkillName, rosterText, skillQueryOptions } from "../team/team.js";
 import { configSecrets, makeRedactor } from "../tasks/worker.js";
-import { SpendTracker } from "../spending/attribution.js";
+import { type AgentCosts, SpendTracker, addCosts } from "../spending/attribution.js";
 import { runtimePrices } from "../spending/prices.js";
 
 /**
@@ -347,6 +348,12 @@ export function readOnlyRunGate(allowed: Set<string>): HookCallback {
 /** A routine run cannot start repo tasks, whatever the caller passed. */
 const noRepoTasks: PointerContext["startRepoTask"] = async () => ({ ok: false, error: "Routine runs are read-only: they cannot start repo tasks." });
 
+/** What one provider's attempt at a reply gave: its reply (from the result, or the error it threw) and how the run went. */
+interface ReplyAttempt {
+  reply?: PointerReply;
+  watch: RunWatch;
+}
+
 export function createPointerBrain(
   deps: PointerBrainDeps,
   opts: {
@@ -365,12 +372,14 @@ export function createPointerBrain(
   return {
     async reply(req, ctx) {
       const config = await deps.configRepo.load(true);
-      // The chat provider (Anthropic, Claude on a cloud, or another provider): credentials, model mapping, what it cannot do.
-      const provider = providerRuntime(config, "chat");
-      if (!provider.ok) return { text: provider.error, isError: true };
-      const runtime = provider.runtime;
       // A routine run: read-only tools only, the routine's own budget, no files and no repo tasks.
       const routineRun = req.surface === "routine";
+      // The providers the reply can run on, in order (routing.ts; routine runs have a route of their own): Anthropic,
+      // Claude on a cloud, or another provider, each with its credentials, model mapping and what it cannot do.
+      // One whose monthly cap is used up is skipped (budget.ts).
+      const capProblem = await deps.spending?.providerCaps("chat");
+      const route = routeRuntimes(config, routineRun ? "routines" : "chat", capProblem ? { capProblem } : {});
+      if (!route.ok) return { text: route.error, isError: true };
       if (routineRun) ctx = { ...ctx, startRepoTask: noRepoTasks, addAttachment: undefined };
       const mondayToken = config.monday.token;
       // Every credential, every GitHub connection's token included.
@@ -383,32 +392,15 @@ export function createPointerBrain(
       const files = deps.attachments;
       const promptReq: PointerRequest = files ? req : { ...req, attachments: undefined };
       const text = buildPointerPrompt(req);
-      // With files: one streamed user turn (text first, then the files' content blocks); otherwise the plain string.
-      // A file the chat provider cannot read (a PDF on Kimi) is named instead of failing the reply.
-      const prompt =
+      // The shared files' contents, read once for every attempt.
+      const fileBlocks =
         files && req.attachments?.length
-          ? singleUserTurn([
-              { type: "text", text },
-              ...fitContentBlocks(await loadAttachmentBlocks(files, { channel: req.channel, threadTs: req.threadTs }, req.attachments, redact), runtime),
-            ])
-          : text;
-      const tools = createPointerToolServer({
-        // One read-only client per GitHub connection; each repository goes to the connection that covers it.
-        ...githubToolOptions(config, (token) => new GitHub(token)),
-        memory: deps.memory,
-        userId: req.userId,
-        startRepoTask: ctx.startRepoTask,
-        taskStatus: ctx.taskStatus,
-        addAttachment: ctx.addAttachment,
-        notes: deps.notes,
-        lessons: deps.lessons,
-        monday: {
-          client: mondayToken ? new MondayClient(mondayToken) : undefined,
-          defaultBoardId: config.monday.defaultBoardId,
-          allowedBoardIds: config.monday.allowedBoardIds,
-          requester: req.userName || req.userId,
-        },
-      });
+          ? await loadAttachmentBlocks(files, { channel: req.channel, threadTs: req.threadTs }, req.attachments, redact)
+          : undefined;
+      // With files: one streamed user turn (text first, then the files' content blocks); otherwise the plain string.
+      // A file the provider cannot read (a PDF on Kimi) is named instead of failing the reply.
+      const promptFor = (runtime: ProviderRuntime) =>
+        fileBlocks ? singleUserTurn([{ type: "text", text }, ...fitContentBlocks(fileBlocks, runtime)]) : text;
       const monday = {
         connected: Boolean(mondayToken),
         accountName: config.monday.accountName,
@@ -427,143 +419,221 @@ export function createPointerBrain(
       const slackSelf = requesterSlackId(req);
       // The owner's own Slack account, for the owner's requests only: the console, their DM with Pointer, their own routines.
       const slackAccount = ownSlackAccount(config, req);
-      // GitLab, Bitbucket, Jira, Miro, Slack and apps: each one that cannot be built is left out (chat-integrations.ts).
-      const integrations: ChatIntegration[] = await chatIntegrations(config, {
-        configRepo: deps.configRepo,
-        requester: req.userName || req.userId,
-        ...(slackSelf ? { requesterSlackId: slackSelf } : {}),
-        addAttachment: ctx.addAttachment,
-        ...(slackAccount ? { slackAccount } : {}),
-        ownerConversation: ownerConversation(config, req),
-        redact,
-      });
-      const connected = integrations.filter((i) => i.server);
+      const budgetUsd = routineRun && req.budgetUsd !== undefined ? req.budgetUsd : team.pointer.budgetUsd;
+      const limits = { maxTurns: team.pointer.maxTurns, budgetUsd };
+      const onActivity = ctx.onActivity;
+      const tell = (activity: PointerActivity) => {
+        if (!onActivity) return;
+        try {
+          onActivity(activity);
+        } catch {
+          // the console's live view must never break the answer
+        }
+      };
 
-      const tmp = await mkdtemp(join(tmpdir(), "pointer-"));
+      /**
+       * The reply on one provider: Pointer's tool server and integrations of
+       * its own, the provider's environment (its credential files written
+       * outside any checkout until the attempt ends), its own spend.
+       */
+      const attempt = async (runtime: ProviderRuntime, abort: AbortController): Promise<ReplyAttempt> => {
+        const watch = new RunWatch();
+        const tools = createPointerToolServer({
+          // One read-only client per GitHub connection; each repository goes to the connection that covers it.
+          ...githubToolOptions(config, (token) => new GitHub(token)),
+          memory: deps.memory,
+          userId: req.userId,
+          startRepoTask: ctx.startRepoTask,
+          taskStatus: ctx.taskStatus,
+          addAttachment: ctx.addAttachment,
+          notes: deps.notes,
+          lessons: deps.lessons,
+          monday: {
+            client: mondayToken ? new MondayClient(mondayToken) : undefined,
+            defaultBoardId: config.monday.defaultBoardId,
+            allowedBoardIds: config.monday.allowedBoardIds,
+            requester: req.userName || req.userId,
+          },
+        });
+        // GitLab, Bitbucket, Jira, Miro, Slack and apps: each one that cannot be built is left out (chat-integrations.ts).
+        const integrations: ChatIntegration[] = await chatIntegrations(config, {
+          configRepo: deps.configRepo,
+          requester: req.userName || req.userId,
+          ...(slackSelf ? { requesterSlackId: slackSelf } : {}),
+          addAttachment: ctx.addAttachment,
+          ...(slackAccount ? { slackAccount } : {}),
+          ownerConversation: ownerConversation(config, req),
+          redact,
+        });
+        const connected = integrations.filter((i) => i.server);
+
+        const tmp = await mkdtemp(join(tmpdir(), "pointer-"));
+        let reply: PointerReply | undefined;
+        let session: ProviderSession | undefined;
+        try {
+          session = await runtime.session();
+          const subagentTools = ["WebSearch", "WebFetch", ...tools.readOnlyToolNames, ...subagentIntegrationTools(connected)];
+          // Integrations given to some agents only (apps assigned to agents): their read-only tools, per agent.
+          const scopedTools = (agentId: string) =>
+            connected.filter((i) => i.agentIds?.includes(agentId)).flatMap((i) => i.readOnlyToolNames);
+          // The owner's inbox is read-only but never a subagent's: subagentReadOnlyGate refuses it whatever this set holds.
+          const gateTools = new Set([...subagentTools, ...connected.flatMap((i) => i.readOnlyToolNames)]);
+          gateTools.delete(INBOX_TOOL_NAME);
+          const allTools = [...builtins, ...tools.allToolNames, ...connected.flatMap((i) => i.allToolNames)];
+          // A routine run is offered only the read-only tools; the rest are not loaded at all.
+          const readOnlyTools = new Set([...builtins, ...tools.readOnlyToolNames, ...connected.flatMap((i) => i.readOnlyToolNames)]);
+          const writeTools = allTools.filter((t) => !readOnlyTools.has(t));
+          const chatModel = team.pointer.model || defaultModel(config, runtime);
+          const options: Options = {
+            systemPrompt: buildPointerSystemPrompt({
+              config,
+              facts,
+              req: promptReq,
+              now: new Date(),
+              projectNotes,
+              monday,
+              ...(skillOptions && teamSkills ? { skills: teamSkills.skills } : {}),
+              integrationRules: integrations.map((i) => i.promptRule).filter(Boolean),
+            }),
+            // Pointer's own chat model, else the model on the Claude card, else the SDK default.
+            ...(runtime.model(chatModel) ? { model: runtime.model(chatModel) } : {}),
+            ...(runtime.effort(team.pointer.effort) ? { effort: runtime.effort(team.pointer.effort) } : {}),
+            ...(runtime.managedSettings ? { managedSettings: runtime.managedSettings } : {}),
+            tools: [...builtins],
+            // Headless: nothing can prompt, so anything not listed here is denied.
+            allowedTools: routineRun ? [...readOnlyTools] : allTools,
+            // The library's plugin (outside any repository) and its skills; Pointer loads them with the Skill tool.
+            ...(skillOptions ?? {}),
+            disallowedTools: [...CHAT_BLOCKED_TOOLS, ...runtime.disallowedTools, ...(routineRun ? writeTools : [])],
+            permissionMode: "dontAsk",
+            settingSources: [],
+            strictMcpConfig: true,
+            persistSession: false,
+            // Slack text is untrusted: never expand "@/path" file references or other prompt syntax
+            // (string prompt and streamed user message alike).
+            verbatimPrompts: true,
+            mcpServers: { pointer: tools.server, ...Object.fromEntries(connected.map((i) => [i.key, i.server!])) },
+            agents: buildChatAgents(team, subagentTools, skillOptions ? teamSkills : undefined, scopedTools),
+            // Every subagent, including the SDK's built-in ones (general-purpose, Explore, …),
+            // is read-only: writes (memory, notes, tickets, repo tasks) only from Pointer itself.
+            // Pointer's own memory, notes and app writes need the user's yes once this query
+            // has read outside content (confirm-gate.ts); one gate per query holds its taint.
+            // Once it has read the owner's Slack inbox, nothing can carry it out (afterInboxGate).
+            hooks: {
+              PreToolUse: [
+                {
+                  hooks: [
+                    subagentReadOnlyGate(gateTools),
+                    ...(routineRun ? [readOnlyRunGate(readOnlyTools)] : []),
+                    confirmGate({
+                      pending,
+                      conversation: conversationKey(req),
+                      message: req.text,
+                      gated: gatedTools(connected),
+                      ...(slackSelf ? { requesterSlackId: slackSelf } : {}),
+                    }),
+                    afterInboxGate(),
+                  ],
+                },
+              ],
+            },
+            maxTurns: team.pointer.maxTurns,
+            maxBudgetUsd: budgetUsd,
+            cwd: tmp,
+            abortController: abort,
+            // Replaces the environment: the CLI sees none of the service's own
+            // secrets (master key, Slack, GitHub and monday.com tokens).
+            env: {
+              PATH: process.env.PATH ?? "",
+              HOME: tmp,
+              LANG: "C.UTF-8",
+              ...session.env,
+              CLAUDE_AGENT_SDK_CLIENT_APP: "agent-army-pointer/0.2.0",
+            },
+            // The console shows the answer as it is written; Slack posts it once.
+            ...(onActivity ? { includePartialMessages: true } : {}),
+          };
+          const mapper = onActivity ? new ActivityMapper(team) : undefined;
+          // Who spent what: Pointer and the team members it asked (attribution.ts), for the per-agent and per-provider caps.
+          const spend = new SpendTracker({ agents: team.agents.map((a) => a.id), price: runtimePrices(runtime) });
+          for await (const message of queryFn({ prompt: promptFor(runtime), options })) {
+            spend.feed(message);
+            watch.feed(message);
+            if (message.type === "result") {
+              reply = { ...mapResult(message, limits), agentCosts: spend.costs(message), provider: runtime.provider };
+            }
+            if (mapper) for (const activity of mapper.feed(message)) tell(activity);
+          }
+        } catch (err) {
+          watch.thrown(err);
+          const why = redact(err instanceof Error ? err.message : String(err));
+          console.error("[pointer] query failed:", why.slice(0, 300));
+          // The SDK also throws after an error result; keep the more specific message.
+          reply ??= { text: `Something went wrong: ${why}`, isError: true };
+        } finally {
+          await session?.dispose();
+          await rm(tmp, { recursive: true, force: true }).catch(() => {});
+        }
+        return { reply, watch };
+      };
+
+      // One time limit for the whole reply, whichever providers answer it.
       const abort = new AbortController();
       const timer = setTimeout(() => abort.abort(), timeoutMs);
-      let reply: PointerReply | undefined;
-      // The provider's environment, with its credential files (a Google key) written outside any checkout until the reply ends.
-      let session: Awaited<ReturnType<typeof runtime.session>> | undefined;
+      const attempts: ReplyAttempt[] = [];
+      const fallback: FallbackNote[] = [];
+      // Why the reply could not move on to the next provider after a provider failure, for its error text.
+      let heldBack: string | undefined;
+      let last = route.runtimes[0]!;
       try {
-        session = await runtime.session();
-        const subagentTools = ["WebSearch", "WebFetch", ...tools.readOnlyToolNames, ...subagentIntegrationTools(connected)];
-        // Integrations given to some agents only (apps assigned to agents): their read-only tools, per agent.
-        const scopedTools = (agentId: string) =>
-          connected.filter((i) => i.agentIds?.includes(agentId)).flatMap((i) => i.readOnlyToolNames);
-        // The owner's inbox is read-only but never a subagent's: subagentReadOnlyGate refuses it whatever this set holds.
-        const gateTools = new Set([...subagentTools, ...connected.flatMap((i) => i.readOnlyToolNames)]);
-        gateTools.delete(INBOX_TOOL_NAME);
-        const allTools = [...builtins, ...tools.allToolNames, ...connected.flatMap((i) => i.allToolNames)];
-        // A routine run is offered only the read-only tools; the rest are not loaded at all.
-        const readOnlyTools = new Set([...builtins, ...tools.readOnlyToolNames, ...connected.flatMap((i) => i.readOnlyToolNames)]);
-        const writeTools = allTools.filter((t) => !readOnlyTools.has(t));
-        const budgetUsd = routineRun && req.budgetUsd !== undefined ? req.budgetUsd : team.pointer.budgetUsd;
-        const chatModel = team.pointer.model || defaultModel(config, runtime);
-        const options: Options = {
-          systemPrompt: buildPointerSystemPrompt({
-            config,
-            facts,
-            req: promptReq,
-            now: new Date(),
-            projectNotes,
-            monday,
-            ...(skillOptions && teamSkills ? { skills: teamSkills.skills } : {}),
-            integrationRules: integrations.map((i) => i.promptRule).filter(Boolean),
-          }),
-          // Pointer's own chat model, else the model on the Claude card, else the SDK default.
-          ...(runtime.model(chatModel) ? { model: runtime.model(chatModel) } : {}),
-          ...(runtime.effort(team.pointer.effort) ? { effort: runtime.effort(team.pointer.effort) } : {}),
-          ...(runtime.managedSettings ? { managedSettings: runtime.managedSettings } : {}),
-          tools: [...builtins],
-          // Headless: nothing can prompt, so anything not listed here is denied.
-          allowedTools: routineRun ? [...readOnlyTools] : allTools,
-          // The library's plugin (outside any repository) and its skills; Pointer loads them with the Skill tool.
-          ...(skillOptions ?? {}),
-          disallowedTools: [...CHAT_BLOCKED_TOOLS, ...runtime.disallowedTools, ...(routineRun ? writeTools : [])],
-          permissionMode: "dontAsk",
-          settingSources: [],
-          strictMcpConfig: true,
-          persistSession: false,
-          // Slack text is untrusted: never expand "@/path" file references or other prompt syntax
-          // (string prompt and streamed user message alike).
-          verbatimPrompts: true,
-          mcpServers: { pointer: tools.server, ...Object.fromEntries(connected.map((i) => [i.key, i.server!])) },
-          agents: buildChatAgents(team, subagentTools, skillOptions ? teamSkills : undefined, scopedTools),
-          // Every subagent, including the SDK's built-in ones (general-purpose, Explore, …),
-          // is read-only: writes (memory, notes, tickets, repo tasks) only from Pointer itself.
-          // Pointer's own memory, notes and app writes need the user's yes once this query
-          // has read outside content (confirm-gate.ts); one gate per query holds its taint.
-          // Once it has read the owner's Slack inbox, nothing can carry it out (afterInboxGate).
-          hooks: {
-            PreToolUse: [
-              {
-                hooks: [
-                  subagentReadOnlyGate(gateTools),
-                  ...(routineRun ? [readOnlyRunGate(readOnlyTools)] : []),
-                  confirmGate({
-                    pending,
-                    conversation: conversationKey(req),
-                    message: req.text,
-                    gated: gatedTools(connected),
-                    ...(slackSelf ? { requesterSlackId: slackSelf } : {}),
-                  }),
-                  afterInboxGate(),
-                ],
-              },
-            ],
-          },
-          maxTurns: team.pointer.maxTurns,
-          maxBudgetUsd: budgetUsd,
-          cwd: tmp,
-          abortController: abort,
-          // Replaces the environment: the CLI sees none of the service's own
-          // secrets (master key, Slack, GitHub and monday.com tokens).
-          env: {
-            PATH: process.env.PATH ?? "",
-            HOME: tmp,
-            LANG: "C.UTF-8",
-            ...session.env,
-            CLAUDE_AGENT_SDK_CLIENT_APP: "agent-army-pointer/0.2.0",
-          },
-          // The console shows the answer as it is written; Slack posts it once.
-          ...(ctx.onActivity ? { includePartialMessages: true } : {}),
-        };
-        const onActivity = ctx.onActivity;
-        const mapper = onActivity ? new ActivityMapper(team) : undefined;
-        // Who spent what: Pointer and the team members it asked (attribution.ts), for the per-agent and per-provider caps.
-        const spend = new SpendTracker({ agents: team.agents.map((a) => a.id), price: runtimePrices(runtime) });
-        for await (const message of queryFn({ prompt, options })) {
-          spend.feed(message);
-          if (message.type === "result") {
-            reply = { ...mapResult(message, { maxTurns: team.pointer.maxTurns, budgetUsd }), agentCosts: spend.costs(message), provider: runtime.provider };
+        for (let i = 0; i < route.runtimes.length; i += 1) {
+          last = route.runtimes[i]!;
+          const run = await attempt(last, abort);
+          attempts.push(run);
+          const failure = run.watch.failure;
+          const next = route.runtimes[i + 1];
+          if (!failure || !next || abort.signal.aborted) break;
+          if (run.watch.toolRan) {
+            // A tool may have done something already (a message sent, a ticket made): running the request again could do it twice.
+            heldBack = `${last.label} failed (${failure.reason}) after it had started using tools, so ${next.label} did not take over: running the request again could repeat what was already done.`;
+            break;
           }
-          if (mapper && onActivity) {
-            for (const activity of mapper.feed(message)) {
-              try {
-                onActivity(activity);
-              } catch {
-                // the console's live view must never break the answer
-              }
-            }
-          }
+          const note: FallbackNote = { from: last.provider, to: next.provider, reason: failure.reason };
+          fallback.push(note);
+          console.warn(`[pointer] ${fallbackLine(note, "took over")}`);
+          // The console drops what the failed attempt had written so far, and says what happened.
+          tell({ type: "turn" });
+          const id = `fallback-${fallback.length}`;
+          tell({ type: "step", id, label: fallbackLine(note, "is answering"), kind: "other" });
+          tell({ type: "step-done", id, isError: false });
         }
-      } catch (err) {
-        const why = redact(err instanceof Error ? err.message : String(err));
-        console.error("[pointer] query failed:", why.slice(0, 300));
-        // The SDK also throws after an error result; keep the more specific message.
-        reply ??= { text: `Something went wrong: ${why}`, isError: true };
       } finally {
         clearTimeout(timer);
-        await session?.dispose();
-        await rm(tmp, { recursive: true, force: true }).catch(() => {});
       }
 
+      let reply = attempts.at(-1)?.reply;
+      if (attempts.length > 1) {
+        // Every attempt's spend counts: a failed one's too.
+        const costs = attempts.map((a) => a.reply?.costUsd).filter((c): c is number => c !== undefined);
+        const agentCosts = attempts.reduce<AgentCosts | undefined>((sum, a) => (a.reply?.agentCosts ? addCosts(sum, a.reply.agentCosts) : sum), undefined);
+        reply ??= { text: "I finished without an answer. Please try again.", isError: true };
+        reply = {
+          ...reply,
+          ...(costs.length ? { costUsd: costs.reduce((a, b) => a + b, 0), provider: last.provider } : {}),
+          ...(agentCosts ? { agentCosts } : {}),
+        };
+      }
       if (abort.signal.aborted) {
         const minutes = Math.round(timeoutMs / 60_000) || 1;
         reply = { ...reply, text: `I ran out of time (${minutes} min limit) on this one.`, costUsd: reply?.costUsd, isError: true };
       }
       reply ??= { text: "I finished without an answer. Please try again.", isError: true };
+      // An error says what happened on the way; an answer only records it (Slack shows the answer alone).
+      if (reply.isError) {
+        const happened = [...fallback.map((n) => fallbackLine(n, "took over")), heldBack].filter(Boolean);
+        if (happened.length) reply = { ...reply, text: `${reply.text}\n\n${happened.join(" ")}` };
+      }
+      if (fallback.length) reply = { ...reply, fallback };
       return { ...reply, text: redact(reply.text) };
     },
   };

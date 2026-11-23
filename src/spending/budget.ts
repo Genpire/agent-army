@@ -1,5 +1,6 @@
 import type { WebClient } from "@slack/web-api";
-import type { Budget, Config } from "../core/config.js";
+import { routeProviders } from "../ai/routing.js";
+import type { Budget, Config, WorkKind } from "../core/config.js";
 import { slackErrorCode } from "../slack/slack.js";
 import type { Store } from "../core/store.js";
 import type { AgentSpec, Team } from "../team/team.js";
@@ -14,11 +15,13 @@ import { type AgentUsage, type MonthUsage, type ProviderUsage, type UsageRepo, r
  * per AI provider or coding agent CLI, and what one agent may spend in a
  * single task. A cap of 0 means no cap.
  *
- * - New repo tasks are refused when the monthly, the repository's, the task
- *   provider's or Pointer's own cap is used up (every start path asks
- *   startThreadTask, which asks `checkTask`; the worker asks again), chat
- *   replies when the monthly, the chat provider's or Pointer's cap is. A
- *   task's own budget never exceeds what is left.
+ * - New repo tasks are refused when the monthly, the repository's or
+ *   Pointer's own cap is used up (every start path asks startThreadTask,
+ *   which asks `checkTask`; the worker asks again), chat replies when the
+ *   monthly or Pointer's cap is. A provider whose cap is used up is skipped:
+ *   the work runs on the next provider of its route (routing.ts,
+ *   `providerCaps`), and is refused only when every one of them is used up.
+ *   A task's own budget never exceeds what is left.
  * - An agent over its monthly cap, or working through an engine whose cap is
  *   used up, is left out of the team for the task (`leftOut`).
  * - Within a task, an agent past its per-task cap has its tool calls denied
@@ -123,18 +126,65 @@ function usedUp(what: string, spentOn: string, s: CapStatus, refused: string, fo
 const MONTHLY = "This month's Claude budget";
 const SPENT_MONTHLY = "chat and repo tasks";
 
-/** Who a decision is about besides the repository: the provider the work runs on, and Pointer's name. */
+/** Who a decision is about besides the repository: the providers the work can run on, and Pointer's name. */
 export interface DecisionContext {
-  /** The AI provider the task or reply runs on (config.ai.taskProvider / chatProvider). */
+  /** The AI provider the task or reply runs on (config.ai.taskProvider / chatProvider) when there is one only. */
   provider?: string;
+  /**
+   * The route's providers in order (routing.ts), the work moving on to the
+   * next one when one cannot run: a provider's monthly cap refuses the work
+   * only when every one of them is used up, and the work runs on the first
+   * one that is not. Takes the place of `provider` when set.
+   */
+  providers?: string[];
   /** Pointer's name, for its own cap. */
   leadName?: string;
 }
 
+/** What a provider's monthly cap is checked for: a chat reply (anything left) or a repo task (MIN_TASK_USD left). */
+export type CapWork = "chat" | "task";
+
+/** Why a provider's monthly cap stops new work on it now, or undefined when it does not (no cap, or enough left). */
+export function providerCapProblem(budget: Budget, usage: Partial<Pick<MonthUsage, "providers">>, provider: string, work: CapWork): string | undefined {
+  const p = providerStatus(budget, usage, provider);
+  if (!p) return undefined;
+  const task = work === "task";
+  if (task ? p.remainingUsd >= MIN_TASK_USD : p.remainingUsd > 0) return undefined;
+  const label = providerLabel(provider);
+  return usedUp(`The monthly budget for ${label}`, `chat and repo tasks on ${label}`, p, task ? `New repo tasks on ${label} are refused` : `Chat replies on ${label} are refused`, task);
+}
+
+const routeOf = (ctx: DecisionContext): string[] => (ctx.providers?.length ? ctx.providers : ctx.provider ? [ctx.provider] : []);
+
+/** The provider the work runs on: the first of the route whose cap does not stop it (the first when every one does). */
+export function providerToRun(budget: Budget, usage: Partial<Pick<MonthUsage, "providers">>, ctx: DecisionContext, work: CapWork): string | undefined {
+  const route = routeOf(ctx);
+  return route.find((p) => !providerCapProblem(budget, usage, p, work)) ?? route[0];
+}
+
+const listed = (items: string[]) => (items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`);
+
+/** Refused for the providers' caps only when every provider of the route has used its cap up. */
+function providersDecision(budget: Budget, usage: Partial<Pick<MonthUsage, "providers">>, ctx: DecisionContext, work: CapWork): CapDecision {
+  const route = routeOf(ctx);
+  const problems = route.map((p) => providerCapProblem(budget, usage, p, work));
+  if (!route.length || problems.some((p) => p === undefined)) return OK;
+  if (route.length === 1) return { ok: false, error: problems[0]! };
+  const spent = route.map((p) => {
+    const s = providerStatus(budget, usage, p);
+    return `${providerLabel(p)} (${usd(s?.usedUsd ?? 0)} of ${usd(s?.capUsd ?? 0)})`;
+  });
+  const refused = work === "task" ? "New repo tasks are refused" : "Chat replies are refused";
+  return {
+    ok: false,
+    error: `The monthly budgets of every provider this work can run on are used up: ${listed(spent)}. ${refused} until the month ends (UTC). ${WHERE}`,
+  };
+}
+
 /**
  * Whether a new repo task on `repo` may start: refused when the monthly, the
- * repository's, the task provider's or Pointer's own cap has less than
- * MIN_TASK_USD left.
+ * repository's or Pointer's own cap has less than MIN_TASK_USD left, or every
+ * provider it can run on has less than that left of its own cap.
  */
 export function taskDecision(budget: Budget, usage: SpendInput, repo: string, ctx: DecisionContext = {}): CapDecision {
   const monthly = monthlyStatus(budget, usage);
@@ -145,13 +195,8 @@ export function taskDecision(budget: Budget, usage: SpendInput, repo: string, ct
   if (own && own.remainingUsd < MIN_TASK_USD) {
     return { ok: false, error: usedUp(`The monthly budget for ${repo}`, `its repo tasks`, own, `New tasks on ${repo} are refused`, true) };
   }
-  if (ctx.provider) {
-    const p = providerStatus(budget, usage, ctx.provider);
-    const label = providerLabel(ctx.provider);
-    if (p && p.remainingUsd < MIN_TASK_USD) {
-      return { ok: false, error: usedUp(`The monthly budget for ${label}`, `chat and repo tasks on ${label}`, p, `New repo tasks on ${label} are refused`, true) };
-    }
-  }
+  const providers = providersDecision(budget, usage, ctx, "task");
+  if (!providers.ok) return providers;
   const lead = agentStatus(budget, usage, LEAD_AGENT_ID);
   if (lead && lead.remainingUsd < MIN_TASK_USD) {
     const name = ctx.leadName || "Pointer";
@@ -160,19 +205,14 @@ export function taskDecision(budget: Budget, usage: SpendInput, repo: string, ct
   return OK;
 }
 
-/** Whether a chat reply may start: refused once the monthly, the chat provider's or Pointer's own cap is used up. */
+/** Whether a chat reply may start: refused once the monthly or Pointer's own cap is used up, or the cap of every provider it can run on. */
 export function chatDecision(budget: Budget, usage: Pick<MonthUsage, "totalUsd"> & Partial<Pick<MonthUsage, "agents" | "providers">>, ctx: DecisionContext = {}): CapDecision {
   const monthly = monthlyStatus(budget, usage);
   if (monthly && monthly.remainingUsd <= 0) {
     return { ok: false, error: usedUp(MONTHLY, SPENT_MONTHLY, monthly, "Chat replies and new repo tasks are refused", false) };
   }
-  if (ctx.provider) {
-    const p = providerStatus(budget, usage, ctx.provider);
-    const label = providerLabel(ctx.provider);
-    if (p && p.remainingUsd <= 0) {
-      return { ok: false, error: usedUp(`The monthly budget for ${label}`, `chat and repo tasks on ${label}`, p, `Chat replies on ${label} are refused`, false) };
-    }
-  }
+  const providers = providersDecision(budget, usage, ctx, "chat");
+  if (!providers.ok) return providers;
   const lead = agentStatus(budget, usage, LEAD_AGENT_ID);
   if (lead && lead.remainingUsd <= 0) {
     const name = ctx.leadName || "Pointer";
@@ -209,7 +249,9 @@ export type TaskBudget = { ok: true; budgetUsd: number; note?: string } | { ok: 
 export function taskBudgetFor(budget: Budget, usage: SpendInput, repo: string, maxBudgetUsd: number, ctx: DecisionContext = {}): TaskBudget {
   const decision = taskDecision(budget, usage, repo, ctx);
   if (!decision.ok) return decision;
-  const left = remainingForTask(budget, usage, repo, ctx.provider);
+  // The provider the task starts on: the first of its route with enough of its cap left.
+  const provider = providerToRun(budget, usage, ctx, "task");
+  const left = remainingForTask(budget, usage, repo, provider);
   if (!left || left.usd >= maxBudgetUsd) return { ok: true, budgetUsd: maxBudgetUsd };
   const budgetUsd = Math.floor(left.usd * 100) / 100;
   const of =
@@ -217,7 +259,7 @@ export function taskBudgetFor(budget: Budget, usage: SpendInput, repo: string, m
       ? "this month's Claude budget"
       : left.scope === "repo"
         ? `the monthly budget for ${repo}`
-        : `the monthly budget for ${providerLabel(ctx.provider ?? "")}`;
+        : `the monthly budget for ${providerLabel(provider ?? "")}`;
   return { ok: true, budgetUsd, note: `This task may spend ${usd(budgetUsd)}: what is left of ${of} (the per-task budget is ${usd(maxBudgetUsd)}).` };
 }
 
@@ -586,24 +628,47 @@ export class Spending implements TaskBudgetCheck {
     }
   }
 
-  private static context(config: Config, scope: "task" | "chat"): DecisionContext {
-    return { provider: scope === "task" ? config.ai?.taskProvider : config.ai?.chatProvider, leadName: config.team?.pointer.name };
+  /** The providers the kind of work can run on (its route's connected ones), and Pointer's name. */
+  private static context(config: Config, kind: WorkKind): DecisionContext {
+    const leadName = config.team?.pointer.name;
+    if (!config.ai) return { leadName };
+    const providers = routeProviders(config, kind);
+    return { provider: providers[0], providers, leadName };
   }
 
   async checkTask(repo: string): Promise<CapDecision> {
     const c = await this.current(repo);
-    return c ? taskDecision(c.config.budget, c.usage, repo, Spending.context(c.config, "task")) : OK;
+    return c ? taskDecision(c.config.budget, c.usage, repo, Spending.context(c.config, "tasks")) : OK;
   }
 
-  async checkChat(): Promise<CapDecision> {
+  /** A chat reply, a routine run or a light call (`kind`, chat when left out): refused by the monthly, Pointer's or every route provider's cap. */
+  async checkChat(kind: Exclude<WorkKind, "tasks"> = "chat"): Promise<CapDecision> {
     const c = await this.current();
-    return c ? chatDecision(c.config.budget, c.usage, Spending.context(c.config, "chat")) : OK;
+    return c ? chatDecision(c.config.budget, c.usage, Spending.context(c.config, kind)) : OK;
   }
 
-  /** The worker, before the team's first run: the task's own budget, or the refusal. */
-  async taskBudget(repo: string, maxBudgetUsd: number): Promise<TaskBudget> {
+  /**
+   * The worker, before the team's first run: the task's own budget, or the
+   * refusal. With `provider` (the one the worker chose from the task route),
+   * that provider's cap bounds it; else the route's first with enough left.
+   */
+  async taskBudget(repo: string, maxBudgetUsd: number, provider?: string): Promise<TaskBudget> {
     const c = await this.current(repo);
-    return c ? taskBudgetFor(c.config.budget, c.usage, repo, maxBudgetUsd, Spending.context(c.config, "task")) : { ok: true, budgetUsd: maxBudgetUsd };
+    if (!c) return { ok: true, budgetUsd: maxBudgetUsd };
+    const ctx = Spending.context(c.config, "tasks");
+    return taskBudgetFor(c.config.budget, c.usage, repo, maxBudgetUsd, provider ? { ...ctx, provider, providers: [provider] } : ctx);
+  }
+
+  /**
+   * Each provider's monthly cap, as routing.ts takes it (capProblem): why the
+   * cap stops new work on a provider now, so the route skips it. Read once;
+   * no cap applies (and nothing is read) without caps or when the spend
+   * cannot be read. Never throws.
+   */
+  async providerCaps(work: CapWork): Promise<(provider: string) => string | undefined> {
+    const c = await this.current();
+    if (!c) return () => undefined;
+    return (provider) => providerCapProblem(c.config.budget, c.usage, provider, work);
   }
 
   /** The worker, before the team is built: the agents a monthly cap leaves out of this task. Never throws. */

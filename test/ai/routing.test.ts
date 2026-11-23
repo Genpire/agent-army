@@ -1,7 +1,20 @@
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { describe, expect, it } from "vitest";
-import { type Config, ConfigSchema } from "../../src/core/config.js";
-import { errorFailure, fallbackLine, isRouteReady, providerFailure, routeFor, routeRuntimes, routeSteps } from "../../src/ai/routing.js";
+import { type Config, ConfigSchema, isChatReady, isReady, publicView } from "../../src/core/config.js";
+import {
+  RunWatch,
+  acrossRoute,
+  errorFailure,
+  fallbackLine,
+  isRouteReady,
+  onlyClaudeMissing,
+  providerFailure,
+  routeFor,
+  routeProviders,
+  routeRuntimes,
+  routeSteps,
+  routeView,
+} from "../../src/ai/routing.js";
 
 /** Claude and Kimi connected, DeepSeek not. */
 function config(patch: (c: Config) => void = () => undefined): Config {
@@ -92,5 +105,116 @@ describe("provider failures", () => {
 
   it("are said in one line", () => {
     expect(fallbackLine({ from: "kimi", to: "anthropic", reason: "rate limited" })).toBe("Kimi failed (rate limited); Claude answered instead.");
+  });
+});
+
+describe("watching a run", () => {
+  const tool = (parent: string | null = null) =>
+    ({ type: "assistant", parent_tool_use_id: parent, message: { content: [{ type: "tool_use", id: "t1", name: "WebFetch", input: {} }] } }) as unknown as SDKMessage;
+  const subagentError = { type: "assistant", parent_tool_use_id: "t1", error: "rate_limit", message: { content: [] } } as unknown as SDKMessage;
+  const watch = (...messages: SDKMessage[]) => {
+    const w = new RunWatch();
+    for (const m of messages) w.feed(m);
+    return w;
+  };
+
+  it("keeps the provider failure the run ended on, and whether a tool may have run", () => {
+    const failed = watch(assistant("rate_limit"), result({ api_error_status: 429 }));
+    expect(failed.failure?.reason).toBe("rate limited");
+    expect(failed.toolRan).toBe(false);
+    expect(watch(tool(), assistant("overloaded")).toolRan).toBe(true);
+    // A subagent's tool counts: it may have done something.
+    expect(watch(tool("toolu_parent")).toolRan).toBe(true);
+    const streamed = { type: "stream_event", parent_tool_use_id: null, event: { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "t2", name: "Agent", input: {} } } };
+    expect(watch(streamed as unknown as SDKMessage).toolRan).toBe(true);
+  });
+
+  it("ignores a subagent's failure, and a failure the run went past", () => {
+    expect(watch(subagentError, result({ is_error: false })).failure).toBeUndefined();
+    expect(watch(subagentError).failure).toBeUndefined();
+    // The main agent hit a rate limit, then the run stopped at its turn limit: the platform's stop, not the provider's.
+    expect(watch(assistant("rate_limit"), result({ subtype: "error_max_turns" })).failure).toBeUndefined();
+    // An error result without a status keeps the main agent's failure.
+    expect(watch(assistant("billing_error"), result({ subtype: "error_during_execution" })).failure?.reason).toBe("out of credit");
+  });
+
+  it("reads a thrown error only before any result", () => {
+    const early = new RunWatch();
+    early.thrown(new Error("API Error: 503 Service Unavailable"));
+    expect(early.failure?.reason).toBe("unavailable");
+    const late = watch(result({ subtype: "error_max_turns" }));
+    late.thrown(new Error("API Error: 503"));
+    expect(late.failure).toBeUndefined();
+  });
+});
+
+describe("calls without side effects along a route", () => {
+  const runtimes = () => {
+    const run = routeRuntimes(config((c) => (c.ai.routes = { light: ["kimi", "anthropic"] })), "light");
+    if (!run.ok) throw new Error(run.error);
+    return run.runtimes;
+  };
+
+  it("ask the next provider while one fails for its own reasons", async () => {
+    const asked: string[] = [];
+    const out = await acrossRoute(runtimes(), async (r) => {
+      asked.push(r.provider);
+      return r.provider === "kimi" ? { value: "no", failure: { kind: "rate_limit", reason: "rate limited" } } : { value: "yes" };
+    });
+    expect(asked).toEqual(["kimi", "anthropic"]);
+    expect(out).toMatchObject({ value: "yes", fallback: [{ from: "kimi", to: "anthropic", reason: "rate limited" }] });
+    expect(out.runtime.provider).toBe("anthropic");
+  });
+
+  it("stop at the first answer, a failure of the work, or the last provider", async () => {
+    const first = await acrossRoute(runtimes(), async () => ({ value: 1 }));
+    expect(first).toMatchObject({ value: 1, fallback: [] });
+    const all = await acrossRoute(runtimes(), async (r) => ({ value: r.provider, failure: { kind: "http", reason: "a server error" } }));
+    expect(all.value).toBe("anthropic");
+    expect(all.fallback).toHaveLength(1);
+  });
+});
+
+describe("routes for the console and the caps", () => {
+  it("show each kind's providers, whether the owner set them, and why one cannot run (without the owner hint)", () => {
+    const c = config((c) => (c.ai.routes = { chat: ["deepseek", "kimi"] }));
+    expect(routeView(c, "chat")).toEqual({
+      custom: true,
+      steps: [
+        { provider: "deepseek", name: "DeepSeek", ready: false, problem: "DeepSeek is not set up." },
+        { provider: "kimi", name: "Kimi", ready: true },
+      ],
+    });
+    expect(routeView(c, "tasks")).toEqual({ custom: false, steps: [{ provider: "anthropic", name: "Claude", ready: true }] });
+    expect(routeView(c, "light").custom).toBe(false);
+    expect(routeView(c, "light").steps.map((s) => s.provider)).toEqual(["deepseek", "kimi"]);
+  });
+
+  it("are in the console's view of the config, readiness following the routes", () => {
+    const c = config((c) => {
+      c.ai.chatProvider = "deepseek";
+      c.ai.routes = { chat: ["deepseek", "kimi"], tasks: ["deepseek"] };
+    });
+    const ai = publicView(c).ai;
+    expect(ai.routes.chat).toEqual(routeView(c, "chat"));
+    expect(Object.keys(ai.routes).sort()).toEqual(["chat", "light", "routines", "tasks"]);
+    // DeepSeek is not connected, but Kimi can answer chat; repo tasks have nothing.
+    expect(ai.chat).toEqual({ provider: "deepseek", name: "DeepSeek", ready: true });
+    expect(ai.task.ready).toBe(false);
+    c.slack.botToken = "xoxb-1";
+    c.slack.signingSecret = "s";
+    c.github.token = "ghp_x";
+    expect(isChatReady(c)).toBe(true);
+    expect(isReady(c)).toBe(false);
+    c.ai.routes.tasks = ["deepseek", "anthropic"];
+    expect(isReady(c)).toBe(true);
+  });
+
+  it("give the caps the connected providers, or all of them when none is", () => {
+    const c = config((c) => (c.ai.routes = { chat: ["deepseek", "kimi", "anthropic"] }));
+    expect(routeProviders(c, "chat")).toEqual(["kimi", "anthropic"]);
+    c.ai.routes = { chat: ["deepseek", "qwen"] };
+    expect(routeProviders(c, "chat")).toEqual(["deepseek", "qwen"]);
+    expect(onlyClaudeMissing(routeSteps(ConfigSchema.parse({}), "chat"))).toBe(true);
   });
 });

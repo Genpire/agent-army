@@ -166,7 +166,7 @@ export class OfficeTalk {
       model: config.office.talk.model,
     };
     const opts = { fetch: this.deps.fetch, queryFn: this.deps.queryFn, timeoutMs: this.deps.timeoutMs };
-    const outcome = choice.id === "gemini" ? await geminiTalk(choice.key, call, opts) : await chatTalk(choice.runtime, call, opts);
+    const outcome = choice.id === "gemini" ? await geminiTalk(choice.key, call, opts) : await chatTalk(choice.runtimes, call, opts);
     this.recordSpend(outcome, choice, people);
 
     const lines = outcome.error === undefined ? parseTalk(outcome.raw, people, redact) : undefined;
@@ -221,7 +221,7 @@ export class OfficeTalk {
     const share = { usd: outcome.costUsd / people.length, tokens: Math.round(outcome.tokens / people.length) };
     const agentCosts: AgentCosts = Object.fromEntries(people.map((p) => [p.id, { ...share }]));
     void this.deps.usage
-      .recordChat({ costUsd: outcome.costUsd, provider: choice.id === "gemini" ? "gemini" : choice.runtime.provider, agentCosts })
+      .recordChat({ costUsd: outcome.costUsd, provider: choice.id === "gemini" ? "gemini" : (outcome.provider ?? choice.runtime.provider), agentCosts })
       .then(() => this.deps.spending?.notify())
       .catch((err: unknown) => console.error(`[office] cost not recorded: ${(err instanceof Error ? err.message : String(err)).slice(0, 200)}`));
   }

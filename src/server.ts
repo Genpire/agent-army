@@ -297,11 +297,12 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
   let maxParallel = (await configRepo.load()).limits.maxParallel;
   const cap = parallelCap(env, overrides.memoryBytes);
   const runner = overrides.runner ?? createRunner(() => parallelLimit(maxParallel, cap).effective, env);
-  const brain = overrides.brain ?? createPointerBrain({ configRepo, memory, notes, lessons, attachments }, { skills: () => skillsPlugin.current() });
   const usage = new UsageRepo(store, tasks);
   const slackFactory = overrides.slack ?? slackClient;
   // Spending caps for every start path (Slack, console, GitHub reviews) and chat; alerts in Slack.
   const spending = new Spending({ store, usage, config: () => configRepo.load(), slack: slackFactory });
+  // Pointer skips a provider whose monthly cap is used up (the next of its route answers).
+  const brain = overrides.brain ?? createPointerBrain({ configRepo, memory, notes, lessons, attachments, spending }, { skills: () => skillsPlugin.current() });
   // Console conversations: answered by the same brain, within the same limit as Slack answers.
   const conversations = new ConversationService({ store, configRepo, tasks, runner, brain, usage, spending, brainSlot: withBrainSlot, attachments });
   // Routines: Pointer's scheduled work, run by the same brain (read-only), within the same caps and concurrency limit.

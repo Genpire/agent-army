@@ -12,6 +12,8 @@ import type { Runner } from "../tasks/runner.js";
 import type { TaskRepo, ThreadState } from "../tasks/tasks.js";
 import type { UsageRepo } from "../spending/usage.js";
 import type { AgentCosts } from "../spending/attribution.js";
+import type { Spending } from "../spending/budget.js";
+import type { FallbackNote } from "../ai/routing.js";
 
 /** A file attached to a Slack message (subset of Slack's file object). */
 export interface SlackFileRef {
@@ -126,8 +128,10 @@ export interface PointerReply {
   costUsd?: number;
   /** Who spent costUsd: Pointer ("pointer") and the team members it asked (see attribution.ts). */
   agentCosts?: AgentCosts;
-  /** The AI provider the reply ran on (config.ai.chatProvider), for its monthly cap. */
+  /** The AI provider that answered (the first of the chat or routines route that could), for its monthly cap. */
   provider?: string;
+  /** Providers that failed before this one answered (routing.ts), in order; absent when the first answered. */
+  fallback?: FallbackNote[];
   isError: boolean;
 }
 
@@ -167,6 +171,8 @@ export interface PointerBrainDeps {
   lessons?: LessonsRepo;
   /** Thread attachments; optional so older callers and tests keep working. */
   attachments?: AttachmentRepo;
+  /** The providers' monthly caps (budget.ts): a provider whose cap is used up is skipped. Absent: no cap is checked here. */
+  spending?: Pick<Spending, "providerCaps">;
 }
 
 /** Everything the Slack layer needs; built once in server.ts. */

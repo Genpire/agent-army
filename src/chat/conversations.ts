@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { providerProblem } from "../ai/ai-providers.js";
+import { onlyClaudeMissing, routeRuntimes } from "../ai/routing.js";
 import { ATTACHMENT_LIMITS, type AttachmentInfo, type AttachmentRepo, type ThreadRef, checkUpload, classify, isAttachmentId } from "./attachments.js";
 import { type TranscribeOptions, type TranscribeResult, transcribeAttachment } from "./transcribe.js";
 import type { Spending } from "../spending/budget.js";
@@ -906,9 +906,9 @@ export class ConversationService implements WebThreads {
     reply: LiveReply,
     redact: (text: string) => string,
   ): Promise<{ text: string; costUsd?: number; isError: boolean }> {
-    // The chat provider (Claude by default) must be connected before any model call.
-    const missing = providerProblem(config, config.ai.chatProvider);
-    if (missing) return { text: config.ai.chatProvider === "anthropic" ? NOT_CONNECTED : missing, isError: true };
+    // A provider of the chat route (Claude by default) must be connected before any model call.
+    const route = routeRuntimes(config, "chat");
+    if (!route.ok) return { text: onlyClaudeMissing(route.skipped) ? NOT_CONNECTED : route.error, isError: true };
     // The monthly cap: checked before any model call.
     const allowed = (await this.deps.spending?.checkChat()) ?? { ok: true };
     if (!allowed.ok) return { text: allowed.error, isError: true };

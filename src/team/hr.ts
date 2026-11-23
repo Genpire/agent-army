@@ -5,7 +5,8 @@ import { type Options, query } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import type { Spending } from "../spending/budget.js";
 import type { Budget, Config } from "../core/config.js";
-import { type ProviderRuntime, defaultModel, providerRuntime } from "../ai/ai-providers.js";
+import { type ProviderRuntime, defaultModel } from "../ai/ai-providers.js";
+import { type ProviderFailure, RunWatch, acrossRoute, fallbackLine, onlyClaudeMissing, routeRuntimes } from "../ai/routing.js";
 import type { QueryFn } from "../chat/pointer.js";
 import { modelName } from "../tasks/sizing.js";
 import type { Store } from "../core/store.js";
@@ -874,8 +875,8 @@ export interface HrDeps {
   store: Store;
   tasks: Pick<TaskRepo, "recent">;
   usage: Pick<UsageRepo, "month" | "recordChat">;
-  /** The monthly cap: a review is refused once it is used up, like a chat reply. */
-  spending?: Pick<Spending, "checkChat" | "notify">;
+  /** The monthly cap: a review is refused once it is used up, like a chat reply; a provider whose own cap is used up is skipped. */
+  spending?: Pick<Spending, "checkChat" | "notify"> & Partial<Pick<Spending, "providerCaps">>;
   /** The current configuration. */
   config: () => Promise<Config>;
   /** Serialised read-modify-write of the configuration (ConfigRepo.update). */
@@ -938,11 +939,15 @@ export class HrService {
 
   private async runReview(): Promise<ReviewResult> {
     const config = await this.deps.config();
-    // The chat provider: HR's review is one of the console's own calls.
-    const provider = providerRuntime(config, "chat");
-    if (!provider.ok) return { ok: false, status: 400, error: config.ai.chatProvider === "anthropic" ? NOT_CONNECTED : provider.error };
-    const allowed = (await this.deps.spending?.checkChat()) ?? { ok: true };
+    // The light work route (routing.ts): HR's review is one of the console's own calls.
+    const connected = routeRuntimes(config, "light");
+    if (!connected.ok) return { ok: false, status: 400, error: onlyClaudeMissing(connected.skipped) ? NOT_CONNECTED : connected.error };
+    const allowed = (await this.deps.spending?.checkChat("light")) ?? { ok: true };
     if (!allowed.ok) return { ok: false, status: 409, error: allowed.error };
+    // A provider whose monthly cap is used up is skipped.
+    const capProblem = await this.deps.spending?.providerCaps?.("chat");
+    const route = capProblem ? routeRuntimes(config, "light", { capProblem }) : connected;
+    if (!route.ok) return { ok: false, status: 409, error: route.error };
 
     const redact = makeRedactor(configSecrets(config));
     const now = this.now();
@@ -954,32 +959,42 @@ export class HrService {
     ]);
     const hr = team.agents.find((a) => a.id === HR_AGENT_ID);
     const instructions = hr?.instructions ?? defaultHrAgent().instructions;
-    const chatModel = team.pointer.model || defaultModel(config, provider.runtime);
-    // The HR agent's own model and effort when the owner set them; else Pointer's chat settings.
-    const model = hr?.model || chatModel;
+    const chatModelOn = (runtime: ProviderRuntime) => team.pointer.model || defaultModel(config, runtime);
+    const chatModel = chatModelOn(route.runtimes[0]!);
     const evidence = buildEvidence({ tasks, team, chatModel, budget: config.budget, usage, skills, now, redact });
     const prompt = `<evidence>\n${evidenceText(evidence).replace(/<\/?evidence>/gi, "")}\n</evidence>\n\nReview the team and answer with the summary and your proposals.`;
 
-    const run = await this.ask({
-      runtime: provider.runtime,
-      model,
-      effort: hr?.effort || team.pointer.effort,
-      system: hrSystemPrompt(instructions, team.pointer.name),
-      prompt,
+    // On each provider of the route in turn while one fails for its own reasons (rate limit, credit, outage): a review changes nothing.
+    let costUsd = 0;
+    const done = await acrossRoute(route.runtimes, async (runtime) => {
+      const run = await this.ask({
+        runtime,
+        // The HR agent's own model and effort when the owner set them; else Pointer's chat settings.
+        model: hr?.model || chatModelOn(runtime),
+        effort: hr?.effort || team.pointer.effort,
+        system: hrSystemPrompt(instructions, team.pointer.name),
+        prompt,
+      });
+      costUsd += run.costUsd;
+      // Counted with chat (the web service's own Claude spend), on the provider it ran on, so the caps see it.
+      if (run.costUsd > 0) {
+        await this.deps.usage
+          .recordChat({ costUsd: run.costUsd, provider: runtime.provider, agentCosts: { [HR_AGENT_ID]: { usd: run.costUsd } } }, now)
+          // Alerts in Slack in the background: the owner is waiting for the review.
+          .then(() => void this.deps.spending?.notify())
+          .catch((err: unknown) => console.error("[hr] review cost not recorded:", redact(errorText(err)).slice(0, 200)));
+      }
+      return { value: run, failure: run.answer ? undefined : run.failure };
     });
-    // Counted with chat (the web service's own Claude spend), so the monthly cap sees it.
-    if (run.costUsd > 0) {
-      await this.deps.usage
-        .recordChat({ costUsd: run.costUsd, provider: provider.runtime.provider, agentCosts: { [HR_AGENT_ID]: { usd: run.costUsd } } }, now)
-        // Alerts in Slack in the background: the owner is waiting for the review.
-        .then(() => void this.deps.spending?.notify())
-        .catch((err: unknown) => console.error("[hr] review cost not recorded:", redact(errorText(err)).slice(0, 200)));
-    }
+    for (const note of done.fallback) console.warn(`[hr] ${fallbackLine(note, "took over")}`);
+    const run = done.value;
+    const model = hr?.model || chatModelOn(done.runtime);
     if (!run.answer) {
       const why = scrubTokens(redact(run.problem)).slice(0, 300).replace(/\.+$/, "");
       console.error(`[hr] review failed: ${why}`);
-      const cost = run.costUsd > 0 ? ` The attempt cost ${usd(run.costUsd)}.` : "";
-      return { ok: false, status: 502, error: `HR could not finish the review: ${why}.${cost}`, costUsd: run.costUsd };
+      const cost = costUsd > 0 ? ` The attempt cost ${usd(costUsd)}.` : "";
+      const happened = done.fallback.map((n) => ` ${fallbackLine(n, "took over")}`).join("");
+      return { ok: false, status: 502, error: `HR could not finish the review: ${why}.${happened}${cost}`, costUsd };
     }
 
     const { proposals, dropped } = validateProposals(run.answer.proposals, {
@@ -993,7 +1008,8 @@ export class HrService {
       createdAt: now.toISOString(),
       summary: clip(flat(scrubTokens(redact(run.answer.summary))), SUMMARY_MAX) || "HR had nothing to add.",
       proposals,
-      costUsd: run.costUsd,
+      // A failed provider's attempt included.
+      costUsd,
       model,
       instructionsFrom: hr ? "team" : "default",
       tasksSeen: evidence.tasks.length,
@@ -1009,11 +1025,14 @@ export class HrService {
     answer?: RawAnswer;
     costUsd: number;
     problem: string;
+    /** The provider failed (not the call): the next one of the route may answer. */
+    failure?: ProviderFailure;
   }> {
     const queryFn: QueryFn = this.deps.queryFn ?? query;
     let costUsd = 0;
     let answer: RawAnswer | undefined;
     let problem = "no answer";
+    const watch = new RunWatch();
     let tmp: string | undefined;
     let session: Awaited<ReturnType<ProviderRuntime["session"]>> | undefined;
     const abort = new AbortController();
@@ -1052,6 +1071,7 @@ export class HrService {
         },
       };
       for await (const message of queryFn({ prompt: o.prompt, options })) {
+        watch.feed(message);
         if (message.type !== "result") continue;
         costUsd = Number.isFinite(message.total_cost_usd) ? message.total_cost_usd : 0;
         if (message.subtype === "success" && !message.is_error) {
@@ -1066,6 +1086,7 @@ export class HrService {
         }
       }
     } catch (err) {
+      watch.thrown(err);
       problem = errorText(err);
     } finally {
       clearTimeout(timer);
@@ -1073,7 +1094,7 @@ export class HrService {
       if (tmp) await rm(tmp, { recursive: true, force: true }).catch(() => undefined);
     }
     if (abort.signal.aborted && !answer) problem = "it ran out of time";
-    return { answer, costUsd, problem };
+    return { answer, costUsd, problem, ...(watch.failure && !abort.signal.aborted ? { failure: watch.failure } : {}) };
   }
 
   /**

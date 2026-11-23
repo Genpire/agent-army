@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { presetFor } from "../ai/ai-presets.js";
-import { connectionSecretParts, isProviderReady } from "../ai/ai-providers.js";
+import { connectionSecretParts } from "../ai/ai-providers.js";
+import { type RouteView, isRouteReady, routeView } from "../ai/routing.js";
 import { decrypt, deriveKey, encrypt, randomToken } from "./crypto.js";
 import type { Store } from "./store.js";
 import { REPO_RE } from "../integrations/code-hosts/repo-id.js";
@@ -910,9 +911,11 @@ export function publicView(c: Config) {
     ai: {
       chatProvider: c.ai.chatProvider,
       taskProvider: c.ai.taskProvider,
-      /** What chat and repo tasks run on, by name, and whether that provider is connected and complete. */
-      chat: { provider: c.ai.chatProvider, name: presetFor(c.ai.chatProvider).short, ready: isProviderReady(c, "chat") },
-      task: { provider: c.ai.taskProvider, name: presetFor(c.ai.taskProvider).short, ready: isProviderReady(c, "task") },
+      /** What chat and repo tasks run on first, by name, and whether their route has a provider that is connected and complete. */
+      chat: { provider: c.ai.chatProvider, name: presetFor(c.ai.chatProvider).short, ready: isRouteReady(c, "chat") },
+      task: { provider: c.ai.taskProvider, name: presetFor(c.ai.taskProvider).short, ready: isRouteReady(c, "tasks") },
+      /** Each kind of work's providers in order (routing.ts), whether the owner set them, and which can run now. */
+      routes: routesView(c),
       providers: Object.fromEntries(
         Object.entries(c.ai.providers).map(([id, p]) => [
           id,
@@ -999,13 +1002,17 @@ export function hasCodeHost(c: Config): boolean {
   return Boolean(c.github.token || c.github.extra.length > 0 || c.gitlab.token || c.bitbucket.token);
 }
 
+/** Each kind of work's route as the console shows it (publicView's ai.routes, POST /api/ai/routes). */
+export const routesView = (c: Config): Record<WorkKind, RouteView> =>
+  Object.fromEntries(WORK_KINDS.map((kind) => [kind, routeView(c, kind)])) as Record<WorkKind, RouteView>;
+
 /**
- * Everything connected: the AI providers chat and repo tasks run on (Claude
- * by default, see ai-providers.ts), Slack and a code host. Drives the admin
- * page badge and repo tasks.
+ * Everything connected: an AI provider for chat and one for repo tasks
+ * (their routes, Claude by default, see routing.ts), Slack and a code host.
+ * Drives the admin page badge and repo tasks.
  */
 export function isReady(c: Config): boolean {
-  return Boolean(isProviderReady(c, "chat") && isProviderReady(c, "task") && c.slack.botToken && c.slack.signingSecret && hasCodeHost(c));
+  return Boolean(isRouteReady(c, "chat") && isRouteReady(c, "tasks") && c.slack.botToken && c.slack.signingSecret && hasCodeHost(c));
 }
 
 /**
@@ -1060,7 +1067,7 @@ export function integrationSecrets(c: Config): string[] {
   ].filter((x): x is string => typeof x === "string" && x.length > 0);
 }
 
-/** Enough for Pointer to chat: the chat provider (Claude by default) and Slack. GitHub tools and repo tasks report when GitHub is missing. */
+/** Enough for Pointer to chat: a provider of the chat route (Claude by default) and Slack. GitHub tools and repo tasks report when GitHub is missing. */
 export function isChatReady(c: Config): boolean {
-  return Boolean(isProviderReady(c, "chat") && c.slack.botToken && c.slack.signingSecret);
+  return Boolean(isRouteReady(c, "chat") && c.slack.botToken && c.slack.signingSecret);
 }

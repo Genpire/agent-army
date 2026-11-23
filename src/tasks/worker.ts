@@ -15,13 +15,14 @@ import {
   parseReport,
 } from "../team/agents.js";
 import { AttachmentRepo, type ThreadRef, classify, expandZip } from "../chat/attachments.js";
-import { Spending, agentNamer, perTaskCapUsd, teamWithout } from "../spending/budget.js";
+import { MIN_TASK_USD, Spending, agentNamer, perTaskCapUsd, teamWithout } from "../spending/budget.js";
 import { LEAD_AGENT_ID } from "../spending/attribution.js";
-import { runtimePrices } from "../spending/prices.js";
+import { providerLabel, runtimePrices } from "../spending/prices.js";
 import { TaskSpend } from "../spending/task-spend.js";
 import { type Screenshot, browserAvailable, browserServer, collectScreenshots } from "./browser.js";
 import { type CiOutcome, type WaitOptions, ciFailureDetails, ciFixPrompt, ciSummary, ciSummaryLine, storedCiSummary, waitForChecks } from "./ci.js";
-import { type ProviderSession, providerProblem, providerRuntime, secretParts } from "../ai/ai-providers.js";
+import { type ProviderRuntime, type ProviderSession, secretParts } from "../ai/ai-providers.js";
+import { type FallbackNote, type ProviderFailure, RunWatch, fallbackLine, onlyClaudeMissing, ownerProblem, routeRuntimes } from "../ai/routing.js";
 import { repoTaskApps } from "../integrations/apps/apps.js";
 import { redactStrings, repoTaskEngines, runCli } from "../ai/engines.js";
 import type { CodeHost } from "../integrations/code-hosts/code-host.js";
@@ -53,7 +54,7 @@ import {
 import { type CodeHostKind, HOST_TERMS, repoHost } from "../integrations/code-hosts/repo-id.js";
 import { findRepoSetup, repoSetupContext, runSetupCommand, setupEnv } from "./repo-setup.js";
 import { ScreenshotRepo } from "./screenshots.js";
-import { HISTORY_SCAN, routeRepoTask } from "./sizing.js";
+import { HISTORY_SCAN, routeRepoTask, routedConfig, routeFor as sizeRoute } from "./sizing.js";
 import { SkillLibrary, materializeSkills } from "../skills/skills.js";
 import { slackClient, slackErrorCode, toMrkdwn, truncate, uploadThreadFiles } from "../slack/slack.js";
 import { type Store, createStore } from "../core/store.js";
@@ -498,16 +499,77 @@ export function stoppedComment(reason: string, plan: PlanItem[], where: TaskSurf
 }
 
 /**
- * Why the worker cannot run this task, or undefined when it can: the task
- * provider (Claude by default) is always needed; Slack only for tasks that
- * report in a Slack thread (console tasks keep everything on the task record).
+ * Why the worker cannot run this task, or undefined when it can: a provider
+ * of the task route (Claude by default) is always needed; Slack only for tasks
+ * that report in a Slack thread (console tasks keep everything on the task record).
  */
 export function onboardingError(task: Pick<Task, "channel">, config: Config): string | undefined {
-  const providerMissing = providerProblem(config, config.ai.taskProvider);
-  if (providerMissing && config.ai.taskProvider !== "anthropic") return `Onboarding is incomplete: ${providerMissing}`;
-  if (providerMissing) return isWebTask(task) ? "Onboarding is incomplete (Claude missing)." : "Onboarding is incomplete (Claude or Slack missing).";
+  const route = routeRuntimes(config, "tasks");
+  if (!route.ok && !onlyClaudeMissing(route.skipped)) return `Onboarding is incomplete: ${route.error}`;
+  if (!route.ok) return isWebTask(task) ? "Onboarding is incomplete (Claude missing)." : "Onboarding is incomplete (Claude or Slack missing).";
   if (!isWebTask(task) && !config.slack.botToken) return "Onboarding is incomplete (Claude or Slack missing).";
   return undefined;
+}
+
+/**
+ * The first message of a team run that takes over from one whose provider
+ * failed (a rate limit, credit used up, an outage): what happened, and that
+ * the checkout holds that run's work as it was left, then the task's own prompt.
+ */
+export function takeOverPrompt(prompt: string, failed: { provider: string; reason: string }): string {
+  return [
+    `A previous attempt at this task, on ${failed.provider}, stopped before it finished (${failed.reason}). Its changes are in the checkout as it left them: review them first (\`git status\`, \`git diff\`, \`git log\`), keep what is right, and continue the work from there.`,
+    "",
+    prompt,
+  ].join("\n");
+}
+
+/** What the route needs of a team run: what it cost, its turns, and the provider failure it ended on, if any. */
+export interface RouteRun {
+  costUsd: number;
+  turns: number;
+  providerFailure?: ProviderFailure;
+}
+
+/**
+ * The team's first run on the task route: on `runtimes[0]` (the runtime the
+ * task started on), then, while a run fails for its provider's own reasons
+ * (rate limit, credit, outage), on the next runtime. The next run starts from
+ * the checkout as the failed run left it (nothing here touches it), told so
+ * (takeOverPrompt), within what is left of the task's budget; `aborted` (the
+ * task's time) stops it. `switchTo` rebuilds everything provider-bound before
+ * the run. Returns the last run, and the cost and turns of them all.
+ */
+export async function runOnRoute<R extends RouteRun>(o: {
+  runtimes: ProviderRuntime[];
+  prompt: string;
+  budgetUsd: number;
+  aborted: () => boolean;
+  run: (prompt: string, budgetUsd: number) => Promise<R>;
+  switchTo: (runtime: ProviderRuntime, note: FallbackNote) => Promise<void>;
+  /** Too little budget left for the next provider to try. */
+  onShort?: (note: FallbackNote, leftUsd: number) => void;
+}): Promise<{ run: R; costUsd: number; turns: number; fallback: FallbackNote[] }> {
+  let run = await o.run(o.prompt, o.budgetUsd);
+  let costUsd = run.costUsd;
+  let turns = run.turns;
+  const fallback: FallbackNote[] = [];
+  for (let i = 1; i < o.runtimes.length && run.providerFailure && !o.aborted(); i += 1) {
+    const from = o.runtimes[i - 1]!;
+    const to = o.runtimes[i]!;
+    const note: FallbackNote = { from: from.provider, to: to.provider, reason: run.providerFailure.reason };
+    const left = Math.floor((o.budgetUsd - costUsd) * 100) / 100;
+    if (left < MIN_TASK_USD) {
+      o.onShort?.(note, left);
+      break;
+    }
+    fallback.push(note);
+    await o.switchTo(to, note);
+    run = await o.run(takeOverPrompt(o.prompt, { provider: from.label, reason: note.reason }), left);
+    costUsd += run.costUsd;
+    turns += run.turns;
+  }
+  return { run, costUsd, turns, fallback };
 }
 
 /** The team's report as kept on the task (redacted): what the Slack result says, for the console. */
@@ -695,11 +757,9 @@ export function threadStateAfter(
 }
 
 /** A run of the team: its report or why it has none, what it cost, and its plan at the end. */
-interface TeamRun {
+interface TeamRun extends RouteRun {
   report?: Report;
   failure?: string;
-  costUsd: number;
-  turns: number;
   plan: PlanItem[];
 }
 
@@ -1343,12 +1403,18 @@ export async function main(): Promise<void> {
 
   const notReady = onboardingError(task, config);
   if (notReady) throw new Error(notReady);
-  // The task provider (Anthropic, Claude on a cloud, or another provider): credentials, model mapping, what it cannot do.
-  const provider = providerRuntime(config, "task");
-  if (!provider.ok) throw new Error(provider.error);
-  const runtime = provider.runtime;
+  // The task route's providers in order (routing.ts; Anthropic, Claude on a cloud, or another provider), each with its
+  // credentials, model mapping and what it cannot do. The team runs on the first that is connected and under its monthly
+  // cap (budget.ts), and its work goes to the next when a run fails for the provider's own reasons (runOnRoute).
+  const connected = routeRuntimes(config, "tasks");
+  if (!connected.ok) throw new Error(connected.error);
+  const underCap = routeRuntimes(config, "tasks", { capProblem: await spending.providerCaps("task") });
+  // Every provider's cap used up: the task is refused below (taskBudget), with the caps' own message.
+  const runtimes = underCap.ok ? underCap.runtimes : connected.runtimes;
+  let runtime = runtimes[0]!;
   // The Claude card's model is Anthropic's; another provider runs its main tier unless routing picks a size's model.
-  const taskConfig: Config = runtime.provider === "anthropic" ? config : { ...config, anthropic: { ...config.anthropic, model: "" } };
+  const configOn = (r: ProviderRuntime): Config => (r.provider === "anthropic" ? config : { ...config, anthropic: { ...config.anthropic, model: "" } });
+  const taskConfig: Config = configOn(runtime);
   // Its environment with any credential file written (outside the checkout); removed when the task ends.
   let providerSession: ProviderSession | undefined;
   // Console tasks run without Slack: everything the Slack messages would say is kept on the task record.
@@ -1452,6 +1518,8 @@ export async function main(): Promise<void> {
   task.provider = runtime.provider;
   await tasks.save(task);
   await ticketStarted(ticket, task);
+  // Providers of the task route this task leaves out: not connected, or their monthly cap used up.
+  for (const s of underCap.ok ? underCap.skipped : []) timeline.add({ kind: "note", text: `${s.name} is skipped: ${ownerProblem(s.problem ?? "")}` });
 
   // The first run of the team (with the checkout and setup before it) stops at TASK_TIMEOUT_MIN, or earlier at the deadline.
   const abort = new AbortController();
@@ -1492,13 +1560,12 @@ export async function main(): Promise<void> {
     // secrets (master key, Slack and GitHub tokens), only the owner's variables for
     // this repository, which cannot override the platform's own names.
     providerSession = await runtime.session();
-    const providerEnv = providerSession.env;
     // Names reserved after they were saved (ANTHROPIC_BASE_URL, HTTPS_PROXY, AWS_…) are left out: they would
     // redirect Claude Code itself, and the platform's key with it. Their names only are logged.
     const repoVars = setupEnv(setup);
     const leftOut = Object.keys(setup?.env ?? {}).filter((name) => !(name in repoVars));
     if (leftOut.length) console.warn(`[worker] repo variables reserved by the platform were left out: ${leftOut.join(", ")}`);
-    const agentEnv: Record<string, string> = {
+    const agentEnvWith = (providerEnv: Record<string, string>): Record<string, string> => ({
       ...repoVars,
       PATH: process.env.PATH ?? "",
       HOME: process.env.HOME ?? "/tmp",
@@ -1507,7 +1574,9 @@ export async function main(): Promise<void> {
       // The task provider's credentials: also the agents' shell environment, as Anthropic's key always was.
       ...providerEnv,
       CLAUDE_AGENT_SDK_CLIENT_APP: "agent-army/0.1.0",
-    };
+    });
+    // Rebuilt when the work moves to the next provider of the task route (switchTo below).
+    let agentEnv = agentEnvWith(providerSession.env);
     let setupResult: SetupResult | undefined;
     const setupCommand = setup?.setupCommand.trim();
     if (setupCommand) {
@@ -1562,7 +1631,13 @@ export async function main(): Promise<void> {
     // Agents over their monthly budget, or working through an engine whose budget is used up, sit this task out (budget.ts).
     const overBudget = await spending.leftOut(config.team);
     for (const l of overBudget) timeline.add({ kind: "note", text: l.note }, true);
-    const teamConfig: Config = overBudget.length ? { ...taskConfig, team: teamWithout(taskConfig.team, overBudget) } : taskConfig;
+    const teamOn = (r: ProviderRuntime): Config => {
+      const base = configOn(r);
+      return overBudget.length ? { ...base, team: teamWithout(base.team, overBudget) } : base;
+    };
+    const teamConfig: Config = teamOn(runtime);
+    // The prices the team's Claude spend is counted at: the provider's it runs on (switchTo changes them).
+    let prices = runtimePrices(runtime);
     // Who spends what (attribution.ts), and each agent's budget for this task: past it, its tool calls are denied and its engine runs stopped.
     const agentName = agentNamer(config.team);
     const spend = new TaskSpend({
@@ -1571,7 +1646,7 @@ export async function main(): Promise<void> {
         codex: teamConfig.team.agents.filter((a) => a.enabled && a.engine === "codex").map((a) => a.id),
         gemini: teamConfig.team.agents.filter((a) => a.enabled && a.engine === "gemini").map((a) => a.id),
       },
-      price: runtimePrices(runtime),
+      price: (model) => prices(model),
       capFor: (id) => perTaskCapUsd(config.budget, id),
       name: agentName,
       onCapReached: (_id, text) => timeline.add({ kind: "note", text }, true),
@@ -1619,10 +1694,12 @@ export async function main(): Promise<void> {
 
     // Spending (budget.ts, sizing.ts): the task's budget is what is left of the caps, at most the per-task
     // budget (too little left refuses it, before the team runs); with routing on, its size picks the model.
-    const allowance = await spending.taskBudget(task.repo, config.limits.maxBudgetUsd);
+    // The provider the task starts on bounds it with its own cap (when every one's is used up, the route's refusal).
+    const allowance = await spending.taskBudget(task.repo, config.limits.maxBudgetUsd, underCap.ok ? runtime.provider : undefined);
     if (!allowance.ok) throw new Error(allowance.error);
     const taskBudgetUsd = allowance.budgetUsd;
     if (allowance.note) timeline.add({ kind: "note", text: allowance.note });
+    // The size is estimated on the provider the task starts on.
     const routed = config.team.pointer.routing.enabled
       ? await routeRepoTask({
           config: teamConfig,
@@ -1635,8 +1712,10 @@ export async function main(): Promise<void> {
           redact,
         })
       : undefined;
-    // The team runs with the routed model and effort (agents with their own keep them).
-    const runConfig = routed?.config ?? teamConfig;
+    // The team runs with the routed model and effort (agents with their own keep them), mapped onto the provider it runs on.
+    const runConfigOn = (r: ProviderRuntime): Config =>
+      routed ? routedConfig(teamOn(r), sizeRoute(config.team.pointer.routing, routed.size.size)) : teamOn(r);
+    let runConfig = routed?.config ?? teamConfig;
     if (routed) {
       task.size = routed.size;
       task.estimateUsd = routed.estimateUsd;
@@ -1752,6 +1831,8 @@ export async function main(): Promise<void> {
       let costUsd = 0;
       let turns = 0;
       let result: Parameters<TaskSpend["endRun"]>[0];
+      // Whether the run ended because its provider failed (rate limit, credit, outage), not the work.
+      const watch = new RunWatch();
       try {
         for await (const message of query({
           prompt: runPrompt,
@@ -1774,6 +1855,7 @@ export async function main(): Promise<void> {
           },
         })) {
           spendTracker.feed(message);
+          watch.feed(message);
           if (tracker.onMessage(message)) {
             await progress(redact(formatProgress(tracker.snapshot(), { kind: "live", everyMin })));
             await saveProgress();
@@ -1797,6 +1879,7 @@ export async function main(): Promise<void> {
           }
         }
       } catch (err) {
+        watch.thrown(err);
         // The SDK also throws after an error result; keep the more specific message.
         failure ??= redact(`The team could not run: ${errorText(err)}`);
       } finally {
@@ -1806,11 +1889,35 @@ export async function main(): Promise<void> {
         // Claude Code's own cost per model, shared out between the agents.
         task.agentCosts = spend.endRun(result);
       }
-      if (opts.abort.signal.aborted) failure = `Timed out after ${opts.timeoutMin} minutes.`;
+      const timedOut = opts.abort.signal.aborted;
+      if (timedOut) failure = `Timed out after ${opts.timeoutMin} minutes.`;
       if (!report && !failure) failure = "The team finished without a report.";
       const final = tracker.snapshot();
       task.progress = final;
-      return { report, failure: failure && redact(failure), costUsd, turns, plan: final.plan };
+      const providerFailure = !report && !timedOut ? watch.failure : undefined;
+      return { report, failure: failure && redact(failure), costUsd, turns, plan: final.plan, ...(providerFailure ? { providerFailure } : {}) };
+    };
+
+    /**
+     * The work goes to the next provider of the task route: everything bound
+     * to a provider is rebuilt (its environment and credential files, the
+     * agents' shell environment, prices, model mapping), and the task records it.
+     */
+    const switchTo = async (next: ProviderRuntime, note: FallbackNote) => {
+      const session = await next.session();
+      await providerSession?.dispose();
+      providerSession = session;
+      runtime = next;
+      agentEnv = agentEnvWith(session.env);
+      runConfig = runConfigOn(next);
+      prices = runtimePrices(next);
+      // Its Claude cost counts for the provider that did the work (budget.ts).
+      task.provider = next.provider;
+      const line = fallbackLine(note, "takes over");
+      console.warn(`[worker] ${line}`);
+      timeline.add({ kind: "note", text: `${line} It picks up from the checkout as the failed run left it.` }, true);
+      await tasks.save(task).catch((err: unknown) => console.error("[worker] task not saved:", redact(String(err))));
+      await progress(`:arrows_counterclockwise: ${line}`, true);
     };
 
     // Where each run's project notes and lessons go (saveWhatTheTeamLearned).
@@ -1913,21 +2020,35 @@ export async function main(): Promise<void> {
     };
 
     // ---------- 3. Let the team work ----------
-    const first = await runTeam(prompt, {
+    // On the task route: when a run fails for its provider's own reasons, the next provider picks up from the
+    // checkout as it was left, within what is left of the task's budget and its time. Later rounds (fixing
+    // checks, the preview) run on the provider that did the work.
+    const onRoute = await runOnRoute({
+      runtimes,
+      prompt,
       budgetUsd: taskBudgetUsd,
-      abort,
-      timeoutMin: Math.round(firstRunMs / 60_000),
-      since: startSha,
-      context,
+      aborted: () => abort.signal.aborted,
+      run: (runPrompt, budgetUsd) =>
+        runTeam(runPrompt, { budgetUsd, abort, timeoutMin: Math.round(firstRunMs / 60_000), since: startSha, context }),
+      switchTo,
+      onShort: (note, left) =>
+        timeline.add(
+          {
+            kind: "note",
+            text: `${providerLabel(note.from)} failed (${note.reason}); only ${usd(Math.max(0, left))} of the task's budget was left, too little for ${providerLabel(note.to)} to take over.`,
+          },
+          true,
+        ),
     });
+    const first = onRoute.run;
     clearTimeout(timer);
     // The size estimate's own (tiny) cost counts too: Pointer's.
-    task.costUsd = first.costUsd + (routed?.costUsd ?? 0);
+    task.costUsd = onRoute.costUsd + (routed?.costUsd ?? 0);
     if (routed?.costUsd) {
       spend.add({ [LEAD_AGENT_ID]: { usd: routed.costUsd } });
       task.agentCosts = spend.live();
     }
-    task.turns = first.turns;
+    task.turns = onRoute.turns;
     const { report, failure } = first;
     // What the Slack result says, kept on the task for the console (and Pointer).
     if (report) task.report = taskReport(report, redact);

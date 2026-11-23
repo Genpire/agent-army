@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Options, query } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
-import { defaultModel, providerRuntime } from "../ai/ai-providers.js";
+import { type ProviderRuntime, defaultModel } from "../ai/ai-providers.js";
+import { type ProviderFailure, RunWatch, acrossRoute, fallbackLine, onlyClaudeMissing, routeRuntimes } from "../ai/routing.js";
 import type { Spending } from "../spending/budget.js";
 import type { Config } from "../core/config.js";
 import type { QueryFn } from "../chat/pointer.js";
@@ -144,8 +145,8 @@ export function scoutSystemPrompt(team: Team, installed: string[]): string {
 
 export interface ScoutDeps {
   config: Config;
-  /** The monthly cap is checked first; alerts after the cost is counted. */
-  spending?: Pick<Spending, "checkChat" | "notify">;
+  /** The monthly cap is checked first (a provider whose own cap is used up is skipped); alerts after the cost is counted. */
+  spending?: Pick<Spending, "checkChat" | "notify"> & Partial<Pick<Spending, "providerCaps">>;
   usage?: Pick<UsageRepo, "recordChat">;
   /** The skills already installed (names), so they are not suggested again. */
   installed: string[];
@@ -158,79 +159,110 @@ export type ScoutResult =
   /** 409: a spending cap is used up; 400: Claude is not connected or the need is empty; 502: the search failed. */
   | { ok: false; status: 400 | 409 | 502; error: string };
 
+/** One search on one provider: what it found, what it cost, why it failed (for people), and whether the provider failed. */
+interface ScoutRun {
+  output: unknown;
+  costUsd?: number;
+  failure?: string;
+  providerFailure?: ProviderFailure;
+}
+
 /** Searches for skills that fit `need`. Never throws. */
 export async function findSkills(need: string, deps: ScoutDeps): Promise<ScoutResult> {
   const text = need.trim().slice(0, SCOUT_NEED_MAX_CHARS);
   if (!text) return { ok: false, status: 400, error: "Describe what the team needs a skill for." };
   const { config } = deps;
-  // The chat provider: the Scout is one of the console's own calls.
-  const provider = providerRuntime(config, "chat");
-  if (!provider.ok) {
-    const error = config.ai.chatProvider === "anthropic" ? "Claude is not connected. Add the Anthropic API key under Integrations first." : provider.error;
+  // The light work route (routing.ts): the Scout is one of the console's own calls.
+  const connected = routeRuntimes(config, "light");
+  if (!connected.ok) {
+    const error = onlyClaudeMissing(connected.skipped) ? "Claude is not connected. Add the Anthropic API key under Integrations first." : connected.error;
     return { ok: false, status: 400, error };
   }
-  const { runtime } = provider;
-  const allowed = (await deps.spending?.checkChat()) ?? { ok: true };
+  const allowed = (await deps.spending?.checkChat("light")) ?? { ok: true };
   if (!allowed.ok) return { ok: false, status: 409, error: allowed.error };
+  // A provider whose monthly cap is used up is skipped.
+  const capProblem = await deps.spending?.providerCaps?.("chat");
+  const route = capProblem ? routeRuntimes(config, "light", { capProblem }) : connected;
+  if (!route.ok) return { ok: false, status: 409, error: route.error };
 
   const redact = makeRedactor(configSecrets(config));
   const scout = config.team.agents.find((a) => a.id === "scout");
-  const model = runtime.model(scout?.model || config.team.pointer.model || defaultModel(config, runtime));
-  const effort = runtime.effort(scout?.effort || config.team.pointer.effort);
-  const tmp = await mkdtemp(join(tmpdir(), "scout-"));
-  const abort = new AbortController();
-  const timer = setTimeout(() => abort.abort(), deps.timeoutMs ?? SCOUT_TIMEOUT_MS);
-  let costUsd: number | undefined;
-  let output: unknown;
-  let failure: string | undefined;
-  let session: Awaited<ReturnType<typeof runtime.session>> | undefined;
-  try {
-    session = await runtime.session();
-    const options: Options = {
-      systemPrompt: scoutSystemPrompt(config.team, deps.installed),
-      ...(model ? { model } : {}),
-      ...(effort ? { effort } : {}),
-      ...(runtime.managedSettings ? { managedSettings: runtime.managedSettings } : {}),
-      tools: [...SCOUT_TOOLS],
-      allowedTools: [...SCOUT_TOOLS],
-      // WebSearch too where the provider has no search: the Scout then reads the pages it knows with WebFetch.
-      disallowedTools: [...SCOUT_BLOCKED_TOOLS, ...runtime.disallowedTools],
-      permissionMode: "dontAsk",
-      settingSources: [],
-      strictMcpConfig: true,
-      persistSession: false,
-      verbatimPrompts: true,
-      outputFormat: { type: "json_schema", schema: CANDIDATES_SCHEMA },
-      maxTurns: SCOUT_MAX_TURNS,
-      maxBudgetUsd: SCOUT_BUDGET_USD,
-      cwd: tmp,
-      abortController: abort,
-      // Replaces the environment: the CLI sees none of the service's own secrets.
-      env: { PATH: process.env.PATH ?? "", HOME: tmp, LANG: "C.UTF-8", ...session.env, CLAUDE_AGENT_SDK_CLIENT_APP: "agent-army-scout/0.1.0" },
-    };
-    const run = deps.queryFn ?? query;
-    for await (const message of run({ prompt: `Find Claude skills for this need:\n${text}`, options })) {
-      if (message.type !== "result") continue;
-      costUsd = message.total_cost_usd;
-      if (message.subtype === "success" && !message.is_error) output = message.structured_output;
-      else if (message.subtype === "success") failure = `The Scout could not search: ${message.result || "unknown error"}`;
-      else if (message.subtype === "error_max_budget_usd") failure = `The Scout stopped at its $${SCOUT_BUDGET_USD.toFixed(2)} budget before it finished. Try a narrower need.`;
-      else if (message.subtype === "error_max_turns") failure = "The Scout ran out of steps before it finished. Try a narrower need.";
-      else failure = `The Scout stopped: ${message.errors.join("; ") || message.subtype}`;
+  const timeoutMs = deps.timeoutMs ?? SCOUT_TIMEOUT_MS;
+
+  const search = async (runtime: ProviderRuntime): Promise<ScoutRun> => {
+    const model = runtime.model(scout?.model || config.team.pointer.model || defaultModel(config, runtime));
+    const effort = runtime.effort(scout?.effort || config.team.pointer.effort);
+    const tmp = await mkdtemp(join(tmpdir(), "scout-"));
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), timeoutMs);
+    const watch = new RunWatch();
+    const run: ScoutRun = { output: undefined };
+    let session: Awaited<ReturnType<typeof runtime.session>> | undefined;
+    try {
+      session = await runtime.session();
+      const options: Options = {
+        systemPrompt: scoutSystemPrompt(config.team, deps.installed),
+        ...(model ? { model } : {}),
+        ...(effort ? { effort } : {}),
+        ...(runtime.managedSettings ? { managedSettings: runtime.managedSettings } : {}),
+        tools: [...SCOUT_TOOLS],
+        allowedTools: [...SCOUT_TOOLS],
+        // WebSearch too where the provider has no search: the Scout then reads the pages it knows with WebFetch.
+        disallowedTools: [...SCOUT_BLOCKED_TOOLS, ...runtime.disallowedTools],
+        permissionMode: "dontAsk",
+        settingSources: [],
+        strictMcpConfig: true,
+        persistSession: false,
+        verbatimPrompts: true,
+        outputFormat: { type: "json_schema", schema: CANDIDATES_SCHEMA },
+        maxTurns: SCOUT_MAX_TURNS,
+        maxBudgetUsd: SCOUT_BUDGET_USD,
+        cwd: tmp,
+        abortController: abort,
+        // Replaces the environment: the CLI sees none of the service's own secrets.
+        env: { PATH: process.env.PATH ?? "", HOME: tmp, LANG: "C.UTF-8", ...session.env, CLAUDE_AGENT_SDK_CLIENT_APP: "agent-army-scout/0.1.0" },
+      };
+      const queryFn = deps.queryFn ?? query;
+      for await (const message of queryFn({ prompt: `Find Claude skills for this need:\n${text}`, options })) {
+        watch.feed(message);
+        if (message.type !== "result") continue;
+        run.costUsd = message.total_cost_usd;
+        if (message.subtype === "success" && !message.is_error) run.output = message.structured_output;
+        else if (message.subtype === "success") run.failure = `The Scout could not search: ${message.result || "unknown error"}`;
+        else if (message.subtype === "error_max_budget_usd") run.failure = `The Scout stopped at its $${SCOUT_BUDGET_USD.toFixed(2)} budget before it finished. Try a narrower need.`;
+        else if (message.subtype === "error_max_turns") run.failure = "The Scout ran out of steps before it finished. Try a narrower need.";
+        else run.failure = `The Scout stopped: ${message.errors.join("; ") || message.subtype}`;
+      }
+    } catch (err) {
+      watch.thrown(err);
+      run.failure ??= `The Scout could not search: ${err instanceof Error ? err.message : String(err)}`;
+    } finally {
+      clearTimeout(timer);
+      await session?.dispose();
+      await rm(tmp, { recursive: true, force: true }).catch(() => undefined);
     }
-  } catch (err) {
-    failure ??= `The Scout could not search: ${err instanceof Error ? err.message : String(err)}`;
-  } finally {
-    clearTimeout(timer);
-    await session?.dispose();
-    await rm(tmp, { recursive: true, force: true }).catch(() => undefined);
+    // What it cost counts with chat, on the provider it ran on, against the caps, whether or not it found anything.
+    void deps.usage
+      ?.recordChat({ costUsd: run.costUsd, provider: runtime.provider, ...(run.costUsd !== undefined ? { agentCosts: { scout: { usd: run.costUsd } } } : {}) })
+      .then(() => deps.spending?.notify())
+      .catch((err: unknown) => console.error("[scout] cost not recorded:", err instanceof Error ? err.message : String(err)));
+    if (abort.signal.aborted) run.failure = `The Scout ran out of time (${Math.round(timeoutMs / 60_000) || 1} min).`;
+    else if (run.failure && watch.failure) run.providerFailure = watch.failure;
+    return run;
+  };
+
+  // On each provider of the route in turn while one fails for its own reasons (rate limit, credit, outage): a search changes nothing.
+  let spent: number | undefined;
+  const done = await acrossRoute(route.runtimes, async (runtime) => {
+    const run = await search(runtime);
+    if (run.costUsd !== undefined) spent = (spent ?? 0) + run.costUsd;
+    return { value: run, failure: run.providerFailure };
+  });
+  for (const note of done.fallback) console.warn(`[scout] ${fallbackLine(note, "took over")}`);
+  const { failure, output } = done.value;
+  if (failure) {
+    const happened = done.fallback.map((n) => ` ${fallbackLine(n, "took over")}`).join("");
+    return { ok: false, status: 502, error: redact(`${failure}${happened}`).slice(0, 500) };
   }
-  // What it cost counts with chat, against the monthly cap, whether or not it found anything.
-  void deps.usage
-    ?.recordChat({ costUsd, provider: runtime.provider, ...(costUsd !== undefined ? { agentCosts: { scout: { usd: costUsd } } } : {}) })
-    .then(() => deps.spending?.notify())
-    .catch((err: unknown) => console.error("[scout] cost not recorded:", err instanceof Error ? err.message : String(err)));
-  if (abort.signal.aborted) failure = `The Scout ran out of time (${Math.round((deps.timeoutMs ?? SCOUT_TIMEOUT_MS) / 60_000) || 1} min).`;
-  if (failure) return { ok: false, status: 502, error: redact(failure).slice(0, 500) };
-  return { ok: true, candidates: parseCandidates(output, config.team), ...(costUsd !== undefined ? { costUsd } : {}) };
+  return { ok: true, candidates: parseCandidates(output, config.team), ...(spent !== undefined ? { costUsd: spent } : {}) };
 }

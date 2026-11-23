@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Options, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { type Config, ConfigSchema } from "../../src/core/config.js";
 import type { QueryFn } from "../../src/chat/pointer.js";
 import { createApp } from "../../src/server.js";
@@ -147,6 +147,55 @@ describe("findSkills", () => {
     });
     expect(got).toEqual({ ok: false, status: 409, error: "This month's Claude budget is used up." });
     expect(calls).toHaveLength(0);
+  });
+
+  it("runs on the light work route: the next provider searches when one fails for its own reasons", async () => {
+    const KIMI = "sk-kimi-scout-secret-0042";
+    const calls: Options[] = [];
+    const queryFn: QueryFn = async function* (params) {
+      calls.push(params.options ?? {});
+      if (params.options?.env?.ANTHROPIC_AUTH_TOKEN === KIMI) throw new Error("API Error: 402 insufficient balance");
+      yield result({ structured_output: { candidates: [candidate()] } });
+    };
+    const recorded: [string | undefined, number | undefined][] = [];
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const got = await findSkills("pdf", {
+      config: config((c) => {
+        c.ai.providers.kimi = { secrets: { apiKey: KIMI }, settings: {}, models: {} };
+        c.ai.routes = { light: ["kimi", "anthropic"] };
+      }),
+      installed: [],
+      queryFn,
+      spending: { checkChat: async (kind) => (kind === "light" ? { ok: true } : { ok: false, error: "wrong route" }), notify: async () => {} },
+      usage: { recordChat: async (spend) => void recorded.push(typeof spend === "object" ? [spend.provider, spend.costUsd] : [undefined, spend]) },
+    });
+    warn.mockRestore();
+    expect(calls).toHaveLength(2);
+    // Kimi has no web search: WebSearch was left out there, not on Claude.
+    expect(calls[0]!.disallowedTools).toContain("WebSearch");
+    expect(calls[1]!.disallowedTools).not.toContain("WebSearch");
+    expect(got).toEqual({ ok: true, candidates: [candidate()], costUsd: 0.12 });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(recorded).toEqual([
+      ["kimi", undefined],
+      ["anthropic", 0.12],
+    ]);
+
+    // The work's own stop is not a provider failure: nobody else searches.
+    const turns: Options[] = [];
+    const stopped = await findSkills("pdf", {
+      config: config((c) => {
+        c.ai.providers.kimi = { secrets: { apiKey: KIMI }, settings: {}, models: {} };
+        c.ai.routes = { light: ["kimi", "anthropic"] };
+      }),
+      installed: [],
+      queryFn: async function* (params) {
+        turns.push(params.options ?? {});
+        yield result({ subtype: "error_max_turns", is_error: true });
+      },
+    });
+    expect(turns).toHaveLength(1);
+    expect(stopped).toMatchObject({ ok: false, status: 502, error: expect.stringContaining("ran out of steps") });
   });
 
   it("needs Claude and a need", async () => {
