@@ -5,6 +5,7 @@ import {
   Semaphore,
   dedupeKey,
   isExplicitMention,
+  messageRevision,
   queueKey,
   replyThreadTs,
   shouldRespond,
@@ -184,5 +185,30 @@ describe("RecentSet", () => {
     s.add("c");
     expect(s.has("a")).toBe(true);
     expect(s.has("b")).toBe(false);
+  });
+});
+
+describe("messageRevision", () => {
+  const e = (x: Partial<SlackMessageEvent>) => ({ type: "message", channel: "D2", channel_type: "im", ts: "9.9", ...x }) as SlackMessageEvent;
+
+  it("reads a person's edit, a deletion and a tombstone; nothing else", () => {
+    expect(messageRevision(e({ subtype: "message_deleted", deleted_ts: "5.1" }))).toEqual({ kind: "deleted", channel: "D2", ts: "5.1" });
+    expect(messageRevision(e({ subtype: "message_changed", message: { type: "message", user: "U2", ts: "5.1", thread_ts: "4.1", text: "new" } }))).toEqual({
+      kind: "edited",
+      channel: "D2",
+      ts: "5.1",
+      user: "U2",
+      message: { type: "message", channel: "D2", channel_type: "im", ts: "5.1", user: "U2", text: "new", thread_ts: "4.1" },
+    });
+    expect(messageRevision(e({ subtype: "message_changed", message: { type: "message", subtype: "tombstone", ts: "5.1", text: "This message was deleted." } }))).toEqual({
+      kind: "deleted",
+      channel: "D2",
+      ts: "5.1",
+    });
+    // A bot's edit, a new message, a deletion without its ts, another event.
+    expect(messageRevision(e({ subtype: "message_changed", message: { type: "message", user: "UBOT", bot_id: "B1", ts: "5.1", text: "x" } }))).toBeUndefined();
+    expect(messageRevision(e({ user: "U2", text: "hi" }))).toBeUndefined();
+    expect(messageRevision(e({ subtype: "message_deleted" }))).toBeUndefined();
+    expect(messageRevision(e({ type: "app_mention", subtype: "message_deleted", deleted_ts: "5.1" }))).toBeUndefined();
   });
 });

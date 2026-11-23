@@ -20,6 +20,37 @@ export function isPersonMessage(e: SlackMessageEvent): e is SlackMessageEvent & 
   return !e.subtype || HUMAN_SUBTYPES.has(e.subtype);
 }
 
+/** A person edited or deleted a message (Slack's message_changed and message_deleted). */
+export type MessageRevision =
+  | { kind: "deleted"; channel: string; ts: string }
+  /** `message`: the message as it reads now, as an event of its own. */
+  | { kind: "edited"; channel: string; ts: string; user: string; message: SlackMessageEvent };
+
+/**
+ * The edit or deletion of a message an event reports; undefined for anything
+ * else, a bot's edit included. A thread's first message deleted while it has
+ * replies stays as a tombstone: a deletion too. Pure.
+ */
+export function messageRevision(e: SlackMessageEvent): MessageRevision | undefined {
+  if (e.type !== "message" || !e.channel) return undefined;
+  if (e.subtype === "message_deleted") return e.deleted_ts ? { kind: "deleted", channel: e.channel, ts: e.deleted_ts } : undefined;
+  const m = e.message;
+  if (e.subtype !== "message_changed" || !m?.ts) return undefined;
+  if (m.subtype === "tombstone") return { kind: "deleted", channel: e.channel, ts: m.ts };
+  if (!m.user || m.bot_id) return undefined;
+  const message: SlackMessageEvent = {
+    type: "message",
+    channel: e.channel,
+    ts: m.ts,
+    user: m.user,
+    text: m.text ?? "",
+    ...(e.channel_type ? { channel_type: e.channel_type } : {}),
+    ...(m.thread_ts ? { thread_ts: m.thread_ts } : {}),
+    ...(m.files ? { files: m.files } : {}),
+  };
+  return { kind: "edited", channel: e.channel, ts: m.ts, user: m.user, message };
+}
+
 /** The text mentions this user (<@U123> or <@U123|name>). */
 export const mentionsUser = (text: string | undefined, userId: string | undefined): boolean =>
   Boolean(text && userId && (text.includes(`<@${userId}>`) || text.includes(`<@${userId}|`)));

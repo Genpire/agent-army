@@ -2,7 +2,7 @@ import { createHmac } from "node:crypto";
 import { WebClient } from "@slack/web-api";
 import { ATTACHMENT_LIMITS } from "../chat/attachments.js";
 import { safeEqual } from "../core/crypto.js";
-import type { ConversationMessage, SlackFileRef } from "../chat/pointer-types.js";
+import type { ConversationMessage, OutsideContent, SlackFileRef } from "../chat/pointer-types.js";
 import { messageText } from "./targeting.js";
 import { SLACK_USER_EVENTS, SLACK_USER_SCOPES } from "./user-account.js";
 
@@ -135,19 +135,68 @@ export async function userName(client: { users: Pick<WebClient["users"], "info">
   }
 }
 
-interface RawMessage {
+// ---------------------------------------------------------------------------
+// What Pointer's own posts are (Slack message metadata)
+
+/**
+ * The `metadata` event types on Pointer's own posts (chat.postMessage), read
+ * back from a conversation's history with include_all_metadata. Only posts by
+ * Pointer's bot are read for them; a post without one (from before them, or a
+ * path that sets none) is not a chat reply.
+ * - reply: Pointer's own chat reply to whoever it is talking with.
+ * - sent: a message it sent at someone's request (slack_send_message).
+ * - outside: a post that relays outside content (OutsideContent): an answer
+ *   passed on to the owner, a routine's report, a reply that read the owner's
+ *   inbox. Its payload's `level` says which.
+ */
+export const POINTER_POST_TYPES = {
+  reply: "pointer_chat_reply",
+  sent: "pointer_sent_message",
+  outside: "pointer_outside_content",
+} as const;
+
+export type PointerPostKind = keyof typeof POINTER_POST_TYPES;
+
+/** The metadata for one of Pointer's posts: its kind, where it comes from, and for outside content its level. Nothing private. */
+export function pointerPostMetadata(
+  kind: PointerPostKind,
+  source: string,
+  level?: OutsideContent,
+): { event_type: string; event_payload: { source: string; level?: OutsideContent } } {
+  return { event_type: POINTER_POST_TYPES[kind], event_payload: { source, ...(kind === "outside" ? { level: level ?? "inbox" } : {}) } };
+}
+
+/** A message as conversations.history and .replies return it, with its metadata. */
+export interface RawMessage {
   ts?: string;
   user?: string;
   bot_id?: string;
   text?: string;
   files?: unknown;
+  metadata?: { event_type?: string; event_payload?: unknown };
+}
+
+/** What a post of Pointer's metadata says it is; undefined for none (or someone else's type). */
+export function pointerPostKind(m: Pick<RawMessage, "metadata">): PointerPostKind | undefined {
+  const type = m.metadata?.event_type;
+  return (Object.keys(POINTER_POST_TYPES) as PointerPostKind[]).find((k) => POINTER_POST_TYPES[k] === type);
+}
+
+/** The outside content a post of Pointer's relays, from its metadata; a level Slack did not keep counts as "inbox", the stricter one. */
+export function relayedContent(m: Pick<RawMessage, "metadata">): OutsideContent | undefined {
+  if (pointerPostKind(m) !== "outside") return undefined;
+  const payload = m.metadata?.event_payload;
+  const level = payload && typeof payload === "object" ? (payload as { level?: unknown }).level : undefined;
+  return level === "read" ? "read" : "inbox";
 }
 
 /**
  * The conversation before a new message, oldest first: the thread (via
  * conversations.replies) or, for a top-level DM message, recent DM history.
  * A top-level channel message starts a new thread and has no history.
- * Long threads keep their first message plus the latest ones. Never throws.
+ * Long threads keep their first message plus the latest ones. Pointer's posts
+ * that relayed outside content say so (outsideContent, from their metadata):
+ * the reply then starts as if it had read it (pointer.ts). Never throws.
  */
 export async function fetchConversation(
   client: WebClient,
@@ -165,8 +214,9 @@ export async function fetchConversation(
 ): Promise<ConversationMessage[]> {
   try {
     let raw: RawMessage[];
+    // With the metadata: it says which of Pointer's posts relayed outside content.
     if (opts.threadTs) {
-      const res = await client.conversations.replies({ channel: opts.channel, ts: opts.threadTs, limit: 200 });
+      const res = await client.conversations.replies({ channel: opts.channel, ts: opts.threadTs, limit: 200, include_all_metadata: true });
       raw = res.messages ?? [];
     } else if (opts.isDm) {
       const res = await client.conversations.history({
@@ -174,6 +224,7 @@ export async function fetchConversation(
         latest: opts.beforeTs,
         inclusive: false,
         limit: opts.limit,
+        include_all_metadata: true,
       });
       raw = (res.messages ?? []).slice().reverse();
     } else {
@@ -193,6 +244,7 @@ export async function fetchConversation(
     return kept.map((m) => {
       const mine = isPointer(m);
       const files = slackFileRefs(m.files);
+      const relayed = mine ? relayedContent(m) : undefined;
       return {
         ts: m.ts,
         userId: m.user,
@@ -200,6 +252,7 @@ export async function fetchConversation(
         text: messageText(m.text ?? "", opts.botUserId),
         isPointer: mine,
         ...(files.length ? { files } : {}),
+        ...(relayed ? { outsideContent: relayed } : {}),
       };
     });
   } catch {

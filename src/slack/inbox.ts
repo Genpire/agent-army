@@ -3,8 +3,18 @@ import type { SlackMessageEvent } from "../chat/pointer-types.js";
 import type { Config } from "../core/config.js";
 import { decrypt, encrypt } from "../core/crypto.js";
 import type { Store } from "../core/store.js";
-import { isPersonMessage, isThreadReply, mentionsUser } from "./listen.js";
-import { OUTREACH_LIMITS, type Outreach, answerCandidate, answeredOutreach, outreachOpen } from "./outreach.js";
+import { isPersonMessage, isThreadReply, mentionsUser, messageRevision } from "./listen.js";
+import {
+  type AnswerCandidate,
+  type AnswerMatch,
+  type AnswerRevision,
+  OUTREACH_LIMITS,
+  type Outreach,
+  answerCandidate,
+  matchAnswer,
+  outreachOpen,
+  outreachStillCurrent,
+} from "./outreach.js";
 import { slackErrorCode, slackFileRefs, tsAfter, tsDate, userName } from "./slack.js";
 
 /**
@@ -28,15 +38,18 @@ import { slackErrorCode, slackFileRefs, tsAfter, tsDate, userName } from "./slac
  * Also the messages Pointer sent for the owner as itself, and the answers
  * people gave it (outreach.ts): an answer is an item with where "to_pointer",
  * kept with the outreach it answers. Those come from Pointer's own
- * conversations (its bot's events), never from the owner's token.
+ * conversations (its bot's events), never from the owner's token. A message
+ * edited or deleted is changed or removed here with it (revise).
  *
  * One encrypted blob in the store; texts redacted and clipped; kept 14 days,
- * at most 3 000 items (and 1 000 outreaches), and what is older is dropped on
- * every read and write.
+ * at most 3 000 items that reached the owner's account and, apart from them,
+ * 2 000 answers (20 per outreach) and 1 000 outreaches; what is older is
+ * dropped on every read and write.
  * Changes are collected for about a second and written at once, one write at
  * a time in this process (Cloud Storage takes about one write per second per
- * object); a change that changes nothing writes nothing. clear() empties it
- * and drops every change that started before it.
+ * object); a change that changes nothing writes nothing. clear() empties it,
+ * drops every change that started before it, and tells its listeners (the
+ * notices still waiting go too: server.ts).
  */
 
 export const INBOX_LIMITS = {
@@ -62,6 +75,18 @@ const OUTSIDE_TTL_MS = 60_000;
 const MAX_KNOWN_CONVERSATIONS = 5_000;
 /** Changes collected before one write. */
 const WRITE_BATCH_MS = 1_000;
+/** Edits and deletions remembered for messages still on their way to a write. */
+const REVISION_TTL_MS = 10 * 60_000;
+const MAX_REVISIONS = 1_000;
+/** Answers to "is the outreach still what the DM is about?" remembered per message. */
+const MAX_KNOWN_CHECKS = 500;
+
+/** An edit (`message`: how it reads now) or a deletion, remembered until `until`. */
+interface Revision {
+  deleted: boolean;
+  message?: SlackMessageEvent;
+  until: number;
+}
 
 /**
  * Where a message reached the owner; "to_pointer": an answer to a message
@@ -130,11 +155,18 @@ export interface CapturedAnswer {
   item: InboxItem;
 }
 
-/** The Slack calls the inbox makes. */
+/**
+ * The Slack calls the inbox makes: the bot's token names people and reads
+ * Pointer's DM between an outreach and its answer (outreachStillCurrent); the
+ * owner's says which conversations are theirs.
+ */
 export interface InboxSlackClient {
   users: Pick<WebClient["users"], "info">;
-  conversations: Pick<WebClient["conversations"], "info">;
+  conversations: Pick<WebClient["conversations"], "info" | "history">;
 }
+
+/** What the owner's token is asked about a conversation. */
+export type OwnerConversationsClient = { conversations: Pick<WebClient["conversations"], "info"> };
 
 export interface CaptureContext {
   config: Config;
@@ -144,6 +176,22 @@ export interface CaptureContext {
    */
   client: (token: string) => InboxSlackClient;
   redact: (text: string) => string;
+}
+
+/**
+ * Whose inbox an outreach goes to, as it was when the request that sends it
+ * started (outreachTicket): it is kept only if nothing cleared the inbox
+ * since, and the account is still that owner's, listening.
+ */
+export interface OutreachTicket {
+  ownerId: string;
+  generation: number;
+}
+
+/** What recordOutreach checks against now: the current config, and a client for the owner's token. */
+export interface OutreachContext {
+  config: Config;
+  ownerClient: (token: string) => OwnerConversationsClient;
 }
 
 /** What one Slack event is for the inbox. */
@@ -176,6 +224,8 @@ const byTs = (a: string, b: string) => (tsAfter(a, b) ? 1 : tsAfter(b, a) ? -1 :
 
 const threadKey = (channel: string, threadTs: string) => `${channel}:${threadTs}`;
 const markKey = (ownerId: string, key: string) => `${ownerId}|${key}`;
+/** Answers kept for an outreach. */
+const answerCount = (data: Pick<InboxData, "items">, outreachId: string) => data.items.reduce((n, i) => n + Number(i.outreachId === outreachId), 0);
 
 /**
  * The owner answered after this item: in its thread (a top-level message's
@@ -229,7 +279,8 @@ interface PendingChange {
   starts: boolean;
   /** The marks it holds in `marking`. */
   marks: string[];
-  done: () => void;
+  /** `kept`: it was applied and is stored (written, or nothing to write); false when dropped or the write failed. */
+  done: (kept: boolean) => void;
 }
 
 /** Why a write failed, for the log: never the inbox's content. */
@@ -259,6 +310,17 @@ export class SlackInbox {
   private pending: PendingChange[] = [];
   /** Threads the owner wrote in (`owner|key`) whose mark waits for its write, counted. */
   private readonly marking = new Map<string, number>();
+  /** Messages on their way to a write (`channel:ts`), counted: an edit or deletion that arrives meanwhile still finds them. */
+  private readonly inFlight = new Map<string, number>();
+  /**
+   * Edits and deletions seen lately, by message id (`channel:ts`): an answer
+   * whose capture was still on its way is kept as it reads now, or not at all.
+   */
+  private readonly revisions = new Map<string, { deleted: boolean; message?: SlackMessageEvent; until: number }>();
+  /** outreachStillCurrent per outreach and message: a message's route and capture ask Slack once. */
+  private readonly current = new Map<string, Promise<boolean>>();
+  /** Told when clear() runs. */
+  private readonly clearListeners: (() => void)[] = [];
   private timer: ReturnType<typeof setTimeout> | undefined;
   private readonly now: () => Date;
   private readonly batchMs: number;
@@ -270,6 +332,11 @@ export class SlackInbox {
   ) {
     this.now = opts.now ?? (() => new Date());
     this.batchMs = opts.batchMs ?? WRITE_BATCH_MS;
+  }
+
+  /** Calls `listener` whenever clear() runs (the notices still waiting for the owner go with the inbox). */
+  onClear(listener: () => void): void {
+    this.clearListeners.push(listener);
   }
 
   /**
@@ -313,33 +380,42 @@ export class SlackInbox {
 
     const botToken = ctx.config.slack.botToken;
     if (!botToken) return;
-    const facts = await this.facts(ctx.client(account.token), ownerId, signal.channel, account.userName, generation);
-    // Not theirs (or Slack could not say), or their DM with Pointer: never an inbox item.
-    if (!facts?.member || (facts.dmWith && facts.dmWith === ctx.config.slack.botUserId)) return;
+    const id = `${signal.channel}:${signal.ts}`;
+    this.hold(id, 1);
+    try {
+      const facts = await this.facts(ctx.client(account.token), ownerId, signal.channel, account.userName, generation);
+      // Not theirs (or Slack could not say), or their DM with Pointer: never an inbox item.
+      if (!facts?.member || (facts.dmWith && facts.dmWith === ctx.config.slack.botUserId)) return;
 
-    const bot = ctx.client(botToken);
-    const sender = await userName(bot, e.user!);
-    const text = await this.readable(e, bot, ctx.redact);
-    await this.write(ownerId, generation, (data) => {
-      const id = `${signal.channel}:${signal.ts}`;
-      if (data.items.some((i) => i.id === id)) return false;
-      const followed = followedKey !== undefined && data.answered[followedKey] !== undefined;
-      if (signal.where === "channel" && !signal.mentioned && !followed) return false;
-      data.items.push({
-        id,
-        channel: signal.channel,
-        channelName: signal.where === "dm" ? sender : facts.name,
-        where: signal.where,
-        ts: signal.ts,
-        ...(signal.threadTs ? { threadTs: signal.threadTs } : {}),
-        userId: e.user!,
-        userName: sender,
-        mentioned: signal.mentioned,
-        followed,
-        text,
+      const bot = ctx.client(botToken);
+      // Edited or deleted before it was kept: kept as it reads now, or not at all.
+      const used = this.revisionOf(id);
+      if (used?.deleted) return;
+      const sender = await userName(bot, e.user!);
+      const text = await this.readable(used?.message ?? e, bot, ctx.redact);
+      const kept = await this.write(ownerId, generation, (data) => {
+        if (data.items.some((i) => i.id === id)) return false;
+        const followed = followedKey !== undefined && data.answered[followedKey] !== undefined;
+        if (signal.where === "channel" && !signal.mentioned && !followed) return false;
+        data.items.push({
+          id,
+          channel: signal.channel,
+          channelName: signal.where === "dm" ? sender : facts.name,
+          where: signal.where,
+          ts: signal.ts,
+          ...(signal.threadTs ? { threadTs: signal.threadTs } : {}),
+          userId: e.user!,
+          userName: sender,
+          mentioned: signal.mentioned,
+          followed,
+          text,
+        });
+        return true;
       });
-      return true;
-    });
+      if (kept) await this.reviseLate(ownerId, generation, id, used, bot, ctx.redact);
+    } finally {
+      this.hold(id, -1);
+    }
   }
 
   /**
@@ -373,15 +449,57 @@ export class SlackInbox {
   }
 
   /**
-   * Keeps a message Pointer sent for the owner as itself (outreach.ts), so
-   * that answers to it reach the owner; resolves once it is written. The
-   * caller has checked that the request is the owner's and that listening is on.
+   * Taken when a request that may send a message for the owner starts
+   * (slack-tools.ts): recordOutreach keeps nothing once the inbox was cleared
+   * after it, or the account is no longer that owner's.
    */
-  async recordOutreach(ownerId: string, outreach: Outreach): Promise<void> {
+  outreachTicket(ownerId: string): OutreachTicket {
+    return { ownerId, generation: this.generation };
+  }
+
+  /**
+   * Whether a message Pointer sends for the owner to this place would be kept
+   * as an outreach, checked now: nothing cleared the inbox since the request
+   * started, the account is still that owner's with listening on, and a
+   * channel is one the owner is a member of (their own token says so; a DM,
+   * D…, is Pointer's with someone). `channel` is absent for a DM to a person.
+   * With the channel's name when Slack gave it. Never throws.
+   */
+  async outreachPlace(ticket: OutreachTicket, ctx: OutreachContext, channel: string | undefined): Promise<{ keep: boolean; name?: string }> {
+    const account = this.outreachAccount(ticket, ctx.config);
+    if (!account) return { keep: false };
+    if (!channel || channel.startsWith("D")) return { keep: true };
+    try {
+      const facts = await this.facts(ctx.ownerClient(account.token), account.userId, channel, account.userName, ticket.generation);
+      return facts?.member ? { keep: true, name: facts.name } : { keep: false };
+    } catch {
+      return { keep: false };
+    }
+  }
+
+  /** The owner's account when an outreach taken with this ticket may still be kept. */
+  private outreachAccount(ticket: OutreachTicket, config: Config): NonNullable<Config["slack"]["user"]> | undefined {
+    const account = config.slack.user;
+    if (ticket.generation !== this.generation || !config.slack.botToken) return undefined;
+    return account?.listen && account.userId === ticket.ownerId ? account : undefined;
+  }
+
+  /**
+   * Keeps a message Pointer sent for the owner as itself (outreach.ts), so
+   * that answers to it reach the owner; resolves true once it is written.
+   * Checked again here against `ctx` (outreachPlace): never after the inbox
+   * was cleared since the request started (listening turned off, the account
+   * disconnected or replaced), never to the owner themselves, and a channel
+   * only where the owner is a member.
+   */
+  async recordOutreach(ticket: OutreachTicket, outreach: Outreach, ctx: OutreachContext): Promise<boolean> {
+    if (outreach.recipient === ticket.ownerId) return false;
+    const place = await this.outreachPlace(ticket, ctx, outreach.where === "channel" ? outreach.channel : undefined);
+    if (!place.keep) return false;
     const kept: Outreach = { ...outreach, text: clip(outreach.text, OUTREACH_LIMITS.text) };
-    await this.write(
-      ownerId,
-      this.generation,
+    return this.write(
+      ticket.ownerId,
+      ticket.generation,
       (data) => {
         if (data.outreach.some((o) => o.id === kept.id)) return false;
         data.outreach.push(kept);
@@ -392,21 +510,27 @@ export class SlackInbox {
     );
   }
 
-  /** The outreach this message answers (outreach.ts), without keeping anything: for Pointer's reply to it. */
-  async answering(e: SlackMessageEvent, config: Config): Promise<Outreach | undefined> {
+  /**
+   * The outreach this message answers (outreach.ts), without keeping
+   * anything: for Pointer's reply to it. `bot` (the bot's token) reads
+   * Pointer's DM when the DM rule decides (outreachStillCurrent).
+   */
+  async answering(e: SlackMessageEvent, config: Config, bot: InboxSlackClient): Promise<Outreach | undefined> {
     const account = config.slack.user;
     if (!account?.listen) return undefined;
     const m = answerCandidate(e, account.userId, config.slack.botUserId);
     if (!m) return undefined;
     const data = this.last?.ownerId === account.userId ? this.last : await this.read(account.userId);
-    return data.outreach.length ? answeredOutreach(m, data.outreach, data.items) : undefined;
+    const match = data.outreach.length ? matchAnswer(m, data.outreach, data.items) : undefined;
+    return match && (await this.stillCurrent(bot, match, m, config.slack.botUserId)) ? match.outreach : undefined;
   }
 
   /**
    * Keeps a message that answers an outreach (outreach.ts) as an item of the
    * owner's inbox, and resolves with it once written; undefined when it
    * answers none (most messages: decided from what is in memory, without
-   * asking Slack). A clear() while it runs drops it.
+   * asking Slack), the outreach has its 20 answers, or it was deleted on the
+   * way. An edit that came on the way is kept. A clear() while it runs drops it.
    */
   async captureAnswer(e: SlackMessageEvent, ctx: CaptureContext): Promise<CapturedAnswer | undefined> {
     const generation = this.generation;
@@ -417,61 +541,202 @@ export class SlackInbox {
     const m = answerCandidate(e, ownerId, ctx.config.slack.botUserId);
     if (!m) return undefined;
     const data = this.last?.ownerId === ownerId ? this.last : await this.read(ownerId);
-    if (!data.outreach.length || !answeredOutreach(m, data.outreach, data.items)) return undefined;
+    const match = data.outreach.length ? matchAnswer(m, data.outreach, data.items) : undefined;
+    if (!match || answerCount(data, match.outreach.id) >= OUTREACH_LIMITS.answers) return undefined;
 
-    const bot = ctx.client(botToken);
-    const [sender, text] = await Promise.all([userName(bot, m.userId), this.readable(e, bot, ctx.redact)]);
-    const out: { captured?: CapturedAnswer } = {};
-    await this.write(
-      ownerId,
-      generation,
-      (d) => {
-        // Decided again on what is stored now: another answer may have been kept since.
-        const outreach = answeredOutreach(m, d.outreach, d.items);
-        const id = `${m.channel}:${m.ts}`;
-        if (!outreach || d.items.some((i) => i.id === id)) return false;
-        const item: InboxItem = {
-          id,
-          channel: m.channel,
-          channelName: outreach.where === "dm" ? sender : outreach.recipientName,
-          where: "to_pointer",
-          ts: m.ts,
-          ...(m.threadTs ? { threadTs: m.threadTs } : {}),
-          userId: m.userId,
-          userName: sender,
-          mentioned: false,
-          followed: false,
-          text,
-          outreachId: outreach.id,
-        };
-        d.items.push(item);
-        out.captured = { outreach, item };
-        return true;
-      },
-      [],
-      false,
-    );
-    return out.captured;
+    const id = `${m.channel}:${m.ts}`;
+    this.hold(id, 1);
+    try {
+      const bot = ctx.client(botToken);
+      if (!(await this.stillCurrent(bot, match, m, ctx.config.slack.botUserId))) return undefined;
+      // Edited or deleted before it was kept: kept as it reads now, or not at all.
+      const used = this.revisionOf(id);
+      if (used?.deleted) return undefined;
+      const [sender, text] = await Promise.all([userName(bot, m.userId), this.readable(used?.message ?? e, bot, ctx.redact)]);
+      const out: { captured?: CapturedAnswer } = {};
+      await this.write(
+        ownerId,
+        generation,
+        (d) => {
+          // Decided again on what is stored now: another answer may have been kept since, or another outreach sent.
+          const again = matchAnswer(m, d.outreach, d.items);
+          if (again?.outreach.id !== match.outreach.id || d.items.some((i) => i.id === id)) return false;
+          if (this.revisionOf(id)?.deleted || answerCount(d, match.outreach.id) >= OUTREACH_LIMITS.answers) return false;
+          const item: InboxItem = {
+            id,
+            channel: m.channel,
+            channelName: again.outreach.where === "dm" ? sender : again.outreach.recipientName,
+            where: "to_pointer",
+            ts: m.ts,
+            ...(m.threadTs ? { threadTs: m.threadTs } : {}),
+            userId: m.userId,
+            userName: sender,
+            mentioned: false,
+            followed: false,
+            text,
+            outreachId: again.outreach.id,
+          };
+          d.items.push(item);
+          out.captured = { outreach: again.outreach, item };
+          return true;
+        },
+        [],
+        false,
+      );
+      const captured = out.captured;
+      if (!captured) return undefined;
+      // An edit or deletion that came while it was written applies now.
+      const late = await this.reviseLate(ownerId, generation, id, used, bot, ctx.redact);
+      if (late?.deleted) return undefined;
+      return late?.text !== undefined ? { ...captured, item: { ...captured.item, text: late.text } } : captured;
+    } finally {
+      this.hold(id, -1);
+    }
+  }
+
+  /**
+   * An edit or deletion (Slack's message_changed and message_deleted, read by
+   * messageRevision): a kept message, an answer or what reached the owner, is
+   * changed or removed with it, and an answer on its way to a write is kept as
+   * it reads now, or not at all. Resolves with what a notice still waiting
+   * should do (AnswerNotifier.revise): every deletion, and an edit of a kept
+   * message with its new text; undefined for anything else. Never logs text.
+   */
+  async revise(e: SlackMessageEvent, ctx: CaptureContext): Promise<AnswerRevision | undefined> {
+    const generation = this.generation;
+    const account = ctx.config.slack.user;
+    const botToken = ctx.config.slack.botToken;
+    if (!account?.listen || !botToken) return undefined;
+    const r = messageRevision(e);
+    if (!r) return undefined;
+    const id = `${r.channel}:${r.ts}`;
+    const deleted = r.kind === "deleted";
+    const revision = this.remember(id, deleted ? { deleted } : { deleted, message: r.message });
+    const gone: AnswerRevision | undefined = deleted ? { id, deleted } : undefined;
+    // On its way to a write: the capture applies it once written.
+    if (this.inFlight.has(id)) return gone;
+    const ownerId = account.userId;
+    const data = this.last?.ownerId === ownerId ? this.last : await this.read(ownerId);
+    const stored = data.items.find((i) => i.id === id);
+    if (!stored || (r.kind === "edited" && r.user !== stored.userId)) return gone;
+    const text = await this.applyRevision(ownerId, generation, id, revision, ctx.client(botToken), ctx.redact);
+    return deleted ? gone : { id, deleted, ...(text !== undefined ? { text } : {}) };
   }
 
   /**
    * Forgets everything (the account was disconnected or replaced, or reading
    * what reaches the owner was turned off): the stored inbox, what is queued,
    * what is known of the owner's conversations, and every change that started
-   * before (a capture still waiting on Slack writes nothing).
+   * before (a capture still waiting on Slack writes nothing); then tells the
+   * listeners (onClear).
    */
   clear(): Promise<void> {
     this.generation++;
     clearTimeout(this.timer);
     this.timer = undefined;
-    for (const p of this.pending.splice(0)) this.settle(p);
+    for (const p of this.pending.splice(0)) this.settle(p, false);
     this.marking.clear();
     this.known.clear();
+    this.revisions.clear();
+    this.current.clear();
     this.last = undefined;
+    for (const listener of this.clearListeners) {
+      try {
+        listener();
+      } catch (err) {
+        console.error("[slack] a listener of the inbox's clear failed:", writeError(err));
+      }
+    }
     return this.exclusive(async () => {
       await this.store.put(INBOX_KEY, "");
       this.last = undefined;
     });
+  }
+
+  /** A thread's reply answers; a DM message only while the outreach is still what the DM is about, asked of Slack once per message. */
+  private stillCurrent(bot: InboxSlackClient, match: AnswerMatch, m: AnswerCandidate, botUserId: string | undefined): Promise<boolean> {
+    if (match.rule === "thread") return Promise.resolve(true);
+    const key = `${match.outreach.id}|${match.since}|${m.channel}:${m.ts}`;
+    const hit = this.current.get(key);
+    if (hit) return hit;
+    const asked = outreachStillCurrent(bot, match, m, botUserId);
+    this.current.set(key, asked);
+    for (const oldest of this.current.keys()) {
+      if (this.current.size <= MAX_KNOWN_CHECKS) break;
+      this.current.delete(oldest);
+    }
+    return asked;
+  }
+
+  /** A capture of this message starts (+1) or ends (-1). */
+  private hold(id: string, by: 1 | -1): void {
+    const left = (this.inFlight.get(id) ?? 0) + by;
+    if (left > 0) this.inFlight.set(id, left);
+    else this.inFlight.delete(id);
+  }
+
+  /** Remembers an edit or deletion for a while (REVISION_TTL_MS); returns what it remembered. */
+  private remember(id: string, r: { deleted: boolean; message?: SlackMessageEvent }): Revision {
+    const revision: Revision = { ...r, until: this.now().getTime() + REVISION_TTL_MS };
+    this.revisions.delete(id);
+    this.revisions.set(id, revision);
+    for (const oldest of this.revisions.keys()) {
+      if (this.revisions.size <= MAX_REVISIONS) break;
+      this.revisions.delete(oldest);
+    }
+    return revision;
+  }
+
+  private revisionOf(id: string): Revision | undefined {
+    const hit = this.revisions.get(id);
+    if (!hit) return undefined;
+    if (hit.until > this.now().getTime()) return hit;
+    this.revisions.delete(id);
+    return undefined;
+  }
+
+  /** After a message was written: an edit or deletion newer than the one it was written with applies now. */
+  private async reviseLate(
+    ownerId: string,
+    generation: number,
+    id: string,
+    used: Revision | undefined,
+    bot: InboxSlackClient,
+    redact: (text: string) => string,
+  ): Promise<{ deleted: boolean; text?: string } | undefined> {
+    const now = this.revisionOf(id);
+    if (!now || now === used) return undefined;
+    const text = await this.applyRevision(ownerId, generation, id, now, bot, redact);
+    return { deleted: now.deleted, ...(text !== undefined ? { text } : {}) };
+  }
+
+  /** Removes a kept message, or gives it its edited text (only its author's edit); resolves with that text. */
+  private async applyRevision(
+    ownerId: string,
+    generation: number,
+    id: string,
+    r: Pick<Revision, "deleted" | "message">,
+    bot: InboxSlackClient,
+    redact: (text: string) => string,
+  ): Promise<string | undefined> {
+    const edited = r.deleted ? undefined : r.message;
+    const text = edited ? await this.readable(edited, bot, redact) : undefined;
+    await this.write(
+      ownerId,
+      generation,
+      (d) => {
+        const i = d.items.findIndex((x) => x.id === id);
+        if (i < 0) return false;
+        if (r.deleted) return d.items.splice(i, 1).length > 0;
+        const item = d.items[i]!;
+        if (text === undefined || item.userId !== edited?.user || item.text === text) return false;
+        d.items[i] = { ...item, text };
+        return true;
+      },
+      [],
+      false,
+    );
+    return text;
   }
 
   /** Writes the queued changes now, in one write; a write that fails twice is logged with how many were lost. Never throws. */
@@ -480,6 +745,8 @@ export class SlackInbox {
     this.timer = undefined;
     return this.exclusive(async () => {
       const batch = this.pending.splice(0);
+      /** The changes applied and stored. */
+      const kept = new Set<PendingChange>();
       try {
         // Changes from before a clear() are dropped; so are another owner's (a new account starts empty).
         const current = batch.filter((p) => p.generation === this.generation);
@@ -490,14 +757,16 @@ export class SlackInbox {
         let changed = false;
         for (const p of changes) changed = p.change(data) || changed;
         const starts = !data.startedAt && changes.some((p) => p.starts);
-        if (!changed && !starts) return;
-        if (starts) data.startedAt = this.now().toISOString();
-        this.prune(data);
-        await this.put(data);
+        if (changed || starts) {
+          if (starts) data.startedAt = this.now().toISOString();
+          this.prune(data);
+          await this.put(data);
+        }
+        for (const p of changes) kept.add(p);
       } catch (err) {
         console.error(`[slack] inbox write failed, ${batch.length} change${batch.length === 1 ? "" : "s"} not kept:`, writeError(err));
       } finally {
-        for (const p of batch) this.settle(p);
+        for (const p of batch) this.settle(p, kept.has(p));
       }
     });
   }
@@ -537,11 +806,13 @@ export class SlackInbox {
 
   /**
    * Queues a change for the next write (in about a second); resolves once it
-   * is written or dropped. `marks`: threads the owner wrote in. `starts`:
-   * something that reached the owner's own account (PendingChange.starts).
+   * is written (true; also when it changed nothing) or dropped (false: a
+   * clear() came first, another owner's change won, or the write failed).
+   * `marks`: threads the owner wrote in. `starts`: something that reached the
+   * owner's own account (PendingChange.starts).
    */
-  private write(ownerId: string, generation: number, change: (data: InboxData) => boolean, marks: string[] = [], starts = true): Promise<void> {
-    if (generation !== this.generation) return Promise.resolve();
+  private write(ownerId: string, generation: number, change: (data: InboxData) => boolean, marks: string[] = [], starts = true): Promise<boolean> {
+    if (generation !== this.generation) return Promise.resolve(false);
     const held = marks.map((key) => markKey(ownerId, key));
     for (const key of held) this.marking.set(key, (this.marking.get(key) ?? 0) + 1);
     return new Promise((done) => {
@@ -551,18 +822,20 @@ export class SlackInbox {
   }
 
   /** A queued change is written or dropped: its marks go, its capture resolves. */
-  private settle(p: PendingChange): void {
+  private settle(p: PendingChange, kept: boolean): void {
     for (const key of p.marks) {
       const left = (this.marking.get(key) ?? 0) - 1;
       if (left > 0) this.marking.set(key, left);
       else this.marking.delete(key);
     }
-    p.done();
+    p.done(kept);
   }
 
   /**
    * Drops what is older than 14 days, then the oldest beyond the limits; an
-   * answer goes with the outreach it answers. True when it dropped anything.
+   * answer goes with the outreach it answers. What reached the owner's own
+   * account and the answers to Pointer's messages have limits of their own:
+   * answers never push the owner's messages out. True when it dropped anything.
    */
   private prune(data: InboxData): boolean {
     const size = () => data.items.length + Object.keys(data.answered).length + data.outreach.length;
@@ -575,10 +848,11 @@ export class SlackInbox {
       .sort((a, b) => byTs(a.ts, b.ts))
       .slice(-OUTREACH_LIMITS.items);
     const kept = new Set(data.outreach.map((o) => o.id));
-    data.items = data.items
-      .filter((i) => recent(i.ts) && (!i.outreachId || kept.has(i.outreachId)))
-      .sort((a, b) => byTs(a.ts, b.ts))
-      .slice(-INBOX_LIMITS.items);
+    const live = data.items.filter((i) => recent(i.ts) && (!i.outreachId || kept.has(i.outreachId))).sort((a, b) => byTs(a.ts, b.ts));
+    data.items = [
+      ...live.filter((i) => !i.outreachId).slice(-INBOX_LIMITS.items),
+      ...live.filter((i) => i.outreachId).slice(-OUTREACH_LIMITS.allAnswers),
+    ].sort((a, b) => byTs(a.ts, b.ts));
     const answered = Object.entries(data.answered)
       .filter(([, ts]) => recent(ts))
       .sort(([, a], [, b]) => byTs(a, b))
@@ -588,7 +862,7 @@ export class SlackInbox {
   }
 
   /** Whether the owner is in a conversation and what to call it, from their own token (cached per owner). */
-  private async facts(client: InboxSlackClient, ownerId: string, channel: string, ownerHandle: string, generation: number): Promise<Facts | undefined> {
+  private async facts(client: OwnerConversationsClient, ownerId: string, channel: string, ownerHandle: string, generation: number): Promise<Facts | undefined> {
     const cacheKey = `${ownerId}:${channel}`;
     const hit = this.known.get(cacheKey);
     if (hit && hit.until > this.now().getTime()) return hit.facts;

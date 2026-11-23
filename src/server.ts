@@ -324,6 +324,8 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
   registerSlackInbox(configRepo, inbox);
   // Answers to messages Pointer sent for the owner: a DM to the owner as they arrive (slack/outreach.ts).
   const answers = new AnswerNotifier({ configRepo, slack: slackFactory });
+  // Emptying the inbox (listening off, disconnected, another account) drops the notices still waiting too.
+  inbox.onClear(() => answers.clear());
   const slackDeps: SlackDeps & { web: WebThreads; spending: Spending; inbox: SlackInbox; answers: AnswerNotifier } = {
     configRepo,
     tasks,

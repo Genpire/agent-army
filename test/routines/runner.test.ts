@@ -150,8 +150,21 @@ describe("delivery", () => {
     expect(env.slack.messages[0]!.text).not.toContain("<!channel>");
     expect(env.slack.messages[0]!.text).not.toContain(SECRETS.ghToken);
 
-    expect(env.threads.started).toEqual([{ id: "c-conversation-1", title: "Daily GitHub digest", markdown: expect.stringContaining("Merged #12.") }]);
+    // A report is outside content: a reply after it (in Slack or the console) starts as if it had read it.
+    expect(env.slack.messages[0]!.metadata).toEqual({ event_type: "pointer_outside_content", event_payload: { source: "routine_report", level: "read" } });
+    expect(env.threads.started).toEqual([{ id: "c-conversation-1", title: "Daily GitHub digest", markdown: expect.stringContaining("Merged #12."), relayed: "read" }]);
     expect(env.threads.started[0]!.markdown).not.toContain(SECRETS.ghToken);
+  });
+
+  it("marks a report that read the owner's inbox as what other people wrote", async () => {
+    const env = await routineEnv({ brain: fakeBrain(() => ({ text: "Sam needs the deck.", isError: false, readInbox: true })) });
+    const created = await env.service.create({ ...DIGEST, slack: "C0ACMEDEV1" }, "test");
+    if (!created.ok) throw new Error(created.error);
+    const started = await env.service.runNow(created.routine.id);
+    if (!started.ok) throw new Error(started.error);
+    await started.done;
+    expect(env.slack.messages[0]!.metadata).toEqual({ event_type: "pointer_outside_content", event_payload: { source: "routine_report", level: "inbox" } });
+    expect(env.threads.started[0]!.relayed).toBe("inbox");
   });
 
   it("appends to the same console conversation and skips recipients that are not set", async () => {

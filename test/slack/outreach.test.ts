@@ -6,7 +6,7 @@ import type { SlackMessageEvent } from "../../src/chat/pointer-types.js";
 import { type Config, ConfigSchema } from "../../src/core/config.js";
 import { decrypt, deriveKey, encrypt } from "../../src/core/crypto.js";
 import { FsStore } from "../../src/core/store.js";
-import { type InboxItem, SlackInbox } from "../../src/slack/inbox.js";
+import { INBOX_LIMITS, type InboxItem, SlackInbox } from "../../src/slack/inbox.js";
 import {
   AnswerNotifier,
   OUTREACH_LIMITS,
@@ -14,6 +14,7 @@ import {
   answerCandidate,
   answerNotice,
   answeredOutreach,
+  matchAnswer,
 } from "../../src/slack/outreach.js";
 import { makeRedactor } from "../../src/tasks/worker.js";
 
@@ -98,33 +99,71 @@ function config(patch: Partial<NonNullable<Config["slack"]["user"]>> = {}): Conf
   });
 }
 
+const slackError = (code: string) => Object.assign(new Error(`An API error occurred: ${code}`), { data: { error: code } });
+
+/** A post of Pointer's in a conversation's history, with the metadata Slack gives back. */
+interface HistoryPost {
+  ts: string;
+  user?: string;
+  bot_id?: string;
+  text?: string;
+  metadata?: { event_type: string; event_payload: Record<string, string> };
+}
+const pointerPost = (ts: string, kind?: "pointer_chat_reply" | "pointer_sent_message" | "pointer_outside_content"): HistoryPost => ({
+  ts,
+  user: "UBOT",
+  bot_id: "B1",
+  text: "…",
+  ...(kind ? { metadata: { event_type: kind, event_payload: { source: "test" } } } : {}),
+});
+
 async function setup(opts: { now?: () => Date } = {}) {
   const store = new FsStore(await mkdtemp(join(tmpdir(), "army-outreach-")));
   const key = deriveKey("k");
   const inbox = new SlackInbox(store, key, { now: opts.now ?? (() => NOW), batchMs: 0 });
   const names: Record<string, string> = { U2: "Sam Lee", U3: "Rita Oz" };
+  /** What Slack has at the top level of each conversation (newest first, as Slack returns it), and the reads of it. */
+  const history = new Map<string, HistoryPost[]>();
+  const reads: { channel: string; oldest?: string; latest?: string; include_all_metadata?: boolean }[] = [];
   const bot = {
-    conversations: { info: async () => Promise.reject(new Error("not used")) },
+    conversations: {
+      info: async () => Promise.reject(new Error("not used")),
+      history: async (a: { channel: string; oldest?: string; latest?: string; include_all_metadata?: boolean }) => {
+        reads.push(a);
+        return { ok: true, messages: history.get(a.channel) ?? [], has_more: false };
+      },
+    },
     users: { info: async ({ user: id }: { user: string }) => ({ user: { profile: { display_name: names[id] ?? id } } }) },
   };
-  // The owner's token sees none of Pointer's conversations.
+  // The owner's token sees none of Pointer's conversations; of the channels, only those they are in.
+  const memberOf = new Map<string, string>([["C1", "ops"]]);
   const owner = {
-    conversations: { info: async () => Promise.reject(Object.assign(new Error("An API error occurred: channel_not_found"), { data: { error: "channel_not_found" } })) },
+    conversations: {
+      info: async ({ channel }: { channel: string }) => {
+        const name = memberOf.get(channel);
+        if (name === undefined) throw slackError("channel_not_found");
+        return { ok: true, channel: { id: channel, name, is_member: true } };
+      },
+    },
     users: bot.users,
   };
   const redact = makeRedactor(["sk-live-very-secret-value"]);
   const ctx = (c: Config) => ({ config: c, client: (token: string) => (token.startsWith("xoxp-") ? owner : bot) as never, redact });
-  const answer = (e: Partial<SlackMessageEvent>, c = config()) =>
-    inbox.captureAnswer({ type: "message", user: "U2", channel: "D2", channel_type: "im", ...e } as SlackMessageEvent, ctx(c));
+  const event = (e: Partial<SlackMessageEvent>) => ({ type: "message", user: "U2", channel: "D2", channel_type: "im", ...e }) as SlackMessageEvent;
+  const answer = (e: Partial<SlackMessageEvent>, c = config()) => inbox.captureAnswer(event(e), ctx(c));
   const all = () => inbox.list({ since: new Date(NOW.getTime() - 3 * DAY * 1000), openOnly: false, ownerId: OWNER });
-  return { store, key, inbox, answer, all, ctx };
+  /** What recordOutreach checks against: the current config, the owner's token. */
+  const octx = (c = config()) => ({ config: c, ownerClient: () => owner });
+  /** Records an outreach as a request that started now would. */
+  const record = (o: Outreach, c = config()) => inbox.recordOutreach(inbox.outreachTicket(OWNER), o, octx(c));
+  return { store, key, inbox, answer, all, ctx, event, history, reads, memberOf, octx, record, bot };
 }
 
 describe("SlackInbox: messages Pointer sent for the owner, and their answers", () => {
   it("keeps an answer in the inbox under the outreach it answers, without starting the owner's inbox", async () => {
     const t = await setup();
-    await t.inbox.recordOutreach(OWNER, toSam);
-    await t.inbox.recordOutreach(OWNER, toSam);
+    await t.record(toSam);
+    await t.record(toSam);
     const captured = await t.answer({ ts: ago(10 * MIN), text: "Sure, <@U3> has it. Key sk-live-very-secret-value" });
     expect(captured?.outreach).toEqual(toSam);
     expect(captured?.item).toMatchObject({ where: "to_pointer", channel: "D2", channelName: "Sam Lee", userName: "Sam Lee", outreachId: toSam.id, text: "Sure, @Rita Oz has it. Key [redacted]" });
@@ -139,7 +178,7 @@ describe("SlackInbox: messages Pointer sent for the owner, and their answers", (
 
   it("is stored encrypted, and reads back", async () => {
     const t = await setup();
-    await t.inbox.recordOutreach(OWNER, toSam);
+    await t.record(toSam);
     await t.answer({ ts: ago(10 * MIN), text: "the deck is in the shared drive" });
     const raw = (await t.store.get("slack/inbox.enc"))!;
     expect(raw.toString("latin1")).not.toMatch(/Q3 deck|shared drive|Sam Lee/);
@@ -153,7 +192,7 @@ describe("SlackInbox: messages Pointer sent for the owner, and their answers", (
 
   it("keeps nothing that answers no outreach: others, the owner, Pointer, bots, too late, or listening off", async () => {
     const t = await setup();
-    await t.inbox.recordOutreach(OWNER, toSam);
+    await t.record(toSam);
     expect(await t.answer({ ts: ago(10 * MIN), user: "U3" })).toBeUndefined();
     expect(await t.answer({ ts: ago(10 * MIN), user: OWNER })).toBeUndefined();
     expect(await t.answer({ ts: ago(10 * MIN), user: "UBOT" })).toBeUndefined();
@@ -168,11 +207,11 @@ describe("SlackInbox: messages Pointer sent for the owner, and their answers", (
 
   it("tells Pointer's reply what it answers, without keeping anything", async () => {
     const t = await setup();
-    await t.inbox.recordOutreach(OWNER, toSam);
+    await t.record(toSam);
     const e = { type: "message", user: "U2", channel: "D2", channel_type: "im", ts: ago(10 * MIN), text: "sure" } as SlackMessageEvent;
-    expect(await t.inbox.answering(e, config())).toEqual(toSam);
-    expect(await t.inbox.answering({ ...e, user: "U3" }, config())).toBeUndefined();
-    expect(await t.inbox.answering(e, config({ listen: false }))).toBeUndefined();
+    expect(await t.inbox.answering(e, config(), t.bot as never)).toEqual(toSam);
+    expect(await t.inbox.answering({ ...e, user: "U3" }, config(), t.bot as never)).toBeUndefined();
+    expect(await t.inbox.answering(e, config({ listen: false }), t.bot as never)).toBeUndefined();
     expect((await t.all()).outreach[0]?.answers).toEqual([]);
   });
 
@@ -180,7 +219,7 @@ describe("SlackInbox: messages Pointer sent for the owner, and their answers", (
     let now = NOW;
     const t = await setup({ now: () => now });
     const old: Outreach = { ...toSam, id: `D2:${ago(10 * DAY)}`, ts: ago(10 * DAY) };
-    await t.inbox.recordOutreach(OWNER, old);
+    await t.record(old);
     // Answered a day later.
     const answer: InboxItem = { id: `D2:${ago(9 * DAY)}`, channel: "D2", channelName: "Sam Lee", where: "to_pointer", ts: ago(9 * DAY), userId: "U2", userName: "Sam Lee", mentioned: false, followed: false, text: "done", outreachId: old.id };
     const blob = JSON.parse(decrypt(t.key, (await t.store.get("slack/inbox.enc"))!)) as { items: InboxItem[] };
@@ -194,7 +233,7 @@ describe("SlackInbox: messages Pointer sent for the owner, and their answers", (
     // Beyond 1 000: the oldest go.
     now = NOW;
     const many = Array.from({ length: OUTREACH_LIMITS.items + 5 }, (_, i) => ({ ...toSam, id: `D2:${ago(2_000 - i)}`, ts: ago(2_000 - i), text: `m${i}` }));
-    await Promise.all(many.map((o) => t.inbox.recordOutreach(OWNER, o)));
+    await Promise.all(many.map((o) => t.record(o)));
     const kept = (await t.inbox.list({ since: new Date(0), openOnly: false, ownerId: OWNER })).outreach;
     expect(kept).toHaveLength(OUTREACH_LIMITS.items);
     expect([kept[0]?.text, kept.at(-1)?.text]).toEqual([`m${OUTREACH_LIMITS.items + 4}`, "m5"]);
@@ -202,7 +241,7 @@ describe("SlackInbox: messages Pointer sent for the owner, and their answers", (
 
   it("clips what Pointer sent, and forgets every outreach on clear", async () => {
     const t = await setup();
-    await t.inbox.recordOutreach(OWNER, { ...toSam, text: "x".repeat(2_000) });
+    await t.record({ ...toSam, text: "x".repeat(2_000) });
     expect((await t.all()).outreach[0]?.text).toHaveLength(OUTREACH_LIMITS.text);
     await t.inbox.clear();
     expect((await t.all()).outreach).toEqual([]);
@@ -229,7 +268,7 @@ describe("SlackInbox: messages Pointer sent for the owner, and their answers", (
     const event = (x: Partial<SlackMessageEvent>) => ({ type: "message", user: "U2", channel: "D2", channel_type: "im", ...x }) as SlackMessageEvent;
     // A message arrives before anything is known: its read of the empty inbox is slow.
     const early = inbox.captureAnswer(event({ ts: ago(20 * MIN), user: "U3" }), t.ctx(config()));
-    await inbox.recordOutreach(OWNER, toSam);
+    await inbox.recordOutreach(inbox.outreachTicket(OWNER), toSam, t.octx());
     release();
     expect(await early).toBeUndefined();
     expect(await inbox.captureAnswer(event({ ts: ago(10 * MIN), text: "sure" }), t.ctx(config()))).toMatchObject({ outreach: { id: toSam.id } });
@@ -237,12 +276,193 @@ describe("SlackInbox: messages Pointer sent for the owner, and their answers", (
 
   it("an owner's message elsewhere still starts their inbox, with the outreaches kept", async () => {
     const t = await setup();
-    await t.inbox.recordOutreach(OWNER, toSam);
+    await t.record(toSam);
     expect((await t.all()).startedAt).toBeUndefined();
     await t.inbox.capture({ type: "message", user: OWNER, channel: "D9", channel_type: "im", ts: ago(30), text: "hi" } as SlackMessageEvent, t.ctx(config()));
     const listed = await t.all();
     expect(listed.startedAt).toBe(NOW.toISOString());
     expect(listed.outreach.map((o) => o.id)).toEqual([toSam.id]);
+  });
+});
+
+describe("only what answers the owner's message is passed on", () => {
+  it("a reply in another thread of the DM never answers it, even when the DM rule would", () => {
+    expect(matchAnswer(candidate({}), [toSam], [])).toEqual({ outreach: toSam, rule: "dm", since: toSam.ts });
+    // A thread in Pointer's DM with Sam started before the outreach (a repo task's, say), and one after it.
+    expect(matchAnswer(candidate({ threadTs: ago(DAY) }), [toSam], [])).toBeUndefined();
+    expect(matchAnswer(candidate({ threadTs: ago(30 * MIN) }), [toSam], [])).toBeUndefined();
+    // Its own thread still is: by the thread rule.
+    expect(matchAnswer(candidate({ threadTs: toSam.ts }), [toSam], [])).toMatchObject({ outreach: toSam, rule: "thread" });
+    // Follow-ups count from the last answer.
+    expect(matchAnswer(candidate({ ts: ago(10 * MIN) }), [toSam], [{ ts: ago(20 * MIN), outreachId: toSam.id }])).toMatchObject({ since: ago(20 * MIN) });
+  });
+
+  it("anything else Pointer posts in the DM after it ends its window: a message sent for someone else, a routine's report, a post without metadata", async () => {
+    for (const kind of ["pointer_sent_message", "pointer_outside_content", undefined] as const) {
+      const t = await setup();
+      await t.record(toSam);
+      // Half an hour ago a colleague had Pointer write to Sam in the same DM; Sam answers that.
+      t.history.set("D2", [pointerPost(ago(30 * MIN), kind)]);
+      expect(await t.answer({ ts: ago(10 * MIN), text: "Sure, I can do that for you" }), String(kind)).toBeUndefined();
+      expect(await t.inbox.answering(t.event({ ts: ago(10 * MIN), text: "Sure" }), config(), t.bot as never), String(kind)).toBeUndefined();
+      expect((await t.all()).outreach[0]?.answers).toEqual([]);
+    }
+  });
+
+  it("Pointer's own chat replies keep the window open; Slack is asked only for what lies between, with the metadata", async () => {
+    const t = await setup();
+    await t.record(toSam);
+    t.history.set("D2", [pointerPost(ago(40 * MIN), "pointer_chat_reply")]);
+    expect(await t.answer({ ts: ago(10 * MIN), text: "Sure" })).toMatchObject({ outreach: { id: toSam.id } });
+    expect(t.reads.at(-1)).toMatchObject({ channel: "D2", oldest: toSam.ts, latest: ago(10 * MIN), include_all_metadata: true });
+    // A follow-up is checked from the last answer on: a message sent for someone else since then ends the window.
+    t.history.set("D2", [pointerPost(ago(5 * MIN), "pointer_sent_message"), pointerPost(ago(9 * MIN), "pointer_chat_reply")]);
+    expect(await t.answer({ ts: ago(2 * MIN), text: "and here is yours" })).toBeUndefined();
+    expect(t.reads.at(-1)).toMatchObject({ oldest: ago(10 * MIN), latest: ago(2 * MIN) });
+    expect((await t.all()).outreach[0]?.answers.map((a) => a.text)).toEqual(["Sure"]);
+  });
+
+  it("a reply in the outreach's own thread needs no look at the DM", async () => {
+    const t = await setup();
+    await t.record(toSam);
+    t.history.set("D2", [pointerPost(ago(30 * MIN), "pointer_sent_message")]);
+    expect(await t.answer({ ts: ago(10 * MIN), thread_ts: toSam.ts, text: "in the thread" })).toMatchObject({ outreach: { id: toSam.id } });
+    expect(t.reads).toEqual([]);
+  });
+
+  it("passes nothing on when Slack cannot say what Pointer posted in between, or there is too much of it", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const t = await setup();
+      await t.record(toSam);
+      t.bot.conversations.history = async () => Promise.reject(slackError("ratelimited"));
+      expect(await t.answer({ ts: ago(10 * MIN), text: "Sure" })).toBeUndefined();
+      expect(warn.mock.calls.map((c) => c.join(" "))).toEqual(["[slack] could not tell whether a message answers one sent for the owner: ratelimited"]);
+      t.bot.conversations.history = async () => ({ ok: true, messages: [], has_more: true });
+      expect(await t.answer({ ts: ago(9 * MIN), text: "Sure" })).toBeUndefined();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("keeps at most 20 answers per message: a busy thread stops there", async () => {
+    const t = await setup();
+    await t.record(inOps);
+    const replies = Array.from({ length: OUTREACH_LIMITS.answers + 2 }, (_, i) => ({ channel: "C1", channel_type: "channel", user: "U3", ts: ago(50 * MIN - i), thread_ts: inOps.ts, text: `r${i}` }));
+    const kept = [];
+    for (const r of replies) kept.push(await t.answer(r));
+    expect(kept.filter(Boolean)).toHaveLength(OUTREACH_LIMITS.answers);
+    expect(kept.slice(-2)).toEqual([undefined, undefined]);
+    expect((await t.all()).outreach[0]?.answers).toHaveLength(OUTREACH_LIMITS.answers);
+  });
+
+  it("answers never push the owner's own messages out of the inbox", async () => {
+    const t = await setup();
+    await t.record(inOps);
+    const blob = JSON.parse(decrypt(t.key, (await t.store.get("slack/inbox.enc"))!)) as { items: InboxItem[]; startedAt: string };
+    const mine = Array.from({ length: INBOX_LIMITS.items }, (_, i): InboxItem => ({ id: `D9:${ago(DAY - i)}`, channel: "D9", channelName: "Rita Oz", where: "dm", ts: ago(DAY - i), userId: "U3", userName: "Rita Oz", mentioned: false, followed: false, text: `m${i}` }));
+    blob.items = mine;
+    blob.startedAt = NOW.toISOString();
+    await t.store.put("slack/inbox.enc", encrypt(t.key, JSON.stringify(blob)));
+    // Newer answers, beyond the limit of 3 000 items together.
+    for (let i = 0; i < 5; i++) await t.answer({ channel: "C1", channel_type: "channel", user: "U3", ts: ago(30 * MIN - i), thread_ts: inOps.ts, text: `a${i}` });
+    const listed = await t.inbox.list({ since: new Date(0), openOnly: false, ownerId: OWNER });
+    expect(listed.entries).toHaveLength(INBOX_LIMITS.items);
+    expect(listed.outreach[0]?.answers).toHaveLength(5);
+  });
+});
+
+describe("what Pointer sends for the owner is kept only while it may be", () => {
+  it("a post in a channel only where the owner is a member, named as their token names it", async () => {
+    const t = await setup();
+    const ticket = t.inbox.outreachTicket(OWNER);
+    expect(await t.inbox.outreachPlace(ticket, t.octx(), "C1")).toEqual({ keep: true, name: "#ops" });
+    expect(await t.inbox.outreachPlace(ticket, t.octx(), "C9")).toEqual({ keep: false });
+    // Pointer's DM with someone, and a DM to a person: the owner is never in those.
+    expect(await t.inbox.outreachPlace(ticket, t.octx(), "D2")).toEqual({ keep: true });
+    expect(await t.inbox.outreachPlace(ticket, t.octx(), undefined)).toEqual({ keep: true });
+    const inC9: Outreach = { ...inOps, id: `C9:${inOps.ts}`, channel: "C9", recipient: "C9", recipientName: "C9" };
+    expect(await t.record(inC9)).toBe(false);
+    expect(await t.record(inOps)).toBe(true);
+    expect((await t.all()).outreach.map((o) => o.channel)).toEqual(["C1"]);
+    // So a reply in the thread of a post in a channel the owner is not in never reaches them.
+    expect(await t.answer({ channel: "C9", channel_type: "channel", user: "U3", ts: ago(10 * MIN), thread_ts: inC9.ts, text: "private talk" })).toBeUndefined();
+  });
+
+  it("nothing once the inbox was cleared after the request started, nor for another account, with listening off, or to the owner", async () => {
+    const t = await setup();
+    const started = t.inbox.outreachTicket(OWNER);
+    // Listening was turned off (and on again) while the request ran.
+    await t.inbox.clear();
+    expect(await t.inbox.recordOutreach(started, toSam, t.octx())).toBe(false);
+    expect(await t.inbox.outreachPlace(started, t.octx(), undefined)).toEqual({ keep: false });
+    const now = t.inbox.outreachTicket(OWNER);
+    expect(await t.inbox.recordOutreach(now, toSam, t.octx(config({ listen: false })))).toBe(false);
+    expect(await t.inbox.recordOutreach(now, toSam, t.octx(config({ userId: "UNEW" })))).toBe(false);
+    expect(await t.inbox.recordOutreach(now, { ...toSam, recipient: OWNER }, t.octx())).toBe(false);
+    expect((await t.all()).outreach).toEqual([]);
+    expect(await t.inbox.recordOutreach(now, toSam, t.octx())).toBe(true);
+  });
+
+  it("a clear() while the outreach waits for its write drops it", async () => {
+    const t = await setup();
+    const kept = t.record(toSam);
+    await t.inbox.clear();
+    expect(await kept).toBe(false);
+    expect((await t.all()).outreach).toEqual([]);
+  });
+});
+
+describe("answers edited or deleted", () => {
+  const changed = (ts: string, text: string, extra: Record<string, string> = {}): Partial<SlackMessageEvent> => ({
+    subtype: "message_changed",
+    ts: ago(1),
+    message: { type: "message", user: "U2", ts, text, ...extra },
+  });
+  const deleted = (ts: string): Partial<SlackMessageEvent> => ({ subtype: "message_deleted", ts: ago(1), deleted_ts: ts });
+
+  it("an edit changes the kept answer, a deletion removes it", async () => {
+    const t = await setup();
+    await t.record(toSam);
+    const at = ago(10 * MIN);
+    await t.answer({ ts: at, text: "Sure" });
+    expect(await t.inbox.revise(t.event(changed(at, "Sure, on Friday <@U3>")), t.ctx(config()))).toEqual({ id: `D2:${at}`, deleted: false, text: "Sure, on Friday @Rita Oz" });
+    expect((await t.all()).outreach[0]?.answers.map((a) => a.text)).toEqual(["Sure, on Friday @Rita Oz"]);
+    // Only its author edits a message: anyone else's "edit" changes nothing.
+    expect(await t.inbox.revise(t.event(changed(at, "hijacked", { user: "U3" })), t.ctx(config()))).toBeUndefined();
+    expect(await t.inbox.revise(t.event(deleted(at)), t.ctx(config()))).toEqual({ id: `D2:${at}`, deleted: true });
+    expect((await t.all()).outreach[0]?.answers).toEqual([]);
+    // Nothing is done while listening is off.
+    expect(await t.inbox.revise(t.event(deleted(at)), t.ctx(config({ listen: false })))).toBeUndefined();
+  });
+
+  it("an answer deleted or edited before it was kept is kept as it reads now, or not at all; a tombstone is a deletion", async () => {
+    const t = await setup();
+    await t.record(toSam);
+    expect(await t.inbox.revise(t.event(deleted(ago(10 * MIN))), t.ctx(config()))).toEqual({ id: `D2:${ago(10 * MIN)}`, deleted: true });
+    expect(await t.answer({ ts: ago(10 * MIN), text: "Oops, wrong person" })).toBeUndefined();
+    await t.inbox.revise(t.event(changed(ago(9 * MIN), "Friday works")), t.ctx(config()));
+    expect(await t.answer({ ts: ago(9 * MIN), text: "Firday wrks" })).toMatchObject({ item: { text: "Friday works" } });
+    // A thread's first message deleted while it has replies: Slack leaves a tombstone.
+    const tombstone = { subtype: "message_changed", ts: ago(1), message: { type: "message", subtype: "tombstone", ts: ago(9 * MIN), text: "This message was deleted." } };
+    expect(await t.inbox.revise(t.event(tombstone), t.ctx(config()))).toEqual({ id: `D2:${ago(9 * MIN)}`, deleted: true });
+    expect((await t.all()).outreach[0]?.answers).toEqual([]);
+  });
+
+  it("an edit that comes while the answer is being kept applies once it is written", async () => {
+    const t = await setup();
+    await t.record(toSam);
+    // Naming the person it mentions waits on Slack: the edit arrives meanwhile.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const info = t.bot.users.info;
+    t.bot.users.info = async (a: { user: string }) => (a.user === "U7HOLD" ? (await held, { user: { profile: { display_name: "Held" } } }) : info(a));
+    const capturing = t.answer({ ts: ago(10 * MIN), text: "ask <@U7HOLD>" });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(await t.inbox.revise(t.event(changed(ago(10 * MIN), "never mind")), t.ctx(config()))).toBeUndefined();
+    release();
+    expect(await capturing).toMatchObject({ item: { text: "never mind" } });
+    expect((await t.all()).outreach[0]?.answers.map((a) => a.text)).toEqual(["never mind"]);
   });
 });
 
@@ -264,13 +484,13 @@ describe("telling the owner of answers", () => {
   });
 
   function notifier(cfg: { current: Config }, opts: { postError?: string } = {}) {
-    const posts: { channel: string; text: string; unfurl_links?: boolean }[] = [];
+    const posts: { channel: string; text: string; unfurl_links?: boolean; metadata?: unknown }[] = [];
     const links: string[] = [];
     const slack = (token: string) => {
       expect(token).toBe("xoxb-bot-token-secret");
       return {
         chat: {
-          postMessage: async (m: { channel: string; text: string; unfurl_links?: boolean }) => {
+          postMessage: async (m: { channel: string; text: string; unfurl_links?: boolean; metadata?: unknown }) => {
             if (opts.postError) throw Object.assign(new Error(`An API error occurred: ${opts.postError}`), { data: { error: opts.postError } });
             posts.push(m);
             return { ok: true };
@@ -307,6 +527,8 @@ describe("telling the owner of answers", () => {
       ].join("\n"),
     );
     expect(dm.unfurl_links).toBe(false);
+    // Marked as what other people wrote: a reply after it in the owner's DM starts as if it had read their inbox.
+    expect(dm.metadata).toEqual({ event_type: "pointer_outside_content", event_payload: { source: "answer_notice", level: "inbox" } });
     // A channel's thread gets its link; Pointer's DM with someone does not (the owner cannot open it).
     const post = t.posts.find((p) => p.text.includes("#ops"))!;
     expect(post.text).toContain("*Rita Oz* replied to the post I made for you in #ops");
@@ -380,5 +602,47 @@ describe("telling the owner of answers", () => {
     expect(text).toContain("_2 earlier answers are in your Slack inbox._");
     expect(text).not.toContain(": a1\n");
     expect(text).toContain(": a11");
+  });
+
+  it("quotes short: the rest is in the inbox", () => {
+    const text = answerNotice({ ...toSam, text: "s".repeat(400) }, [item(ago(50), "a".repeat(400))], "UTC");
+    expect(text.split("\n")[1]).toHaveLength(2 + 100);
+    expect(text.split("\n")[2]!.split(": ")[1]).toHaveLength(160);
+  });
+
+  it("an answer edited or deleted before its notice goes is sent as it reads now, or left out", async () => {
+    vi.useFakeTimers();
+    const cfg = { current: config() };
+    const t = notifier(cfg);
+    t.n.add(cfg.current, toSam, item(ago(50), "Sure"));
+    t.n.add(cfg.current, toSam, item(ago(40), "Firday"));
+    t.n.revise({ id: `D2:${ago(40)}`, deleted: false, text: "Friday" });
+    t.n.revise({ id: `D2:${ago(50)}`, deleted: true });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(t.posts).toHaveLength(1);
+    expect(t.posts[0]!.text).toContain(": Friday");
+    expect(t.posts[0]!.text).not.toMatch(/Sure|Firday/);
+
+    // Its only answer deleted: no notice at all; and an answer that arrives after its own deletion is not added.
+    t.n.add(cfg.current, toSam, item(ago(30), "oops"));
+    t.n.revise({ id: `D2:${ago(30)}`, deleted: true });
+    t.n.revise({ id: `D2:${ago(20)}`, deleted: true });
+    t.n.add(cfg.current, toSam, item(ago(20), "gone already"));
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(t.posts).toHaveLength(1);
+  });
+
+  it("drops the notices still waiting when the inbox is emptied", async () => {
+    vi.useFakeTimers();
+    const cfg = { current: config() };
+    const t = notifier(cfg);
+    const store = new FsStore(await mkdtemp(join(tmpdir(), "army-outreach-")));
+    const inbox = new SlackInbox(store, deriveKey("k"), { batchMs: 0 });
+    inbox.onClear(() => t.n.clear());
+    t.n.add(cfg.current, toSam, item(ago(50), "Sure"));
+    // Listening turned off and on again within the burst: the inbox was emptied, so is the notice.
+    await inbox.clear();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(t.posts).toEqual([]);
   });
 });

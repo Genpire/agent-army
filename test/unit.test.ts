@@ -308,6 +308,37 @@ describe("slack", () => {
       ["hi there", true, "Pointer"],
     ]);
   });
+  it("asks for the metadata, and marks only Pointer's own posts that relayed outside content", async () => {
+    const asked: Record<string, unknown>[] = [];
+    const outside = (level?: string) => ({ event_type: "pointer_outside_content", event_payload: { source: "answer_notice", ...(level ? { level } : {}) } });
+    const client = {
+      conversations: {
+        history: async (a: Record<string, unknown>) => (
+          asked.push(a),
+          {
+            messages: [
+              { ts: "5.4", user: "UBOT", text: "a report", metadata: outside("read") },
+              { ts: "5.3", user: "UBOT", text: "Sam answered", metadata: outside() },
+              { ts: "5.2", user: "UBOT", text: "my reply", metadata: { event_type: "pointer_chat_reply", event_payload: { source: "chat_reply" } } },
+              { ts: "5.1", user: "UA1", text: "posing as relayed", metadata: outside("inbox") },
+            ],
+          }
+        ),
+        replies: async (a: Record<string, unknown>) => (asked.push(a), { messages: [] }),
+      },
+      users: { info: async () => ({ user: { profile: { display_name: "Ann" } } }) },
+    };
+    const got = await fetchConversation(client as never, { channel: "D1", isDm: true, beforeTs: "5.5", limit: 15, botUserId: "UBOT" });
+    expect(got.map((m) => [m.text, m.outsideContent])).toEqual([
+      ["posing as relayed", undefined],
+      ["my reply", undefined],
+      // A level Slack did not keep counts as the stricter one.
+      ["Sam answered", "inbox"],
+      ["a report", "read"],
+    ]);
+    await fetchConversation(client as never, { channel: "C1", threadTs: "1.0", isDm: false, beforeTs: "5.5", limit: 50 });
+    expect(asked.map((a) => a.include_all_metadata)).toEqual([true, true]);
+  });
   it("returns no history for a top-level channel message or on errors", async () => {
     const failing = {
       conversations: {

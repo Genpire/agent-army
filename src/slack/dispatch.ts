@@ -12,6 +12,7 @@ import {
   dedupeKey,
   isDm,
   isExplicitMention,
+  messageRevision,
   queueKey,
   replyThreadTs,
   shouldRespond,
@@ -19,6 +20,7 @@ import {
 } from "./listen.js";
 import type {
   ConversationMessage,
+  OutsideContent,
   PointerContext,
   PointerRequest,
   SlackDeps,
@@ -33,6 +35,7 @@ import {
   type BotPresence,
   downloadSlackFile,
   fetchConversation,
+  pointerPostMetadata,
   react,
   slackFileRefs,
   toMrkdwn,
@@ -86,7 +89,7 @@ export type DispatchDeps = SlackDeps & {
   /** The owner's Slack inbox (inbox.ts): what reaches their own account. Absent = not kept (older tests). */
   inbox?: SlackInbox;
   /** Tells the owner when someone answers a message Pointer sent for them (outreach.ts). Absent = nobody is told. */
-  answers?: Pick<AnswerNotifier, "add">;
+  answers?: Pick<AnswerNotifier, "add" | "revise">;
 };
 
 interface Ctx {
@@ -116,19 +119,38 @@ export async function handleSlackEvent(event: SlackMessageEvent, deps: DispatchD
 /**
  * Keeps the message in the owner's inbox when it is for them (inbox.ts
  * decides): an answer to a message Pointer sent for them (outreach.ts), which
- * the owner is also told of, or else what reached their own account. Never
- * throws, never logs the text.
+ * the owner is also told of, or else what reached their own account. An edit
+ * or deletion changes or removes what was kept, and a notice still waiting.
+ * Each step fails on its own: an answer that could not be checked never keeps
+ * a message from the inbox. Never throws, never logs the text.
  */
 async function capture(event: SlackMessageEvent, deps: DispatchDeps, inbox: SlackInbox): Promise<void> {
   let redact = (text: string) => text;
+  let config: Config;
   try {
-    const config = await deps.configRepo.load();
-    const account = config.slack.user;
-    if (!account?.listen || !config.slack.botToken) return;
+    config = await deps.configRepo.load();
+    if (!config.slack.user?.listen || !config.slack.botToken) return;
     redact = secretsRedactor(config);
-    const ctx = { config, client: deps.slack, redact };
+  } catch (err) {
+    return void console.error("[slack] inbox capture failed:", redact(errorText(err)).slice(0, 300));
+  }
+  const ctx = { config, client: deps.slack, redact };
+  if (messageRevision(event)) {
+    try {
+      const revision = await inbox.revise(event, ctx);
+      if (revision) deps.answers?.revise(revision);
+    } catch (err) {
+      console.error("[slack] an edit or deletion was not applied to the inbox:", redact(errorText(err)).slice(0, 300));
+    }
+    return;
+  }
+  try {
     const answer = await inbox.captureAnswer(event, ctx);
     if (answer) return void deps.answers?.add(config, answer.outreach, answer.item);
+  } catch (err) {
+    console.error("[slack] answer capture failed:", redact(errorText(err)).slice(0, 300));
+  }
+  try {
     await inbox.capture(event, ctx);
   } catch (err) {
     console.error("[slack] inbox capture failed:", redact(errorText(err)).slice(0, 300));
@@ -217,11 +239,11 @@ async function handleMessage(ctx: Ctx, decision: RespondDecision): Promise<void>
   let isError = false;
   try {
     const command: Command | null = hasText ? parseCommand(raw, ctx.config.gitlab.baseUrl) : files.length ? null : { kind: "help" };
-    const reply = command
+    const reply: { text: string; isError: boolean; readInbox?: boolean } = command
       ? { text: await runCommand(ctx, command), isError: false }
       : await askPointer(ctx, messageText(raw, ctx.config.slack.botUserId) || filesOnlyText(files), history);
     isError = reply.isError;
-    await say(ctx, truncate(reply.text, REPLY_MAX_CHARS));
+    await say(ctx, truncate(reply.text, REPLY_MAX_CHARS), reply.readInbox ? "inbox" : undefined);
   } catch (err) {
     isError = true;
     const reason = ctx.redact(errorText(err));
@@ -237,7 +259,7 @@ async function askPointer(
   ctx: Ctx,
   text: string,
   history: ConversationMessage[] | undefined,
-): Promise<{ text: string; isError: boolean }> {
+): Promise<{ text: string; isError: boolean; readInbox?: boolean }> {
   const { e, config, deps, slack } = ctx;
   if (!isChatReady(config)) {
     return { text: "I'm not fully set up yet. Finish onboarding on the admin page (the AI model and Slack).", isError: true };
@@ -293,7 +315,12 @@ async function askPointer(
     .then(() => deps.spending?.notify())
     .catch((err) => console.error("[usage] chat cost not recorded:", errorText(err)));
   const body = ctx.redact(reply.text.trim()) || "(no reply)";
-  return { text: toMrkdwn(reply.isError && !body.startsWith(":x:") ? `:x: ${body}` : body), isError: reply.isError };
+  return {
+    text: toMrkdwn(reply.isError && !body.startsWith(":x:") ? `:x: ${body}` : body),
+    isError: reply.isError,
+    // It read the owner's inbox: posted as outside content, so the next reply starts as if it had too.
+    ...(reply.readInbox ? { readInbox: true } : {}),
+  };
 }
 
 /**
@@ -301,11 +328,11 @@ async function askPointer(
  * (outreach.ts): already visible to them in this conversation. Undefined
  * otherwise, or when it cannot be told: the reply goes on without it.
  */
-async function answeringContext({ e, config, deps, redact }: Ctx): Promise<PointerRequest["answering"]> {
+async function answeringContext({ e, config, deps, slack, redact }: Ctx): Promise<PointerRequest["answering"]> {
   const account = config.slack.user;
   if (!deps.inbox || !account?.listen) return undefined;
   try {
-    const outreach = await deps.inbox.answering(e, config);
+    const outreach = await deps.inbox.answering(e, config, slack);
     if (!outreach) return undefined;
     return {
       askedBy: outreach.requester,
@@ -502,10 +529,20 @@ function loadHistory({ e, slack, config }: Ctx): Promise<ConversationMessage[]> 
   });
 }
 
-/** Chat replies go in the thread in channels and flat in DMs. */
-function say(ctx: Ctx, text: string) {
+/**
+ * Chat replies go in the thread in channels and flat in DMs, marked as
+ * Pointer's chat reply (slack.ts): in a DM that keeps an outreach's window
+ * open (outreach.ts). A reply that read the owner's inbox is marked as
+ * outside content instead: the next reply starts as if it had read it.
+ */
+function say(ctx: Ctx, text: string, outside?: OutsideContent) {
   const threadTs = replyThreadTs(ctx.e);
-  return ctx.slack.chat.postMessage({ channel: ctx.e.channel, text, ...(threadTs ? { thread_ts: threadTs } : {}) });
+  return ctx.slack.chat.postMessage({
+    channel: ctx.e.channel,
+    text,
+    ...(threadTs ? { thread_ts: threadTs } : {}),
+    metadata: outside ? pointerPostMetadata("outside", "chat_reply", outside) : pointerPostMetadata("reply", "chat_reply"),
+  });
 }
 
 /** The installed workspace's team id, looked up once per bot token. */
