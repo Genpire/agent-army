@@ -15,6 +15,11 @@
  * tasks the same environment is the agents' shell environment: the task
  * provider's credentials reach the agents' shell, as Anthropic's key always
  * has (guard.ts only stops the obvious ways of printing them).
+ *
+ * Gemini (google-ai) is the exception: Claude Code cannot call it, so its
+ * session() starts the platform's bridge (gemini-bridge/) and the
+ * environment points Claude Code at it with a token that dies with the
+ * session. The Gemini key itself stays in this process.
  */
 import { lstat, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -22,6 +27,7 @@ import { join } from "node:path";
 import { type Options, type Settings, query } from "@anthropic-ai/claude-agent-sdk";
 import { type FetchLike, appUrlProblem, guardedFetch } from "../integrations/apps/apps-net.js";
 import { AI_PRESETS, type AiPreset, type ModelPrice, type PresetCapabilities, QWEN_SHARED_HOSTS, compatibleBaseUrl, presetFor } from "./ai-presets.js";
+import { sharedGeminiBridge } from "./gemini-bridge/server.js";
 import { MODEL_ID_RE } from "./model-ids.js";
 import type { AiProviderConnection, AiProviderId, Config, ModelTier } from "../core/config.js";
 import type { QueryFn } from "../chat/pointer.js";
@@ -51,7 +57,10 @@ export interface ProviderRuntime {
    * credentials and model mapping; for a third-party provider it sets
    * ANTHROPIC_API_KEY to "" so the platform's Anthropic key never reaches it.
    * Credentials that live in a file (a Google service account key) are not
-   * here: use session(), which writes them and adds their variable.
+   * here: use session(), which writes them and adds their variable. Nor is
+   * Gemini's way in: only session() starts the bridge and gives its address
+   * and token (without it, Claude Code is pointed at an address that does not
+   * resolve, so the query fails rather than going anywhere).
    */
   env: Record<string, string>;
   /** Tools the provider cannot serve, for Options.disallowedTools (e.g. WebSearch). */
@@ -74,6 +83,9 @@ export interface ProviderRuntime {
    * and the repository's code it runs (as the key in `env` always could).
    * Folders left by a process that died before dispose() are removed at the
    * next start (removeStaleCredentialFolders).
+   *
+   * For Gemini: the bridge started (once per process), with a new session
+   * token for this connection; dispose() ends the token.
    */
   session(): Promise<ProviderSession>;
   /** The model a configured model runs on, for people: "Sonnet 5.5", "Kimi K3". */
@@ -156,6 +168,8 @@ const RESERVED_HEADERS = new Set([
 const MAX_HEADERS = 10;
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 const CREDENTIAL_TYPES = new Set(["service_account", "external_account", "authorized_user", "impersonated_service_account"]);
+/** A Google AI Studio key: AQ.… now, AIza… before; any such run of characters, as the format has changed before. */
+const GOOGLE_AI_KEY_RE = /^[A-Za-z0-9._-]{20,400}$/;
 
 /** "Name: Value" lines as header pairs, or why they are not headers. */
 export function parseHeaderLines(text: string): { headers: [string, string][] } | { error: string } {
@@ -251,6 +265,12 @@ export function connectionProblem(id: AiProviderId, conn: ConnectionValues, env:
       if (id === "google-cloud" && !CLAUDE_WORKSPACE_RE.test(s.workspaceId ?? "")) return "The workspace ID looks like wrkspc_….";
       if (id === "google-cloud" && !LOCATION_RE.test(s.location ?? "")) return "The location looks like global or us-east5.";
       if (secrets.credentialsJson) return credentialsProblem(secrets.credentialsJson);
+      return undefined;
+    }
+    case "google-ai": {
+      const key = secrets.apiKey ?? "";
+      if (/^ya29\./.test(key)) return "That is a Google sign-in token, not an API key: create a key in Google AI Studio.";
+      if (!GOOGLE_AI_KEY_RE.test(key)) return "That doesn't look like a Gemini API key from Google AI Studio (AQ.… or AIza…).";
       return undefined;
     }
     case "custom": {
@@ -372,6 +392,9 @@ function credentialEnv(preset: AiPreset, secrets: Record<string, string>, settin
       };
     case "foundry":
       return { ANTHROPIC_FOUNDRY_RESOURCE: settings.resource ?? "", ANTHROPIC_FOUNDRY_API_KEY: secrets.apiKey ?? "" };
+    case "google-ai":
+      // No key here: session() gives the bridge's address and a token.
+      return { ANTHROPIC_BASE_URL: GEMINI_BRIDGE_NOT_STARTED };
     case "custom": {
       const headers = secrets.headers ? parseHeaderLines(secrets.headers) : undefined;
       return {
@@ -389,6 +412,13 @@ function credentialEnv(preset: AiPreset, secrets: Record<string, string>, settin
       return { ANTHROPIC_BASE_URL: compatibleBaseUrl(preset.id, settings) ?? "", ANTHROPIC_AUTH_TOKEN: secrets.apiKey ?? "" };
   }
 }
+
+/**
+ * Where the environment without a session points Claude Code for Gemini: a
+ * name that never resolves (.invalid, RFC 2606), so a query that skipped
+ * session() fails at once, saying what it needed.
+ */
+export const GEMINI_BRIDGE_NOT_STARTED = "http://gemini-bridge-needs-a-session.invalid";
 
 /** The runtime of a provider from its connection (saved, or about to be). The caller has checked connectionProblem. */
 export function buildRuntime(id: AiProviderId, conn: ConnectionValues): ProviderRuntime {
@@ -462,6 +492,13 @@ export function buildRuntime(id: AiProviderId, conn: ConnectionValues): Provider
     effort: (effort) => nearestEffort(effort, capabilities.effort),
     capabilities,
     session: async () => {
+      if (id === "google-ai") {
+        const bridge = await sharedGeminiBridge().open(secrets.apiKey ?? "", models);
+        return {
+          env: { ...env, ANTHROPIC_BASE_URL: bridge.baseUrl, ANTHROPIC_AUTH_TOKEN: bridge.token },
+          dispose: async () => bridge.close(),
+        };
+      }
       if (!Object.keys(files).length) return { env: { ...env }, dispose: async () => undefined };
       // A private folder of its own in the system temp folder: never inside a checkout or the data folder.
       // Private against other OS users only (see ProviderRuntime.session). Named after this process, so a
@@ -666,9 +703,10 @@ const SDK_TEST_BUDGET_USD = 0.25;
 /**
  * Proves a connection works before it is saved: for an Anthropic-compatible
  * endpoint, one POST /v1/messages (max_tokens 1) through the network guard;
- * for a cloud (Bedrock, Vertex, Google Cloud, Foundry), one turn through the
- * Agent SDK with the provider's environment. Anthropic's own key is checked
- * by listing models (free). Errors never contain the secrets.
+ * for a cloud (Bedrock, Vertex, Google Cloud, Foundry) and Gemini (through
+ * the bridge, which this also proves), one turn through the Agent SDK with
+ * the provider's session. Anthropic's own key is checked by listing models
+ * (free). Errors never contain the secrets.
  */
 export async function testConnection(id: AiProviderId, conn: ConnectionValues, deps: ConnectionTestDeps = {}): Promise<ConnectionTestResult> {
   const env = deps.env ?? process.env;
@@ -678,7 +716,7 @@ export async function testConnection(id: AiProviderId, conn: ConnectionValues, d
   const redact = redactConnection(conn);
   try {
     const result =
-      preset.kind === "cloud"
+      preset.kind === "cloud" || id === "google-ai"
         ? await sdkProbe(id, conn, deps)
         : preset.kind === "anthropic"
           ? await anthropicProbe(conn, deps, env)

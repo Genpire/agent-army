@@ -6,10 +6,10 @@
  * needs; the console shows the presets as they are (no secrets here).
  *
  * Model ids and prices were checked on each provider's own pages on
- * 2026-11-20 (the Claude lists on 2026-11-21) and change often: check them
- * again before relying on them. These lists are the fallback: the console's
- * model pickers list each provider's models live where it can
- * (model-catalog.ts).
+ * 2026-11-20 (the Claude lists on 2026-11-21, Gemini's on 2026-11-23) and
+ * change often: check them again before relying on them. These lists are the
+ * fallback: the console's model pickers list each provider's models live
+ * where it can (model-catalog.ts).
  * Prices are USD per million tokens. Claude models (Anthropic, Bedrock,
  * Vertex, Google Cloud, Foundry) need none: Claude Code prices them itself.
  *
@@ -22,9 +22,15 @@
  *   are undocumented on its Anthropic API.
  * - Ollama: needs a GPU host next to the service, and has no caching, PDFs,
  *   tool_choice or token counting.
- * - GPT and Gemini inside Claude Code: only through translating gateways,
- *   which Anthropic and OpenRouter do not support. Codex and Gemini CLI run
- *   as team members instead (engines.ts).
+ * - GPT inside Claude Code: only through translating gateways, which
+ *   Anthropic and OpenRouter do not support. Codex runs as a team member
+ *   instead (engines.ts).
+ *
+ * Gemini (google-ai) has no Anthropic-compatible API: its runtime starts the
+ * platform's own translation bridge (gemini-bridge/), which Claude Code talks
+ * to on 127.0.0.1 with a per-session token while the bridge calls Gemini with
+ * the key. Gemini CLI also runs as a team member (engines.ts); that is the
+ * "gemini" engine, a separate key and budget.
  */
 import type { AiProviderId, ModelTier } from "../core/config.js";
 import type { Effort } from "../team/team.js";
@@ -511,6 +517,64 @@ export const AI_PRESETS: readonly AiPreset[] = [
       "PDFs: not supported. Images: GLM-5.3 Flash only.",
       "GLM always thinks: thinking cannot be turned off.",
       "Accounts that ever had a GLM Coding Plan may be limited to Z.ai's OpenAI-compatible API.",
+    ],
+    bestEffort: true,
+  },
+  {
+    id: "google-ai",
+    name: "Gemini (Google AI Studio)",
+    short: "Gemini",
+    kind: "compatible",
+    logo: "gemini",
+    fields: [
+      apiKeyField(
+        "API key",
+        "AQ.… or AIza…",
+        "A Gemini API key from Google AI Studio (https://aistudio.google.com/apikey), on a project with billing: the Gemini 4 models are not on the free tier.",
+      ),
+    ],
+    // Carbon is Google's strongest; Neon the fast frontier model; Hydrogen what 3.x Flash moves to; 3.5 Flash-Lite the lowest cost.
+    defaults: tiers("gemini-4-carbon", "gemini-4-carbon", "gemini-4-neon", "gemini-3.5-flash-lite", "gemini-4-hydrogen"),
+    models: [
+      { id: "gemini-4-carbon", label: "Gemini 4 Carbon", tier: "opus", contextWindow: 1_048_576 },
+      { id: "gemini-4-argon", label: "Gemini 4 Argon", tier: "opus", contextWindow: 1_048_576 },
+      { id: "gemini-4-neon", label: "Gemini 4 Neon", tier: "sonnet", contextWindow: 1_048_576 },
+      { id: "gemini-4-hydrogen", label: "Gemini 4 Hydrogen", tier: "sonnet", contextWindow: 1_048_576 },
+      { id: "gemini-3.8-flash", label: "Gemini 3.8 Flash", tier: "sonnet", contextWindow: 1_048_576 },
+      { id: "gemini-3.6-flash", label: "Gemini 3.6 Flash", tier: "sonnet", contextWindow: 1_048_576 },
+      { id: "gemini-3.5-flash-lite", label: "Gemini 3.5 Flash-Lite", tier: "haiku", contextWindow: 1_048_576 },
+      { id: "gemini-3.1-flash-lite", label: "Gemini 3.1 Flash-Lite", tier: "haiku", contextWindow: 1_048_576 },
+    ],
+    // Effort is Gemini's thinking level (gemini-bridge/request.ts): xhigh on Neon and Hydrogen, high elsewhere.
+    capabilities: { webSearch: false, pdf: true, images: true, effort: ["low", "medium", "high", "xhigh"], thinkingOff: false },
+    env: {
+      // The 1,048,576-token window holds the answer too: compact with room for a whole one.
+      CLAUDE_CODE_AUTO_COMPACT_WINDOW: "960000",
+      // No beta features (tool search among them) and no structured output requests: the bridge would drop them.
+      CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1",
+      CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS: "1",
+    },
+    pricing: {
+      // Standard tier. Where Google has announced a rise, the new price: Carbon and Argon double on
+      // 2026-12-01, the 3.x Flash models on 2027-01-01. Cache reads are Google's caching price
+      // (implicit caching); there is no cache write charge.
+      "gemini-4-carbon": { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 4 },
+      "gemini-4-argon": { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 4 },
+      "gemini-4-neon": { input: 3, output: 15, cacheRead: 0.15, cacheWrite: 3 },
+      "gemini-4-hydrogen": { input: 1.5, output: 7.5, cacheRead: 0.075, cacheWrite: 1.5 },
+      "gemini-3.8-flash": { input: 1.5, output: 7.5, cacheRead: 0.15, cacheWrite: 1.5 },
+      "gemini-3.6-flash": { input: 1.5, output: 7.5, cacheRead: 0.15, cacheWrite: 1.5 },
+      "gemini-3.5-flash-lite": { input: 0.3, output: 2.5, cacheRead: 0.03, cacheWrite: 0.3 },
+      "gemini-3.1-flash-lite": { input: 0.25, output: 1.5, cacheRead: 0.025, cacheWrite: 0.25 },
+    },
+    docsUrl: "https://aistudio.google.com/docs/models",
+    keyHelp: "Create a key in Google AI Studio (aistudio.google.com/apikey) on a project with billing set up. New keys start with AQ., older ones with AIza.",
+    notes: [
+      "Runs through a bridge built into this service: Claude Code's requests are translated to the Gemini API here, and the key never leaves the server.",
+      "Web search: not available (Claude Code's WebSearch is Anthropic's).",
+      "Prompt caching: Claude Code's cache markers are ignored; Gemini's own implicit caching still applies.",
+      "Gemini 4 always thinks: thinking cannot be turned off. Effort sets Gemini's thinking level; max runs as xhigh on Neon and Hydrogen, as high elsewhere.",
+      "Costs use Google's Standard prices, at the higher rate where Google has announced a rise.",
     ],
     bestEffort: true,
   },

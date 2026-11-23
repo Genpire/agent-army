@@ -241,6 +241,27 @@ describe("the model catalog", () => {
     expect(calls.every((c) => !c.url.toString().includes(GEMINI_KEY) && c.headers.get("x-goog-api-key") === GEMINI_KEY)).toBe(true);
   });
 
+  it("lists the Gemini provider's models with its own key, as Gemini CLI's, and falls back to the preset's list", async () => {
+    const AI_STUDIO_KEY = "AQ.Ab8-catalog-ai-studio-key-0123456789";
+    const { catalog, calls, logs } = catalogWith((_url, headers) =>
+      headers.get("x-goog-api-key") === AI_STUDIO_KEY
+        ? json({ models: [{ name: "models/gemini-4-hydrogen", displayName: "Gemini 4 Hydrogen", inputTokenLimit: 1_048_576, supportedGenerationMethods: ["generateContent"] }] })
+        : json({ error: { code: 400, message: "API key not valid.", status: "INVALID_ARGUMENT" } }, 400),
+    );
+    const connected = (apiKey: string) => config({ ai: { providers: { "google-ai": { secrets: { apiKey } } } } });
+    const list = await catalog.providerModels(connected(AI_STUDIO_KEY), "google-ai");
+    expect(list).toMatchObject({ live: true, source: "Google" });
+    expect(list.models).toEqual([{ id: "gemini-4-hydrogen", label: "Gemini 4 Hydrogen", contextWindow: 1_048_576, kind: "chat", family: "Gemini 4" }]);
+    expect(calls[0]!.url.toString()).not.toContain(AI_STUDIO_KEY);
+
+    const OTHER_KEY = "AQ.Ab8-catalog-other-key-0123456789";
+    const failed = await catalog.providerModels(connected(OTHER_KEY), "google-ai");
+    expect(failed).toMatchObject({ live: false, source: "Google", reason: expect.stringContaining("API key not valid") });
+    expect(ids(failed)).toEqual(presetFor("google-ai").models.map((m) => m.id));
+    expect(JSON.stringify([failed, logs])).not.toContain(OTHER_KEY);
+    expect((await catalog.providerModels(config(), "google-ai")).reason).toContain("not connected yet");
+  });
+
   it("lists DeepSeek, Kimi (by platform) and Qwen (by workspace or region) with their saved keys", async () => {
     const { catalog, calls } = catalogWith((url) => {
       if (url.hostname === "api.deepseek.com") return json({ data: [{ id: "deepseek-v4-pro", name: "DeepSeek-V4-Pro", context_window: 1_048_576 }] });

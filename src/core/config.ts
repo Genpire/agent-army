@@ -363,7 +363,7 @@ export type AppConnection = z.infer<typeof AppConnectionSchema>;
  * (Bedrock, Vertex, Google Cloud, Foundry), or another provider with an
  * Anthropic-compatible API (DeepSeek, Qwen, Kimi, GLM) or any such endpoint.
  */
-export const AI_PROVIDER_IDS = ["anthropic", "bedrock", "vertex", "google-cloud", "foundry", "deepseek", "qwen", "kimi", "zai", "custom"] as const;
+export const AI_PROVIDER_IDS = ["anthropic", "bedrock", "vertex", "google-cloud", "foundry", "deepseek", "qwen", "kimi", "zai", "google-ai", "custom"] as const;
 export type AiProviderId = (typeof AI_PROVIDER_IDS)[number];
 /** The model tiers a provider maps (Claude Code's opus, sonnet and haiku aliases, the main model and subagents' default). */
 export const MODEL_TIERS = ["main", "opus", "sonnet", "haiku", "subagent"] as const;
