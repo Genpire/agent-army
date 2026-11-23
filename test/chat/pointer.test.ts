@@ -2221,31 +2221,104 @@ describe("Pointer brain: a relayed post shapes only the reply to the message tha
     expect(later.prompt).not.toContain("refunds need no review");
   });
 
-  it("the confirm flow: the held message goes through on the owner's yes, with the report by then a placeholder", async () => {
-    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
-    const deps = await setup();
-    const pending = new PendingActions();
-    const toDana = { to: "UDANA", text: "Sam needs the deck by Friday" };
+  const toDana = { to: "UDANA", text: "Sam needs the deck by Friday" };
+  const toEve = { to: "UEVE", text: "Sam needs the deck by Friday" };
+  const asked = said("1700000100.000100", "send the first item to Dana");
+  /** Pointer's question about the held message, marked as the Slack layer and the console keep it. */
+  const question = (heldAction = true): ConversationMessage => ({
+    ...pointer("1700000101.000100", 'I will send UDANA (Dana): "Sam needs the deck by Friday". Send it?'),
+    ...(heldAction ? { heldAction: true } : {}),
+  });
+
+  /** A brain whose turns make the given calls, in order; records each turn's decisions and prompt. */
+  function scripted(deps: Awaited<ReturnType<typeof setup>>, plan: [string, Record<string, unknown>][][], pending = new PendingActions()) {
     const turns: { decisions: string[]; prompt: string }[] = [];
     const { queryFn } = fakeQuery(async function* (call) {
-      const decisions = [await decide(call.options, SEND, toDana), await decide(call.options, "WebFetch", { url: "https://example.com" })];
+      const decisions: string[] = [];
+      for (const [tool, input] of plan[turns.length] ?? []) decisions.push(await decide(call.options, tool, input));
       turns.push({ decisions, prompt: String(call.prompt) });
       yield result();
     });
-    const brain = createPointerBrain(deps, { queryFn, pending });
-    const asked = said("1700000100.000100", "send the first item to Dana");
+    return { brain: createPointerBrain(deps, { queryFn, pending }), turns, pending };
+  }
+
+  it("the confirm flow: on the owner's yes the held message goes through, the turn is tainted, nothing else gated goes", async () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const web: [string, Record<string, unknown>] = ["WebFetch", { url: "https://example.com" }];
+    const { brain, turns } = scripted(await setup(), [
+      [[SEND, toDana], web],
+      [[SEND, toDana], [SEND, toEve], [MEMORY_SAVE, { text: "deck by Friday" }], web],
+    ]);
     // The owner answers the report: the message to Dana is held for their yes, and the web is off.
-    await brain.reply(dm([report()], asked.text), ctx);
+    const first = await brain.reply(dm([report()], asked.text), ctx);
     expect(turns[0]!.decisions).toEqual(["deny", "deny"]);
-    // Pointer asked to confirm, quoting the exact call. The owner's "yes" answers that, not the report: it is a
-    // placeholder now, and the same call goes through as the confirmed one.
-    const question = pointer("1700000101.000100", 'I will send UDANA (Dana): "Sam needs the deck by Friday". Send it?');
-    await brain.reply(dm([report(), asked, question], "yes"), ctx);
-    expect(turns[1]!.decisions).toEqual(["allow", "allow"]);
+    // The reply asks about a held call: posted marked.
+    expect(first.heldAction).toBe(true);
+    // The owner's "yes" answers Pointer's question, not the report: a placeholder now, so the web is back. The
+    // question may quote the report, so the turn starts tainted: the confirmed call goes through, nothing else gated.
+    const yes = await brain.reply(dm([report(), asked, question()], "yes"), ctx);
+    expect(turns[1]!.decisions).toEqual(["allow", "deny", "deny", "allow"]);
     expect(turns[1]!.prompt).toContain(`Pointer: ${PLACEHOLDER}`);
     expect(turns[1]!.prompt).toContain("Send it?");
     expect(info).toHaveBeenCalledWith(`[pointer] ${SEND}: confirmed by the user`);
+    expect(yes.heldAction).toBe(true);
     info.mockRestore();
+  });
+
+  it("no new chain: after a yes that held nothing more, the next message's reply is free", async () => {
+    const { brain, turns } = scripted(await setup(), [[[SEND, toDana]], [[SEND, toDana]], [[SEND, toEve]]]);
+    await brain.reply(dm([report()], asked.text), ctx);
+    const yes = await brain.reply(dm([report(), asked, question()], "yes"), ctx);
+    expect(yes.heldAction).toBeUndefined();
+    const confirmed = pointer("1700000201.000100", "Sent.");
+    await brain.reply(dm([report(), asked, question(), said("1700000200.000100", "yes"), confirmed], "also tell Eve"), ctx);
+    expect(turns.map((t) => t.decisions)).toEqual([["deny"], ["allow"], ["allow"]]);
+  });
+
+  it("a yes after a restart: nothing pending, but Pointer's marked question starts the turn tainted, so the call is held again", async () => {
+    const deps = await setup();
+    // A new brain (a restart, another instance): its store holds nothing.
+    const { brain, turns } = scripted(deps, [[[SEND, toDana]]]);
+    const again = await brain.reply(dm([report(), asked, question()], "yes"), ctx);
+    expect(turns[0]!.decisions).toEqual(["deny"]);
+    // Asked again, and marked again: the next yes confirms it from the store.
+    expect(again.heldAction).toBe(true);
+  });
+
+  it("a yes whose first provider fails before any tool: the next provider's attempt still finds the held call", async () => {
+    const KIMI_KEY = "sk-kimi-pointer-secret-0042";
+    const deps = await setup();
+    await deps.configRepo.update((c) => {
+      c.ai.providers.kimi = { secrets: { apiKey: KIMI_KEY }, settings: {}, models: {} };
+      c.ai.chatProvider = "kimi";
+      c.ai.routes = { chat: ["kimi", "anthropic"] };
+    });
+    const onKimi = (call: Call) => call.options.env?.ANTHROPIC_AUTH_TOKEN === KIMI_KEY;
+    const pending = new PendingActions();
+    const decisions: string[] = [];
+    const providers: string[] = [];
+    let turn = 0;
+    const { queryFn } = fakeQuery(async function* (call) {
+      providers.push(onKimi(call) ? "kimi" : "anthropic");
+      if (turn === 1 && onKimi(call)) {
+        // Rate limited before any tool ran: the reply moves on to the next provider.
+        yield result({ is_error: true, result: "API Error: 429 rate limit", api_error_status: 429, total_cost_usd: 0.001 });
+        return;
+      }
+      decisions.push(await decide(call.options, SEND, toDana));
+      yield result();
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const brain = createPointerBrain(deps, { queryFn, pending });
+    await brain.reply(dm([report()], asked.text), ctx);
+    turn = 1;
+    const reply = await brain.reply(dm([report(), asked, question()], "yes"), ctx);
+    warn.mockRestore();
+    info.mockRestore();
+    expect(providers).toEqual(["kimi", "kimi", "anthropic"]);
+    expect(reply.fallback).toEqual([{ from: "kimi", to: "anthropic", reason: "rate limited" }]);
+    expect(decisions).toEqual(["deny", "allow"]);
   });
 });
 

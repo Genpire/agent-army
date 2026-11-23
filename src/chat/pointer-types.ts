@@ -106,6 +106,11 @@ export interface ConversationMessage {
   outsideContent?: OutsideContent;
   /** Which post relayed it, when its Slack metadata says so; unknown in the console. */
   relayedSource?: RelayedSource;
+  /**
+   * Pointer's post asked the user to confirm a call it held (PointerReply.heldAction):
+   * the reply to their next message starts tainted (confirm-gate.ts).
+   */
+  heldAction?: boolean;
 }
 
 export interface PointerRequest {
@@ -199,6 +204,13 @@ export interface PointerReply {
   fallback?: FallbackNote[];
   /** The reply read the owner's Slack inbox (slack_my_inbox): it may quote what people wrote there, so it is posted as outside content. */
   readInbox?: boolean;
+  /**
+   * The reply held a call for the user's confirmation (confirm-gate.ts), so it
+   * asks about it and may quote outside content: it is posted marked, and the
+   * reply to the next message starts tainted even when the pending action is
+   * gone (a restart, another instance).
+   */
+  heldAction?: boolean;
   isError: boolean;
 }
 

@@ -6,7 +6,7 @@ import { AttachmentRepo } from "../../src/chat/attachments.js";
 import { type Config, ConfigRepo } from "../../src/core/config.js";
 import { deriveKey } from "../../src/core/crypto.js";
 import { handleSlackEvent, resetDispatchStateForTests } from "../../src/slack/dispatch.js";
-import { buildPointerPrompt, relayedLevel } from "../../src/chat/pointer.js";
+import { answersHeldAction, buildPointerPrompt, relayedLevel } from "../../src/chat/pointer.js";
 import { type InboxItem, SlackInbox } from "../../src/slack/inbox.js";
 import type { AnswerRevision, Outreach } from "../../src/slack/outreach.js";
 import { BotConversations, tsDate } from "../../src/slack/slack.js";
@@ -1155,6 +1155,20 @@ describe("handleSlackEvent: Pointer's posts that relayed outside content", () =>
       expect(relayedLevel(t.requests[1]!)).toBeUndefined();
       expect(buildPointerPrompt(t.requests[1]!)).toContain(placeholder);
     });
+  });
+
+  it("marks a reply that held a call for the user's yes, and reads the mark back on Pointer's posts only", async () => {
+    const t = await setup();
+    t.state.brain = async () => ({ text: "I will send UDANA: …. Send it?", isError: false, heldAction: true });
+    await t.dm("100.1", "send the first item to Dana");
+    expect(t.posts[0]!.metadata).toEqual({ event_type: "pointer_chat_reply", event_payload: { source: "chat_reply", held: true } });
+    t.history.set("D1", [
+      { ts: "100.2", user: "UBOT", bot_id: "B1", text: "Send it?", metadata: t.posts[0]!.metadata! },
+      { ts: "100.1", user: "U1", text: "send the first item to Dana", metadata: t.posts[0]!.metadata! },
+    ]);
+    await t.dm("100.3", "yes");
+    expect(t.requests[1]!.history.map((m) => m.heldAction)).toEqual([undefined, true]);
+    expect(answersHeldAction(t.requests[1]!)).toBe(true);
   });
 
   it("posts a reply that read the owner's inbox as outside content", async () => {

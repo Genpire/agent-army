@@ -14,7 +14,7 @@ import { type ProviderRuntime, type ProviderSession, defaultModel, fitContentBlo
 import { type FallbackNote, RunWatch, fallbackLine, routeRuntimes } from "../ai/routing.js";
 import { type AttachmentInfo, type AttachmentRepo, type PromptFile, type ThreadRef, classify, toContentBlocks } from "./attachments.js";
 import { type ChatIntegration, chatIntegrations, subagentIntegrationTools } from "./chat-integrations.js";
-import { PendingActions, afterInboxGate, confirmGate, conversationKey, gatedTools } from "./confirm-gate.js";
+import { PendingActions, afterInboxGate, confirmGate, conversationKey, gatedTools, takeConfirmation } from "./confirm-gate.js";
 import type { Config } from "../core/config.js";
 import { GitHub } from "../integrations/github/github.js";
 import { isRepoAllowedOnHost } from "../integrations/code-hosts/code-host-access.js";
@@ -163,6 +163,15 @@ export function relayedLevel(req: Pick<PointerRequest, "history" | "userId">): O
   const current = req.history.slice(exchangeStart(req.history, req.userId));
   if (current.some((m) => m.outsideContent === "inbox")) return "inbox";
   return current.some((m) => m.outsideContent === "read") ? "read" : undefined;
+}
+
+/**
+ * Whether Pointer asked, since the person's previous message, to confirm a call
+ * it held (ConversationMessage.heldAction): their message answers it, so the
+ * reply starts tainted even when the pending action is gone (confirm-gate.ts).
+ */
+export function answersHeldAction(req: Pick<PointerRequest, "history" | "userId">): boolean {
+  return req.history.slice(exchangeStart(req.history, req.userId)).some((m) => m.isPointer && m.heldAction);
 }
 
 /** Whether the history holds relayed posts from before the person's previous message, shown without their text. */
@@ -544,8 +553,16 @@ export function createPointerBrain(
       // Outside content Pointer relayed since the person's previous message here (an answer passed on, a report): the
       // reply starts as if it had read it; "inbox" also as if it had read the owner's inbox (confirm-gate.ts).
       const relayed = relayedLevel(req);
+      // The conversation's held calls, taken once for every attempt: a yes is not lost when a provider fails first.
+      // Something held there (or Pointer's question about it since the person's previous message) starts the reply
+      // tainted: only the confirmed call goes through.
+      const conversation = conversationKey(req);
+      const confirmation = takeConfirmation(pending, conversation, req.text);
+      const answersHeld = answersHeldAction(req);
       // Whether any attempt read the owner's inbox: the reply then carries it, and is posted as outside content.
       let readInbox = false;
+      // Whether any attempt held a call for the user's yes: the reply asks about it, and is posted marked.
+      let heldAction = false;
       const onActivity = ctx.onActivity;
       const tell = (activity: PointerActivity) => {
         if (!onActivity) return;
@@ -652,8 +669,11 @@ export function createPointerBrain(
                     ...(routineRun ? [readOnlyRunGate(readOnlyTools)] : []),
                     confirmGate({
                       pending,
-                      conversation: conversationKey(req),
+                      conversation,
                       message: req.text,
+                      confirmation,
+                      ...(answersHeld ? { answersHeld: true } : {}),
+                      onHeld: () => void (heldAction = true),
                       gated: gatedTools(connected),
                       ...(slackSelf ? { requesterSlackId: slackSelf } : {}),
                       ...(relayed ? { tainted: true } : {}),
@@ -764,7 +784,7 @@ export function createPointerBrain(
         if (happened.length) reply = { ...reply, text: `${reply.text}\n\n${happened.join(" ")}` };
       }
       if (fallback.length) reply = { ...reply, fallback };
-      return { ...reply, text: redact(reply.text), ...(readInbox ? { readInbox: true } : {}) };
+      return { ...reply, text: redact(reply.text), ...(readInbox ? { readInbox: true } : {}), ...(heldAction ? { heldAction: true } : {}) };
     },
   };
 }

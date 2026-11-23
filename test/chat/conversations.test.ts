@@ -19,7 +19,7 @@ import {
 } from "../../src/chat/conversations.js";
 import { deriveKey } from "../../src/core/crypto.js";
 import { ActivityMapper, toolLabel } from "../../src/chat/pointer-activity.js";
-import { buildPointerPrompt, relayedLevel } from "../../src/chat/pointer.js";
+import { answersHeldAction, buildPointerPrompt, relayedLevel } from "../../src/chat/pointer.js";
 import type { PointerBrain, PointerContext, PointerReply, PointerRequest } from "../../src/chat/pointer-types.js";
 import { FsStore } from "../../src/core/store.js";
 import { TimelineRecorder } from "../../src/tasks/task-events.js";
@@ -130,6 +130,20 @@ describe("ConversationService", () => {
     await t.service.idle();
     expect(t.calls[1]!.req.history.map((h) => h.outsideContent)).toEqual([undefined, "inbox"]);
     expect(lastPointer((await t.service.view(c.id))!.conversation)?.relayed).toBeUndefined();
+  });
+
+  it("keeps a reply that held a call for the user's yes marked: the reply to their answer starts tainted", async () => {
+    const t = await setup();
+    t.setScript(async () => ({ text: "I will save: deck by Friday. Confirm?", isError: false, heldAction: true }));
+    const c = await created(t.service, "remember what the page says");
+    await t.service.idle();
+    expect(lastPointer((await t.service.view(c.id))!.conversation)?.held).toBe(true);
+    t.setScript(async () => ({ text: "Saved.", isError: false }));
+    expect((await t.service.send(c.id, "yes")).ok).toBe(true);
+    await t.service.idle();
+    expect(t.calls[1]!.req.history.map((h) => h.heldAction)).toEqual([undefined, true]);
+    expect(answersHeldAction(t.calls[1]!.req)).toBe(true);
+    expect(lastPointer((await t.service.view(c.id))!.conversation)?.held).toBeUndefined();
   });
 
   it("a routine's report restricts only the reply to the owner's next message; later it is a placeholder", async () => {

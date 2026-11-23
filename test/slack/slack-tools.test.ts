@@ -835,9 +835,13 @@ describe("the confirmation gate on Slack messages", () => {
 
     const next = confirmGate({ pending, conversation: CONVO, message: "yes", gated, requesterSlackId: OWNER });
     expect(await call(next, SLACK_SEND_TOOL, { ...input })).toBeUndefined();
-    expect(denied(await call(next, SLACK_SEND_TOOL, { to: "U02DANK", text: "The deploy is done." }))).toBe(false); // untainted again
-    await call(next, "WebFetch", { url: "https://example.com" });
+    // The yes answers a held call: only that one is confirmed, anything else is held again.
+    expect(denied(await call(next, SLACK_SEND_TOOL, { to: "U02DANK", text: "The deploy is done." }))).toBe(true);
     expect(denied(await call(next, SLACK_SEND_TOOL, input))).toBe(true); // once only
+    // Nothing held is left unanswered after the next message: untainted again.
+    pending.take(CONVO);
+    const after = confirmGate({ pending, conversation: CONVO, message: "thanks", gated, requesterSlackId: OWNER });
+    expect(await call(after, SLACK_SEND_TOOL, { to: "U02DANK", text: "The deploy is done." })).toBeUndefined();
   });
 
   it("lets a send by name go through in one call when nothing was read before", async () => {

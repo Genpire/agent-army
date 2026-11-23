@@ -239,11 +239,11 @@ async function handleMessage(ctx: Ctx, decision: RespondDecision): Promise<void>
   let isError = false;
   try {
     const command: Command | null = hasText ? parseCommand(raw, ctx.config.gitlab.baseUrl) : files.length ? null : { kind: "help" };
-    const reply: { text: string; isError: boolean; readInbox?: boolean } = command
+    const reply: { text: string; isError: boolean; readInbox?: boolean; heldAction?: boolean } = command
       ? { text: await runCommand(ctx, command), isError: false }
       : await askPointer(ctx, messageText(raw, ctx.config.slack.botUserId) || filesOnlyText(files), history);
     isError = reply.isError;
-    await say(ctx, truncate(reply.text, REPLY_MAX_CHARS), reply.readInbox ? "inbox" : undefined);
+    await say(ctx, truncate(reply.text, REPLY_MAX_CHARS), reply.readInbox ? "inbox" : undefined, reply.heldAction);
   } catch (err) {
     isError = true;
     const reason = ctx.redact(errorText(err));
@@ -259,7 +259,7 @@ async function askPointer(
   ctx: Ctx,
   text: string,
   history: ConversationMessage[] | undefined,
-): Promise<{ text: string; isError: boolean; readInbox?: boolean }> {
+): Promise<{ text: string; isError: boolean; readInbox?: boolean; heldAction?: boolean }> {
   const { e, config, deps, slack } = ctx;
   if (!isChatReady(config)) {
     return { text: "I'm not fully set up yet. Finish onboarding on the admin page (the AI model and Slack).", isError: true };
@@ -320,6 +320,8 @@ async function askPointer(
     isError: reply.isError,
     // It read the owner's inbox: posted as outside content, so the next reply starts as if it had too.
     ...(reply.readInbox ? { readInbox: true } : {}),
+    // It held a call for the user's yes: posted marked, so the reply to their answer starts tainted.
+    ...(reply.heldAction ? { heldAction: true } : {}),
   };
 }
 
@@ -533,15 +535,17 @@ function loadHistory({ e, slack, config }: Ctx): Promise<ConversationMessage[]> 
  * Chat replies go in the thread in channels and flat in DMs, marked as
  * Pointer's chat reply (slack.ts): in a DM that keeps an outreach's window
  * open (outreach.ts). A reply that read the owner's inbox is marked as
- * outside content instead: the next reply starts as if it had read it.
+ * outside content instead: the next reply starts as if it had read it. One
+ * that held a call for the user's yes says so (`held`): the reply to their
+ * answer starts tainted.
  */
-function say(ctx: Ctx, text: string, outside?: OutsideContent) {
+function say(ctx: Ctx, text: string, outside?: OutsideContent, held = false) {
   const threadTs = replyThreadTs(ctx.e);
   return ctx.slack.chat.postMessage({
     channel: ctx.e.channel,
     text,
     ...(threadTs ? { thread_ts: threadTs } : {}),
-    metadata: outside ? pointerPostMetadata("outside", "chat_reply", outside) : pointerPostMetadata("reply", "chat_reply"),
+    metadata: outside ? pointerPostMetadata("outside", "chat_reply", outside, held) : pointerPostMetadata("reply", "chat_reply", undefined, held),
   });
 }
 

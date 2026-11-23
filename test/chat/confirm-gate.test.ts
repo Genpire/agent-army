@@ -11,6 +11,7 @@ import {
   gatedTools,
   inputHash,
   isConfirmation,
+  takeConfirmation,
 } from "../../src/chat/confirm-gate.js";
 
 const MEMORY_SAVE = "mcp__pointer__memory_save";
@@ -167,6 +168,58 @@ describe("confirmation gate", () => {
   });
 });
 
+describe("a message that answers a held call", () => {
+  it("starts tainted: the confirmed call goes through once, any other gated call is held again, and the reason says why", async () => {
+    const { pending } = clockedStore();
+    const first = gateFor(pending, "summarise ACME-12 and remember it");
+    await call(first, "WebFetch");
+    expect(denied(await call(first, MEMORY_SAVE, { text: "x" }))).toBe(true);
+
+    // No read on the yes turn: it is tainted because it answers the held call.
+    const yes = gateFor(pending, "yes");
+    expect(await call(yes, MEMORY_SAVE, { text: "x" })).toBeUndefined();
+    const d = await call(yes, NOTES_ADD, { repo: "acme/api", note: "y" });
+    expect(denied(d)).toBe(true);
+    expect(d?.permissionDecisionReason).toMatch(/^Not done: this message answers your question about a call you held/);
+    // That second hold waits for the next answer ("no, leave it" drops it); with nothing held since, the turn after is free.
+    gateFor(pending, "no, leave it");
+    expect(await call(gateFor(pending, "and refund ch_1"), REFUND, { charge: "ch_1" })).toBeUndefined();
+  });
+
+  it("also any other answer: a no, or a new request, starts tainted while something was held", async () => {
+    const { pending } = clockedStore();
+    const first = gateFor(pending, "read it");
+    await call(first, "WebFetch");
+    await call(first, MEMORY_SAVE, { text: "x" });
+    const other = gateFor(pending, "no, remember y instead");
+    expect(denied(await call(other, MEMORY_SAVE, { text: "y" }))).toBe(true);
+  });
+
+  it("starts tainted from the conversation alone (answersHeld) when the store lost the call, which is then held again", async () => {
+    const { pending } = clockedStore();
+    const onHeld: string[] = [];
+    const gate = confirmGate({ pending, conversation: CONVO, message: "yes", gated: GATED, answersHeld: true, onHeld: () => void onHeld.push("held") });
+    expect(denied(await call(gate, MEMORY_SAVE, { text: "x" }))).toBe(true);
+    expect(onHeld).toEqual(["held"]);
+    expect(pending.take(CONVO)).toEqual([{ tool: MEMORY_SAVE, inputHash: inputHash({ text: "x" }) }]);
+  });
+
+  it("one confirmation for every attempt of a reply: a gate built after another still finds the yes, and once only", async () => {
+    const { pending } = clockedStore();
+    const first = gateFor(pending, "read it");
+    await call(first, "WebFetch");
+    await call(first, MEMORY_SAVE, { text: "x" });
+
+    const confirmation = takeConfirmation(pending, CONVO, "yes");
+    expect(confirmation).toEqual({ confirmed: [{ tool: MEMORY_SAVE, inputHash: inputHash({ text: "x" }) }], answersHeld: true });
+    // The first provider's attempt fails before any tool; the next attempt's gate shares the same confirmation.
+    confirmGate({ pending, conversation: CONVO, message: "yes", confirmation, gated: GATED });
+    const second = confirmGate({ pending, conversation: CONVO, message: "yes", confirmation, gated: GATED });
+    expect(await call(second, MEMORY_SAVE, { text: "x" })).toBeUndefined();
+    expect(denied(await call(second, MEMORY_SAVE, { text: "x" }))).toBe(true);
+  });
+});
+
 describe("a conversation that holds outside content Pointer relayed", () => {
   it("starts tainted: writes are held from the first call, and the reason says why", async () => {
     const { pending } = clockedStore();
@@ -178,7 +231,8 @@ describe("a conversation that holds outside content Pointer relayed", () => {
     const yes = confirmGate({ pending, conversation: CONVO, message: "yes", gated: GATED, tainted: true });
     expect(await call(yes, MEMORY_SAVE, { text: "x" })).toBeUndefined();
     expect(denied(await call(yes, MEMORY_SAVE, { text: "x" }))).toBe(true);
-    // Untainted, as before.
+    // Untainted, as before, once nothing held waits for an answer.
+    pending.take(CONVO);
     expect(await call(gateFor(pending, "thanks"), MEMORY_SAVE, { text: "x" })).toBeUndefined();
   });
 });

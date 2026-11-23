@@ -148,6 +148,8 @@ export async function userName(client: { users: Pick<WebClient["users"], "info">
  * - outside: a post that relays outside content (OutsideContent): an answer
  *   passed on to the owner, a routine's report, a reply that read the owner's
  *   inbox. Its payload's `level` says which.
+ * A chat reply (reply or outside) that asked the user to confirm a call it
+ * held has `held: true` in its payload (PointerReply.heldAction).
  */
 export const POINTER_POST_TYPES = {
   reply: "pointer_chat_reply",
@@ -157,13 +159,20 @@ export const POINTER_POST_TYPES = {
 
 export type PointerPostKind = keyof typeof POINTER_POST_TYPES;
 
-/** The metadata for one of Pointer's posts: its kind, where it comes from, and for outside content its level. Nothing private. */
+/**
+ * The metadata for one of Pointer's posts: its kind, where it comes from, for
+ * outside content its level, and whether it asks to confirm a held call. Nothing private.
+ */
 export function pointerPostMetadata(
   kind: PointerPostKind,
   source: string,
   level?: OutsideContent,
-): { event_type: string; event_payload: { source: string; level?: OutsideContent } } {
-  return { event_type: POINTER_POST_TYPES[kind], event_payload: { source, ...(kind === "outside" ? { level: level ?? "inbox" } : {}) } };
+  held = false,
+): { event_type: string; event_payload: { source: string; level?: OutsideContent; held?: true } } {
+  return {
+    event_type: POINTER_POST_TYPES[kind],
+    event_payload: { source, ...(kind === "outside" ? { level: level ?? "inbox" } : {}), ...(held ? { held: true as const } : {}) },
+  };
 }
 
 /** A message as conversations.history and .replies return it, with its metadata. */
@@ -190,6 +199,14 @@ export function relayedContent(m: Pick<RawMessage, "metadata">): OutsideContent 
   return level === "read" ? "read" : "inbox";
 }
 
+/** Whether a chat reply of Pointer's asked to confirm a call it held, from its metadata. */
+export function heldActionPost(m: Pick<RawMessage, "metadata">): boolean {
+  const kind = pointerPostKind(m);
+  if (kind !== "reply" && kind !== "outside") return false;
+  const payload = m.metadata?.event_payload;
+  return Boolean(payload && typeof payload === "object" && (payload as { held?: unknown }).held === true);
+}
+
 const RELAYED_SOURCES: readonly RelayedSource[] = ["answer_notice", "routine_report", "chat_reply"];
 
 /** Which post relayed the outside content, from its metadata's source; undefined for none or one Pointer does not write. */
@@ -207,7 +224,8 @@ export function relayedSource(m: Pick<RawMessage, "metadata">): RelayedSource | 
  * Long threads keep their first message plus the latest ones. Pointer's posts
  * that relayed outside content say so (outsideContent and relayedSource, from
  * their metadata): a reply while the person is answering one starts as if it
- * had read it (pointer.ts). Never throws.
+ * had read it (pointer.ts); so do its replies that asked to confirm a held
+ * call (heldAction), tainted. Never throws.
  */
 export async function fetchConversation(
   client: WebClient,
@@ -266,6 +284,7 @@ export async function fetchConversation(
         ...(files.length ? { files } : {}),
         ...(relayed ? { outsideContent: relayed } : {}),
         ...(source ? { relayedSource: source } : {}),
+        ...(mine && heldActionPost(m) ? { heldAction: true } : {}),
       };
     });
   } catch {

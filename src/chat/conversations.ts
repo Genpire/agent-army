@@ -106,6 +106,11 @@ export interface ChatMessage {
    * (pointer.ts).
    */
   relayed?: OutsideContent;
+  /**
+   * Pointer's message asked to confirm a call it held (PointerReply.heldAction):
+   * the reply to the user's next message starts tainted.
+   */
+  held?: boolean;
 }
 
 export interface Conversation {
@@ -426,6 +431,7 @@ export function toHistory(messages: ChatMessage[], pointerName: string): Convers
     text: m.files?.length ? (m.text ? `${m.text}\n[Attached: ${fileNames(m.files)}]` : filesOnlyText(m.files)) : m.text,
     isPointer: m.role === "pointer",
     ...(m.role === "pointer" && m.relayed ? { outsideContent: m.relayed } : {}),
+    ...(m.role === "pointer" && m.held ? { heldAction: true } : {}),
   }));
 }
 
@@ -881,7 +887,7 @@ export class ConversationService implements WebThreads {
     const reply: LiveReply = { messageId: newMessageId(), startedAt: this.iso(), text: "", activity: [], tasks: [] };
     let redact = (text: string) => text;
     this.live.set(id, { reply, redact });
-    let result: { text: string; costUsd?: number; isError: boolean; readInbox?: boolean };
+    let result: { text: string; costUsd?: number; isError: boolean; readInbox?: boolean; heldAction?: boolean };
     try {
       const config = await this.deps.configRepo.load();
       redact = makeRedactor(configSecrets(config));
@@ -906,6 +912,8 @@ export class ConversationService implements WebThreads {
           ...(result.isError ? { isError: true } : {}),
           // It read the owner's Slack inbox: the next reply here starts as if it had too.
           ...(result.readInbox ? { relayed: "inbox" as const } : {}),
+          // It held a call for the user's yes: the reply to their answer starts tainted.
+          ...(result.heldAction ? { held: true } : {}),
           ...(reply.activity.length ? { activity: closeActivity(reply.activity, at) } : {}),
           ...(reply.tasks.length ? { tasks: [...reply.tasks] } : {}),
         });
@@ -924,7 +932,7 @@ export class ConversationService implements WebThreads {
     config: Config,
     reply: LiveReply,
     redact: (text: string) => string,
-  ): Promise<{ text: string; costUsd?: number; isError: boolean; readInbox?: boolean }> {
+  ): Promise<{ text: string; costUsd?: number; isError: boolean; readInbox?: boolean; heldAction?: boolean }> {
     // A provider of the chat route (Claude by default) must be connected before any model call.
     const route = routeRuntimes(config, "chat");
     if (!route.ok) return { text: onlyClaudeMissing(route.skipped) ? NOT_CONNECTED : route.error, isError: true };
@@ -970,7 +978,13 @@ export class ConversationService implements WebThreads {
       .then(() => this.deps.spending?.notify())
       .catch((err: unknown) => console.error("[usage] chat cost not recorded:", errorText(err)));
     const text = redact(answer.text.trim()) || "(no reply)";
-    return { text, ...(answer.costUsd !== undefined ? { costUsd: answer.costUsd } : {}), isError: answer.isError, ...(answer.readInbox ? { readInbox: true } : {}) };
+    return {
+      text,
+      ...(answer.costUsd !== undefined ? { costUsd: answer.costUsd } : {}),
+      isError: answer.isError,
+      ...(answer.readInbox ? { readInbox: true } : {}),
+      ...(answer.heldAction ? { heldAction: true } : {}),
+    };
   }
 
   /** start_repo_task from the console: no Slack; the task's card appears under Pointer's reply. Never throws. */
