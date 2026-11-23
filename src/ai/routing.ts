@@ -200,16 +200,49 @@ const TOOL_BLOCKS = new Set(["tool_use", "server_tool_use", "mcp_tool_use"]);
 const FAILED_RESULTS = new Set(["success", "error_during_execution"]);
 
 /**
+ * A tool call whose effect reaches past the run's own workspace (a repo
+ * task's checkout), so running the work again could repeat it: an app's tool
+ * that changes things, or a browser action on a page (a click, typing, a form).
+ */
+export type OutsideEffect = "app" | "browser";
+
+/** The calls with effects outside a run, by kind: each tool once, in the order first called, with how many times. */
+export type OutsideCalls = Record<OutsideEffect, { tool: string; count: number }[]>;
+
+/** Calls of each kind a watch keeps, at most (each tool once): enough to name them. */
+const OUTSIDE_MAX = 20;
+
+/**
  * Follows one run's messages: whether a tool may have run (a tool use by the
  * main agent or by a subagent, so running the work again could repeat it),
- * and the provider failure the run ended on, if it ended on one. A
- * subagent's failure goes back to the main agent, which may carry on: only
- * the main agent's and the result's count.
+ * the calls with effects outside the run (`effectOf` says which tools have
+ * them), and the provider failure the run ended on, if it ended on one. A
+ * call counts once the model asked for it: whether it ran cannot be told, so
+ * it is taken to have. A subagent's failure goes back to the main agent,
+ * which may carry on: only the main agent's and the result's count.
  */
 export class RunWatch {
   toolRan = false;
+  readonly outside: OutsideCalls = { app: [], browser: [] };
   private seen: ProviderFailure | undefined;
   private ended = false;
+
+  constructor(private readonly effectOf?: (toolName: string) => OutsideEffect | undefined) {}
+
+  /** Whether any call with an effect outside the run was made. */
+  get reachedOutside(): boolean {
+    return this.outside.app.length > 0 || this.outside.browser.length > 0;
+  }
+
+  private called(name: unknown): void {
+    if (typeof name !== "string" || !this.effectOf) return;
+    const kind = this.effectOf(name);
+    if (!kind) return;
+    const calls = this.outside[kind];
+    const known = calls.find((c) => c.tool === name);
+    if (known) known.count += 1;
+    else if (calls.length < OUTSIDE_MAX) calls.push({ tool: name, count: 1 });
+  }
 
   feed(message: SDKMessage): void {
     if (message.type === "stream_event") {
@@ -218,7 +251,12 @@ export class RunWatch {
       return;
     }
     if (message.type === "assistant") {
-      if (message.message.content.some((block) => TOOL_BLOCKS.has(block.type))) this.toolRan = true;
+      for (const block of message.message.content) {
+        if (!TOOL_BLOCKS.has(block.type)) continue;
+        this.toolRan = true;
+        // A call's name is in the whole message (a stream's start event may come without it).
+        if ("name" in block) this.called(block.name);
+      }
       const failure = message.parent_tool_use_id === null ? providerFailure(message) : undefined;
       if (failure) this.seen = failure;
       return;

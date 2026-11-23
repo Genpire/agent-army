@@ -400,8 +400,8 @@ export type EngineConnection = z.infer<typeof EngineConnectionSchema>;
  * The kinds of work a route is set for (config.ai.routes, src/ai/routing.ts):
  * - chat: Pointer's replies in Slack and the console;
  * - routines: scheduled routine runs (read-only reports);
- * - tasks: repo tasks (the team's runs, fix rounds);
- * - light: short one-shot calls (task sizing, HR review, Skills Scout, the office's talk).
+ * - tasks: repo tasks (the size estimate, on the provider the task starts on; the team's runs; fix rounds);
+ * - light: short one-shot calls (HR review, Skills Scout, the office's talk).
  */
 export const WORK_KINDS = ["chat", "routines", "tasks", "light"] as const;
 export type WorkKind = (typeof WORK_KINDS)[number];

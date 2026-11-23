@@ -30,6 +30,14 @@ export function routesOf(config: PublicConfig): RoutesView {
   return { chat, routines: chat, tasks: only(config.ai.task), light: chat };
 }
 
+/**
+ * The providers a route the owner changes starts from: its own, or for a
+ * default route only those that can run. A default provider that cannot (Claude
+ * before it is connected) was never the owner's choice, so adding a provider
+ * to it starts the owner's route without it.
+ */
+export const routeBase = (route: RouteView): AiProviderId[] => route.steps.filter((s) => route.custom || s.ready).map((s) => s.provider);
+
 /** The connected providers (a saved connection, complete or not) a route does not have yet, in the presets' order. */
 export const addableProviders = (view: AiProvidersView, route: readonly AiProviderId[]): AiProviderView[] =>
   view.providers.filter((p) => p.saved && !route.includes(p.id));

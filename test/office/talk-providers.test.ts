@@ -215,6 +215,9 @@ describe("chatTalk", () => {
     expect(calls[1]!.env?.ANTHROPIC_API_KEY).toBe(ANTHROPIC_KEY);
     expect(out).toMatchObject({ raw: LINES, provider: "anthropic" });
     expect(out.costUsd).toBeCloseTo(0.0008, 10);
+    // Each attempt's cost on the provider it ran on: the failed one counts against Kimi's own cap.
+    expect(out.providerCosts?.kimi).toBeCloseTo(0.0001, 10);
+    expect(out.providerCosts?.anthropic).toBeCloseTo(0.0007, 10);
     expect(out.error).toBeUndefined();
 
     // The work's own failure (a budget stop) is not the provider's: nobody else is asked.
@@ -222,6 +225,7 @@ describe("chatTalk", () => {
     const stopped = await chatTalk([kimi, anthropicRuntime(ANTHROPIC_KEY)], CALL, { queryFn: budget.queryFn });
     expect(budget.calls).toHaveLength(1);
     expect(stopped).toMatchObject({ error: "error_max_budget_usd", provider: "kimi" });
+    expect(stopped.providerCosts).toBeUndefined();
   });
 
   it("chooses the light work route, its first provider that is connected", () => {

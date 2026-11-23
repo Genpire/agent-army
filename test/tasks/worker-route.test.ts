@@ -41,17 +41,25 @@ describe("the team's first run on the task route (real git)", () => {
     return { repoDir, sh };
   }
 
+  type CapLeft = { usd: number; scope: "monthly" | "repo" | "provider" } | undefined;
+
   /** A route of runtimes whose runs answer by provider; `current` follows switchTo as the worker's does. */
   function route(runtimes: ProviderRuntime[], runs: Record<string, (prompt: string, budgetUsd: number) => Promise<RouteRun>>) {
     let current = runtimes[0]!;
     const seen: { provider: string; prompt: string; budgetUsd: number }[] = [];
     const switched: { to: string; note: FallbackNote }[] = [];
     const short: { note: FallbackNote; left: number }[] = [];
+    const capped: { note: FallbackNote; left: number }[] = [];
+    const switchFailed: { note: FallbackNote; error: string }[] = [];
     return {
       seen,
       switched,
       short,
-      options: (o: { prompt?: string; budgetUsd?: number; aborted?: () => boolean } = {}) => ({
+      capped,
+      switchFailed,
+      options: (
+        o: { prompt?: string; budgetUsd?: number; aborted?: () => boolean; capLeft?: (provider: string) => Promise<CapLeft>; sessionFails?: string } = {},
+      ) => ({
         runtimes,
         prompt: o.prompt ?? "Fix the login bug.",
         budgetUsd: o.budgetUsd ?? 10,
@@ -61,10 +69,15 @@ describe("the team's first run on the task route (real git)", () => {
           return runs[current.provider]!(prompt, budgetUsd);
         },
         switchTo: async (next: ProviderRuntime, note: FallbackNote) => {
+          // As the worker's: the next provider's session first, which can fail before anything changed.
+          if (o.sessionFails === next.provider) throw new Error(`${next.label} could not start its session`);
           switched.push({ to: next.provider, note });
           current = next;
         },
+        ...(o.capLeft ? { capLeft: o.capLeft } : {}),
         onShort: (note: FallbackNote, left: number) => short.push({ note, left }),
+        onCapped: (note: FallbackNote, left: number) => capped.push({ note, left }),
+        onSwitchFailed: (note: FallbackNote, err: unknown) => switchFailed.push({ note, error: err instanceof Error ? err.message : String(err) }),
       }),
     };
   }
@@ -155,6 +168,102 @@ describe("the team's first run on the task route (real git)", () => {
     const alone = route([kimi], { kimi: async () => ({ costUsd: 1, turns: 1, providerFailure: RATE_LIMITED }) });
     expect((await runOnRoute(alone.options())).run.providerFailure).toEqual(RATE_LIMITED);
     expect(alone.seen).toHaveLength(1);
+  });
+
+  it("bounds the next run by what is left of that provider's caps, and skips one whose own cap leaves too little", async () => {
+    // Claude has $3.40 left of its own cap: the takeover may spend that much, not the $8.75 left of the task's budget.
+    const asked: string[] = [];
+    const bounded = route([kimi, claude], {
+      kimi: async () => ({ costUsd: 1.25, turns: 4, providerFailure: RATE_LIMITED }),
+      anthropic: async () => ({ costUsd: 2, turns: 6 }),
+    });
+    const out = await runOnRoute(
+      bounded.options({
+        capLeft: async (provider) => {
+          asked.push(provider);
+          return provider === "anthropic" ? { usd: 3.409, scope: "provider" } : undefined;
+        },
+      }),
+    );
+    expect(asked).toEqual(["anthropic"]);
+    expect(bounded.seen.map((s) => [s.provider, s.budgetUsd])).toEqual([
+      ["kimi", 10],
+      ["anthropic", 3.4],
+    ]);
+    expect(out.costUsd).toBe(3.25);
+
+    // DeepSeek's own cap is used up: skipped, Claude takes over from Kimi.
+    const skipped = route([kimi, deepseek, claude], {
+      kimi: async () => ({ costUsd: 1, turns: 1, providerFailure: RATE_LIMITED }),
+      deepseek: async () => ({ costUsd: 0, turns: 0 }),
+      anthropic: async () => ({ costUsd: 2, turns: 3 }),
+    });
+    const past = await runOnRoute(skipped.options({ capLeft: async (p) => (p === "deepseek" ? { usd: 0.2, scope: "provider" } : undefined) }));
+    expect(skipped.seen.map((s) => s.provider)).toEqual(["kimi", "anthropic"]);
+    expect(skipped.capped).toEqual([{ note: { from: "kimi", to: "deepseek", reason: "rate limited" }, left: 0.2 }]);
+    expect(past.fallback).toEqual([{ from: "kimi", to: "anthropic", reason: "rate limited" }]);
+    expect(skipped.seen[1]!.prompt).toContain("on Kimi, stopped before it finished (rate limited)");
+
+    // The monthly cap leaves too little: no provider can take over, so the task stops with the failed run.
+    const monthly = route([kimi, deepseek, claude], {
+      kimi: async () => ({ costUsd: 1, turns: 1, providerFailure: RATE_LIMITED }),
+      deepseek: async () => ({ costUsd: 0, turns: 0 }),
+      anthropic: async () => ({ costUsd: 0, turns: 0 }),
+    });
+    const stopped = await runOnRoute(monthly.options({ capLeft: async () => ({ usd: 0.3, scope: "monthly" }) }));
+    expect(monthly.seen).toHaveLength(1);
+    expect(monthly.capped).toEqual([]);
+    expect(monthly.short).toEqual([{ note: { from: "kimi", to: "deepseek", reason: "rate limited" }, left: 0.3 }]);
+    expect(stopped.run.providerFailure).toEqual(RATE_LIMITED);
+  });
+
+  it("stops with the failed run, its cost kept, when the next provider cannot be set up", async () => {
+    const r = route([kimi, claude], {
+      kimi: async () => ({ costUsd: 1.5, turns: 5, providerFailure: RATE_LIMITED }),
+      anthropic: async () => ({ costUsd: 9, turns: 9 }),
+    });
+    const out = await runOnRoute(r.options({ sessionFails: "anthropic" }));
+    expect(r.seen.map((s) => s.provider)).toEqual(["kimi"]);
+    expect(r.switched).toEqual([]);
+    expect(r.switchFailed).toEqual([{ note: { from: "kimi", to: "anthropic", reason: "rate limited" }, error: "Claude could not start its session" }]);
+    expect(out).toMatchObject({ costUsd: 1.5, turns: 5, fallback: [] });
+    expect(out.run.providerFailure).toEqual(RATE_LIMITED);
+  });
+
+  it("does not run the task again after the team changed things in apps, and tells the next run what it did in the browser", async () => {
+    const stripe = { tool: "mcp__app-stripe__create_issue", count: 2 };
+    const held = route([kimi, claude], {
+      kimi: async () => ({ costUsd: 1, turns: 3, providerFailure: RATE_LIMITED, outside: { app: [stripe], browser: [{ tool: "mcp__browser__browser_click", count: 1 }] } }),
+      anthropic: async () => ({ costUsd: 2, turns: 2 }),
+    });
+    const out = await runOnRoute(held.options());
+    expect(held.seen).toHaveLength(1);
+    expect(held.switched).toEqual([]);
+    expect(out.heldBack).toBe(
+      "Kimi failed (rate limited) after the team had changed things in apps (mcp__app-stripe__create_issue (2 times)), so Claude did not take over: running the task again could do them twice.",
+    );
+    expect(out.costUsd).toBe(1);
+
+    // Browser actions only: the next provider takes over, told which ones are done; they add up over the runs that failed.
+    const browsed = route([kimi, deepseek, claude], {
+      kimi: async () => ({
+        costUsd: 1,
+        turns: 1,
+        providerFailure: RATE_LIMITED,
+        outside: { app: [], browser: [{ tool: "mcp__browser__browser_click", count: 3 }, { tool: "mcp__browser__browser_fill_form", count: 1 }] },
+      }),
+      deepseek: async () => ({ costUsd: 1, turns: 1, providerFailure: RATE_LIMITED, outside: { app: [], browser: [{ tool: "mcp__browser__browser_click", count: 1 }] } }),
+      anthropic: async () => ({ costUsd: 1, turns: 1 }),
+    });
+    const done = await runOnRoute(browsed.options());
+    expect(done.heldBack).toBeUndefined();
+    expect(browsed.seen.map((s) => s.provider)).toEqual(["kimi", "deepseek", "anthropic"]);
+    expect(browsed.seen[1]!.prompt).toContain(
+      "Before it stopped, the team also acted on web pages in the browser, which the checkout does not show: mcp__browser__browser_click (3 times), mcp__browser__browser_fill_form. Those actions happened: do not do them again",
+    );
+    expect(browsed.seen[2]!.prompt).toContain("mcp__browser__browser_click (4 times), mcp__browser__browser_fill_form");
+    // Without any: the prompt says nothing of a browser.
+    expect(takeOverPrompt("Fix it.", { provider: "Kimi", reason: "rate limited", browser: [] })).not.toContain("browser");
   });
 });
 

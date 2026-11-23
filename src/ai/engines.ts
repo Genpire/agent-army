@@ -11,14 +11,19 @@
  * its own, `<engine>_run_as_<agent>` or `<engine>_read_as_<agent>`, which runs
  * the CLI with that --model; the others share the engine's tools and its model.
  *
- * Each agent has a line (engine-fallback.ts): its engine, its fallback, then
- * Claude. The task starts it on the first CLI of the line that can run here;
- * when a run fails for the engine's own reasons (a rate limit, quota or credit
- * used up, a rejected key, the service down, a missing model), the same tool
- * call hands the assignment to the next CLI, from the checkout as it is, and
- * the engine stays down for the rest of the task. When no CLI is left, the
- * tool tells the agent to do the work itself: its own Claude tools are in its
- * definition, held back by a PreToolUse hook (RepoTaskEngines.hooks) until then.
+ * Each agent has a line (engine-fallback.ts): its engine, then its fallback,
+ * which may end with Claude. The task starts it on the first CLI of the line
+ * that can run here (no CLI at all: it works as Claude in this task, as
+ * before fallbacks); when a run fails for the engine's own reasons (a rate
+ * limit, quota or credit used up, a rejected key, the service down, a missing
+ * model), the same tool call hands the assignment to the next CLI, from the
+ * checkout as it is, and the engine stays down for the rest of the task. When
+ * no CLI is left, an agent whose line names Claude is told to do the work
+ * itself: its own Claude tools are in its definition, held back by a
+ * PreToolUse hook (RepoTaskEngines.hooks) until then. Any other agent has
+ * only its run tool and read-only checks, as before fallbacks: the tool says
+ * why its CLIs failed and the agent reports back, so the work can go to
+ * another agent.
  *
  * An engine runs only inside its own sandbox (Codex,
  * where the container allows it) or when the owner allowed it to run without
@@ -62,7 +67,8 @@ export interface RepoTaskEngines {
   /**
    * The subagent for an agent whose engine is not "claude"; undefined when no
    * CLI of its line (its engine, then its fallback) is connected and can run
-   * in this task (the agent then works as Claude).
+   * in this task, or when its line names Claude and none works any more (the
+   * agent then works as Claude).
    */
   agentDefinition(agent: AgentSpec, base: AgentDefinition): AgentDefinition | undefined;
   /** Every tool name engine agents may call, for allowedTools. */
@@ -70,12 +76,14 @@ export interface RepoTaskEngines {
   /** Lines for the orchestrator's instructions: which agents work through which CLI, and who takes over. */
   promptRule: string;
   /**
-   * For Options.hooks.PreToolUse, next to the worker's own. An engine agent
-   * has its own Claude tools (to do the work itself once no CLI can), but may
-   * use only its run tool and its read-only checks (Read, Glob, Grep, and Bash
-   * when its access has it) while a CLI of its line still works: the rest are
-   * denied until every CLI of its line is unavailable in this task. Without
-   * these hooks nothing but the prompt holds an engine agent to that.
+   * For Options.hooks.PreToolUse, next to the worker's own; absent when no
+   * line names Claude. An engine agent whose line names Claude has its own
+   * Claude tools (to do the work itself once no CLI can), but may use only
+   * its run tool and its read-only checks (Read, Glob, Grep, and Bash when its
+   * access has it) while a CLI of its line still works: the rest are denied
+   * until every CLI of its line is unavailable in this task. Without these
+   * hooks nothing but the prompt holds such an agent to that. Other engine
+   * agents have no tools beyond those in their definition.
    */
   hooks?: HookCallbackMatcher[];
 }
@@ -1044,41 +1052,61 @@ export interface EngineLineInfo {
   toolName: string;
   /** The CLIs that take over after it, in order ("Codex (gpt-6.2-sol)"). */
   then?: string[];
-  /** Its line names Claude: the team's model, not the cheapest tier, is the agent's own model (it may do the work itself). */
+  /**
+   * Its line names Claude: once no CLI can work, the agent does the work
+   * itself, so its definition has its own tools (held back by the hooks
+   * until then) and the team's model, not the cheapest tier.
+   */
   claude?: boolean;
 }
 
 /**
  * The subagent of an agent that works through an engine: it hands the work
- * over and checks it. It has its own Claude tools too (never more than its
- * base definition's), for when no CLI of its line can work; the hooks
- * (RepoTaskEngines.hooks) hold them back until then.
+ * over and checks it. When its line names Claude, it has its own Claude
+ * tools too (never more than its base definition's), for when no CLI of its
+ * line can work; the hooks (RepoTaskEngines.hooks) hold them back until
+ * then. Otherwise it has only its run tool and the read-only checks, and
+ * reports back when no CLI can do the work, as before fallbacks.
  */
 export function engineAgentDefinition(agent: AgentSpec, base: AgentDefinition, line: EngineLineInfo): AgentDefinition {
   const info = ENGINES[line.id];
   const mode = engineMode(agent);
   const bash = agent.access !== "read";
   const then = line.then?.length ? `, the same call hands the assignment to ${line.then.join(", then ")}, and its result says which did the work. When none can` : "";
+  const noneLeft = line.claude
+    ? `the tool says so: from then on, do the assignment yourself with your own tools, which stay closed to you until then. Start from the checkout as it is, and say in your report that you did the work yourself and why.`
+    : `the tool says so and why: do not do the assignment yourself. Report back that it was not done, with why, so the work can go to another agent.`;
   const prompt = `You are ${agent.name}, the team's ${agent.role}. You work through ${info.label}, ${info.vendor}'s coding agent, which runs in the task's checkout${mode === "read" ? " read-only" : " and can read, edit files and run commands there"}. ${info.label} does the work; you hand it the assignment and check what it did.
 
 How you work:
 1. Send the whole assignment to ${line.toolName} in one call: everything you were given (the goal, files, constraints, how to check the result), with the parts of your own instructions below that apply. Do not do the work yourself first, and do not split it into many small calls.
-2. When it returns, verify the result yourself, read-only: Read and Grep the files it changed${bash ? ", and look at `git status` and `git diff`" : ""}. Never edit files yourself${bash ? " or run commands that change anything" : ""} while a coding agent CLI works for you.
+2. When it returns, verify the result yourself, read-only: Read and Grep the files it changed${bash ? ", and look at `git status` and `git diff`" : ""}. Never edit files yourself${bash ? " or run commands that change anything" : ""}${line.claude ? " while a coding agent CLI works for you" : ""}.
 3. If it failed or missed part of the assignment, call it once more with exactly what is missing. If it still cannot do it, say so plainly.
 4. Report back: what changed (each file and a sentence), what you verified, and anything left undone or failing.
 
-When ${info.label} itself cannot work (a rate limit, its quota or credit used up, a rejected key, the service down)${then}, the tool says so: from then on, do the assignment yourself with your own tools, which stay closed to you until then. Start from the checkout as it is, and say in your report that you did the work yourself and why. A failure of the work itself (a wrong change, failing tests) is not that: follow step 3.
+When ${info.label} itself cannot work (a rate limit, its quota or credit used up, a rejected key, the service down)${then}, ${noneLeft} A failure of the work itself (a wrong change, failing tests) is not that: follow step 3.
 
 Your own instructions:
 ${base.prompt}`;
-  // The engine does the heavy lifting: the task provider's cheapest tier hands work over and checks it. A line that names Claude gets the team's model, as Claude would.
-  const model = line.claude ? base.model : (base.model ?? "haiku");
+  if (!line.claude) {
+    return {
+      description: base.description,
+      tools: [line.toolName, ...checkTools(agent)],
+      prompt,
+      // The engine does the heavy lifting: the task provider's cheapest tier hands work over and checks it.
+      model: base.model ?? "haiku",
+      ...(base.effort !== undefined ? { effort: base.effort } : {}),
+      background: false,
+      // No mcpServers: the engines server is the query's own (top level), and its tools reach subagents through `tools`, as in chat.
+    };
+  }
   return {
     description: base.description,
     // Its own tools after the run tool and the checks; an agent whose base definition lists none (all tools) gets the checks only.
     tools: [...new Set([line.toolName, ...checkTools(agent), ...(base.tools ?? [])])],
     prompt,
-    ...(model ? { model } : {}),
+    // The team's model, as Claude would have: it may end up doing the work itself.
+    ...(base.model ? { model: base.model } : {}),
     ...(base.effort !== undefined ? { effort: base.effort } : {}),
     background: false,
     // Its own servers (browser, apps), for its own tools. The engines server is the query's (top level): its tools reach subagents through `tools`, as in chat.
@@ -1090,18 +1118,20 @@ ${base.prompt}`;
 /** A CLI of an agent's line as people read it: "Codex", "Codex (gpt-6.2-sol)". */
 const stepText = (id: EngineId, model: string) => `${ENGINES[id].label}${model ? ` (${model})` : ""}`;
 
-/** The orchestrator's rule: which agents work through which CLI, and who takes over. */
-function enginePromptRule(entries: { agent: AgentSpec; steps: LineStep[] }[]): string {
-  const lines = entries.map(({ agent: a, steps }) => {
+/** The orchestrator's rule: which agents work through which CLI, who takes over, and whether Claude does at the end. */
+function enginePromptRule(entries: { agent: AgentSpec; steps: LineStep[]; claude: boolean }[]): string {
+  const lines = entries.map(({ agent: a, steps, claude }) => {
     const [first, ...rest] = steps as [LineStep, ...LineStep[]];
-    const line = `- ${a.id} (${a.name}, ${a.role}) works through ${ENGINES[first.engine].label}${first.model ? ` on ${first.model}` : ""} and ${engineMode(a) === "read" ? "looks only" : "changes files"}`;
-    return rest.length ? `${line}; if ${ENGINES[first.engine].label} is unavailable, the work moves to ${rest.map((s) => stepText(s.engine, s.model)).join(", then ")}.` : `${line}.`;
+    const label = ENGINES[first.engine].label;
+    const line = `- ${a.id} (${a.name}, ${a.role}) works through ${label}${first.model ? ` on ${first.model}` : ""} and ${engineMode(a) === "read" ? "looks only" : "changes files"}`;
+    const after = [...rest.map((s) => stepText(s.engine, s.model)), ...(claude ? [`${a.name} itself as Claude`] : [])];
+    return after.length ? `${line}; if ${label} is unavailable, the work moves to ${after.join(", then ")}.` : `${line}.`;
   });
   return [
     "Coding agent CLIs: these agents hand their assignment to a coding agent CLI that works in the checkout like any coding agent (it reads code, edits files and runs commands), then check the result and report back.",
     ...lines,
     "Give each one a complete, self-contained assignment (the goal, files, constraints, how to check it), as you would any coding agent; review what they changed like any other agent's work. Do not call the mcp__engines__* tools yourself: hand the work to these agents.",
-    "When a CLI fails for its own reasons (a rate limit, its quota or credit used up, a rejected key, an outage), the agent's tool hands the assignment to the next CLI of its line in the same call, and when none is left the agent does the work itself as Claude; its report says who did the work. A failure of the work itself never moves it.",
+    "When a CLI fails for its own reasons (a rate limit, its quota or credit used up, a rejected key, an outage), the agent's tool hands the assignment to the next CLI of its line in the same call. When none is left, an agent whose line ends with Claude does the work itself; any other reports back that it could not, so give that work to another agent. Its report says who did the work. A failure of the work itself never moves it.",
   ].join("\n");
 }
 
@@ -1133,6 +1163,8 @@ interface ToolLine {
   agents: AgentSpec[];
   /** The agent whose own tool it is. */
   own?: string;
+  /** Its agent's line names Claude: when no CLI is left, the agent does the work itself (else it reports back). An agent's own tool only. */
+  claude: boolean;
   /** Steps that could not run here (refused, or could not start), for the rest of the task. */
   skipped: Map<number, EngineFailure>;
   /** Steps already said to be down in the timeline. */
@@ -1253,6 +1285,8 @@ export async function repoTaskEngines(config: Config, deps: EngineDeps): Promise
     steps,
     agents,
     ...(own ? { own } : {}),
+    // A shared tool's agents have no fallback, so no Claude in their line.
+    claude: own ? (lines.get(own)?.claude ?? false) : false,
     skipped: new Map(),
     noted: new Set(),
   });
@@ -1280,7 +1314,7 @@ export async function repoTaskEngines(config: Config, deps: EngineDeps): Promise
     const step = line.steps[i]!;
     return line.skipped.get(i) ?? down.get(step.id) ?? down.get(modelKey(step));
   };
-  /** The step of a line that works now; undefined = none: the agent works as Claude. */
+  /** The step of a line that works now; undefined = none: the agent works as Claude when its line names Claude, else reports back. */
   const current = (line: ToolLine): number | undefined => {
     for (let i = 0; i < line.steps.length; i++) if (!downOf(line, i)) return i;
     return undefined;
@@ -1294,7 +1328,11 @@ export async function repoTaskEngines(config: Config, deps: EngineDeps): Promise
 
   const label = (s: ToolStep) => ENGINES[s.id].label;
   const said = (s: ToolStep, f: EngineFailure) => `${FAILURE_SAID[f.kind]}${f.kind === "model" && s.runner.model ? ` ${s.runner.model}` : ""}`;
-  const asClaude = (line: ToolLine) => `${names(line.agents)} ${verb(line.agents, "works", "work")} as Claude from now on`;
+  /** What becomes of a line's agents once no CLI of it is left. */
+  const noneLeft = (line: ToolLine) =>
+    line.claude
+      ? `${names(line.agents)} ${verb(line.agents, "works", "work")} as Claude from now on`
+      : `no coding agent CLI is left for ${names(line.agents)} in this task, so ${verb(line.agents, "it reports", "they report")} back without doing the work`;
   const note = (text: string) => deps.note(deps.redact(text).slice(0, NOTE_MAX_CHARS * 2));
   const unavailable = (s: ToolStep, f: EngineFailure) => `${label(s)} is unavailable for the rest of this task (${f.reason}${f.detail ? `: ${f.detail}` : ""}).`;
 
@@ -1311,7 +1349,7 @@ export async function repoTaskEngines(config: Config, deps: EngineDeps): Promise
       if (line.noted.has(j)) continue;
       line.noted.add(j);
       const next = i === undefined ? undefined : line.steps[i];
-      note(`${label(step)} is unavailable in this task (${failure.reason}); ${next ? `${label(next)} takes over for ${names(line.agents)}` : asClaude(line)}.`);
+      note(`${label(step)} is unavailable in this task (${failure.reason}); ${next ? `${label(next)} takes over for ${names(line.agents)}` : noneLeft(line)}.`);
     }
     while (i !== undefined) {
       const step = line.steps[i]!;
@@ -1342,14 +1380,24 @@ export async function repoTaskEngines(config: Config, deps: EngineDeps): Promise
       line.noted.add(i);
       moves.push({ step, failure: result.failure, ran: true });
       const next = current(line);
-      note(`${label(step)} ${said(step, result.failure)} for ${names(line.agents)}; ${next === undefined ? asClaude(line) : `${label(line.steps[next]!)} takes over`}.`);
+      note(`${label(step)} ${said(step, result.failure)} for ${names(line.agents)}; ${next === undefined ? noneLeft(line) : `${label(line.steps[next]!)} takes over`}.`);
       i = next;
     }
-    // None left: the agent does the work itself, its own tools open from now on (the hooks).
     const first = moves[0]!.step;
+    const why = moves.map((m) => unavailable(m.step, m.failure)).join(" ");
+    if (!line.claude) {
+      // None left and no Claude in its line: the failure, with why, for the agent to report (as before fallbacks).
+      return reply(
+        false,
+        `${why} No coding agent CLI can work for you for the rest of this task.
+
+Do not do the assignment yourself. Report back that it was not done because ${label(first)} was unavailable, with the reason above, so the work can go to another agent. Do not call ${line.tool} again in this task.`,
+      );
+    }
+    // None left: the agent does the work itself, its own tools open from now on (the hooks).
     return reply(
       true,
-      `${moves.map((m) => unavailable(m.step, m.failure)).join(" ")} No coding agent CLI can work for you for the rest of this task.
+      `${why} No coding agent CLI can work for you for the rest of this task.
 
 Do the assignment yourself now, with your own tools: they are open to you from now on. Start from the checkout as it is${line.mode === "write" ? " (`git status` and `git diff` show anything a CLI changed before it stopped)" : ""}, do the whole assignment as your own instructions say, and say in your report that you did the work yourself because ${label(first)} was unavailable. Do not call ${line.tool} again in this task.`,
     );
@@ -1377,7 +1425,7 @@ Do the assignment yourself now, with your own tools: they are open to you from n
     );
   };
 
-  /** The engine agents whose engine definition the latest run of the team got, by id: the hooks hold only them. */
+  /** The engine agents whose line names Claude and whose engine definition the latest run of the team got, by id: the hooks hold only them. */
   const gated = new Map<string, { line: ToolLine; allowed: Set<string> }>();
   const gate: HookCallback = async (input) => {
     if (input.hook_event_name !== "PreToolUse" || !input.agent_type) return {};
@@ -1405,23 +1453,26 @@ Do the assignment yourself now, with your own tools: they are open to you from n
     agentDefinition: (agent, base) => {
       const entry = byAgent.get(agent.id);
       const i = entry ? current(entry.line) : undefined;
-      // Only as the task set it up (a changed line or access has no tool here), and while a CLI of its line works: once none does, it works as Claude.
-      if (!entry || entry.key !== lineKey(agent) || i === undefined) {
+      // Only as the task set it up (a changed line or access has no tool here). Once no CLI of its line works, an agent
+      // whose line names Claude works as Claude; any other keeps its definition, and its tool says why it cannot work.
+      if (!entry || entry.key !== lineKey(agent) || (i === undefined && entry.line.claude)) {
         gated.delete(agent.id);
         return undefined;
       }
-      gated.set(agent.id, entry);
+      if (entry.line.claude) gated.set(agent.id, entry);
+      else gated.delete(agent.id);
       const steps = entry.line.steps;
+      const at = i ?? 0;
       return engineAgentDefinition(agent, base, {
-        id: steps[i]!.id,
+        id: steps[at]!.id,
         toolName: entry.line.tool,
-        then: steps.slice(i + 1).map((s) => stepText(s.id, s.runner.model)),
-        claude: lines.get(agent.id)?.claude ?? false,
+        then: i === undefined ? [] : steps.slice(at + 1).map((s) => stepText(s.id, s.runner.model)),
+        claude: entry.line.claude,
       });
     },
     allToolNames: toolLines.map((l) => l.tool),
-    promptRule: enginePromptRule(toolLines.flatMap((l) => l.agents.map((agent) => ({ agent, steps: live.get(agent.id)! })))),
-    hooks: [{ hooks: [gate] }],
+    promptRule: enginePromptRule(toolLines.flatMap((l) => l.agents.map((agent) => ({ agent, steps: live.get(agent.id)!, claude: l.claude })))),
+    ...(toolLines.some((l) => l.claude) ? { hooks: [{ hooks: [gate] }] } : {}),
   };
 }
 

@@ -130,6 +130,12 @@ export interface PointerReply {
   agentCosts?: AgentCosts;
   /** The AI provider that answered (the first of the chat or routines route that could), for its monthly cap. */
   provider?: string;
+  /**
+   * What each provider spent of costUsd when more than one ran (a provider
+   * failed and the next answered), so each one's cap sees its own part
+   * (UsageRepo.recordChat). Absent: all of it is `provider`'s.
+   */
+  providerCosts?: Record<string, number>;
   /** Providers that failed before this one answered (routing.ts), in order; absent when the first answered. */
   fallback?: FallbackNote[];
   isError: boolean;

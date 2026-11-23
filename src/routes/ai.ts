@@ -355,14 +355,19 @@ export function aiRoutes(deps: IntegrationRouteDeps, check: ConnectionTestDeps =
     res.json({ ok: true, chatProvider: saved.ai.chatProvider, taskProvider: saved.ai.taskProvider });
   });
 
-  // Sets a kind of work's providers in order (an empty list goes back to the default); each must be connected and complete.
+  // Sets a kind of work's providers in order (an empty list goes back to the default); each one it adds must be connected
+  // and complete. One already in the kind's route (routeFor: its own, or the default) is not checked again, so a route
+  // that holds a provider that is not ready (the default Claude before it is connected, one whose connection broke since)
+  // can still be reordered, cut down or added to; the work skips that provider until it can run (routing.ts).
   // Chat and repo tasks start on their route's first provider, so chatProvider and taskProvider follow it.
   router.post("/api/ai/routes", requireAdmin, async (req, res) => {
     const input = body(ROUTE, req.body);
     if ("error" in input) return void res.status(400).json({ error: input.error });
     const { kind, providers } = input.data;
     const config = await configRepo.load(true);
+    const current = new Set(routeFor(config, kind));
     for (const id of providers) {
+      if (current.has(id)) continue;
       const problem = providerProblem(config, id);
       if (problem) return void res.status(400).json({ error: connectFirst(problem) });
     }

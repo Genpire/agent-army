@@ -18,7 +18,7 @@ import { PlusIcon } from "@heroicons/react/24/outline";
 import { OrderControls } from "../../components/OrderControls";
 import { ProviderLogo } from "../../components/ProviderLogo";
 import { providerById } from "../../lib/aiProviders";
-import { ROUTE_EXPLANATION, addableProviders, routeSavedText, routesOf, stepProblem, workKindInfo } from "../../lib/aiRoutes";
+import { ROUTE_EXPLANATION, addableProviders, routeBase, routeSavedText, routesOf, stepProblem, workKindInfo } from "../../lib/aiRoutes";
 import { api } from "../../lib/api";
 import { moveItem, removeAt } from "../../lib/order";
 import { useConfig } from "../../lib/state";
@@ -60,6 +60,8 @@ interface RouteEditorProps extends AiRoutesProps {
 function RouteEditor({ kind, label, description, byDefault, route, view, reload }: RouteEditorProps) {
   const { save, pending, error } = useSave();
   const providers = route.steps.map((s) => s.provider);
+  // What an added provider joins: a default route's step that cannot run is left out of the owner's new route.
+  const base = routeBase(route);
   const addable = addableProviders(view, providers);
   const isFull = providers.length >= ROUTE_MAX;
 
@@ -102,7 +104,7 @@ function RouteEditor({ kind, label, description, byDefault, route, view, reload 
               label: p.name,
               description: p.configured ? undefined : (p.problem ?? "Not complete"),
               icon: <ProviderLogo provider={p} />,
-              onClick: () => void saveRoute([...providers, p.id]),
+              onClick: () => void saveRoute([...base, p.id]),
             }))}
           />
         </HStack>

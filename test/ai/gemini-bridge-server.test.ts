@@ -351,3 +351,60 @@ describe("who the Gemini bridge answers", () => {
     expect(upstream.calls).toEqual([]);
   });
 });
+
+describe("a session's limits on the Gemini bridge", () => {
+  const ask = { model: "gemini-4-carbon", max_tokens: 5, messages: [{ role: "user", content: "hi" }] };
+
+  it("answers 429 past the requests a session may have in flight, and frees a place when one ends", async () => {
+    // Gemini holds every call until the test lets it answer.
+    const held: (() => void)[] = [];
+    const { bridge, handle, upstream } = await startBridge(
+      () =>
+        new Promise<Response>((resolve) => {
+          held.push(() => resolve(json(GEMINI_TEXT("OK"))));
+        }),
+      { maxConcurrent: 2 },
+    );
+    const first = post(handle, "/v1/messages", ask);
+    const second = post(handle, "/v1/messages", { ...ask, stream: true });
+    await expect.poll(() => upstream.calls.length).toBe(2);
+
+    const third = await post(handle, "/v1/messages/count_tokens", { model: "gemini-4-carbon", messages: [{ role: "user", content: "hi" }] });
+    expect(third.status).toBe(429);
+    expect(third.headers.get("retry-after")).toBe("1");
+    expect(await third.json()).toEqual({
+      type: "error",
+      error: { type: "rate_limit_error", message: "This session already has 2 requests in progress on the Gemini bridge. Try again when one has finished." },
+    });
+    expect(upstream.calls).toHaveLength(2);
+
+    // Another session is not held by this one's.
+    const other = await bridge.open(KEY, MODELS);
+    const elsewhere = post(other, "/v1/messages", ask);
+    await expect.poll(() => upstream.calls.length).toBe(3);
+
+    for (const release of held.splice(0)) release();
+    expect((await first).status).toBe(200);
+    expect((await second).status).toBe(200);
+    expect((await elsewhere).status).toBe(200);
+    // Both places are free again.
+    const after = post(handle, "/v1/messages", ask);
+    await expect.poll(() => held.length).toBe(1);
+    held.pop()!();
+    expect((await after).status).toBe(200);
+  });
+
+  it("answers 429 without a retry once a session has made the requests it may make in all", async () => {
+    const { bridge, handle, upstream } = await startBridge(() => json(GEMINI_TEXT("OK")), { maxRequests: 2 });
+    expect((await post(handle, "/v1/messages", ask)).status).toBe(200);
+    // A refused request counts too: the limit is on what the token asks for.
+    expect((await post(handle, "/v1/messages", "{nope")).status).toBe(400);
+    const over = await post(handle, "/v1/messages", ask);
+    expect(over.status).toBe(429);
+    expect(over.headers.get("x-should-retry")).toBe("false");
+    expect(await over.json()).toMatchObject({ error: { type: "rate_limit_error", message: "This session has made the 2 requests the Gemini bridge allows one session." } });
+    expect(upstream.calls).toHaveLength(1);
+    // A new session starts with its own count.
+    expect((await post(await bridge.open(KEY, MODELS), "/v1/messages", ask)).status).toBe(200);
+  });
+});

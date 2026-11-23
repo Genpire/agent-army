@@ -2041,9 +2041,12 @@ describe("Pointer brain: routes and fallback", () => {
     for (const call of calls) expect(existsSync(call.options.cwd!)).toBe(false);
 
     expect(reply).toMatchObject({ text: "Here is the answer.", isError: false, provider: "anthropic", fallback: [{ from: "kimi", to: "anthropic", reason: "rate limited" }] });
-    // The failed attempt's cost counts too.
+    // The failed attempt's cost counts too, on Kimi's own cap.
     expect(reply.costUsd).toBeCloseTo(0.0431, 10);
     expect(reply.agentCosts?.pointer?.usd).toBeCloseTo(0.0431, 10);
+    expect(Object.keys(reply.providerCosts ?? {}).sort()).toEqual(["anthropic", "kimi"]);
+    expect(reply.providerCosts?.kimi).toBeCloseTo(0.001, 10);
+    expect(reply.providerCosts?.anthropic).toBeCloseTo(0.0421, 10);
 
     // The console drops the failed attempt's partial text, then says what happened.
     const at = events.findIndex((e) => e.type === "step");

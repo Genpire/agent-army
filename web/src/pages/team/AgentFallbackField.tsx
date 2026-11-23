@@ -34,10 +34,11 @@ export interface AgentFallbackFieldProps {
 /**
  * Who takes over an agent's repo-task work, in order, when its engine cannot
  * do it (AgentSpec.fallback): up to AGENT_FALLBACK_MAX engines, each with the
- * model its CLI runs. Claude is always offered; a CLI that is not connected
- * can be chosen and is skipped until it is.
+ * model its CLI runs. Claude is always offered, and takes over only when it
+ * is in the list; a CLI that is not connected can be chosen and is skipped
+ * until it is.
  */
-/** Claude is the last resort: nothing comes after it (the server refuses that), so it is kept last. */
+/** Claude, when listed, is last: nothing comes after it (the server refuses that), so it is kept last. */
 const claudeLast = (fallback: AgentFallback[]): AgentFallback[] => [...fallback.filter((f) => f.engine !== "claude"), ...fallback.filter((f) => f.engine === "claude")];
 
 export function AgentFallbackField({ engine, value, onChange: change }: AgentFallbackFieldProps) {

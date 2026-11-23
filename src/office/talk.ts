@@ -221,13 +221,19 @@ export class OfficeTalk {
     }
   }
 
-  /** What the call cost counts with chat, shared evenly between the people talking, on the provider it ran on. */
+  /** What the call cost counts with chat, shared evenly between the people talking, on the providers it ran on (a failed attempt's on its own). */
   private recordSpend(outcome: TalkOutcome, choice: TalkChoice, people: TalkPerson[]): void {
     if (!this.deps.usage || (outcome.costUsd <= 0 && outcome.tokens <= 0)) return;
     const share = { usd: outcome.costUsd / people.length, tokens: Math.round(outcome.tokens / people.length) };
     const agentCosts: AgentCosts = Object.fromEntries(people.map((p) => [p.id, { ...share }]));
+    const gemini = choice.id === "gemini";
     void this.deps.usage
-      .recordChat({ costUsd: outcome.costUsd, provider: choice.id === "gemini" ? "gemini" : (outcome.provider ?? choice.runtime.provider), agentCosts })
+      .recordChat({
+        costUsd: outcome.costUsd,
+        provider: gemini ? "gemini" : (outcome.provider ?? choice.runtime.provider),
+        ...(!gemini && outcome.providerCosts ? { providerCosts: outcome.providerCosts } : {}),
+        agentCosts,
+      })
       .then(() => this.deps.spending?.notify())
       .catch((err: unknown) => console.error(`[office] cost not recorded: ${(err instanceof Error ? err.message : String(err)).slice(0, 200)}`));
   }

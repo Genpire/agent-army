@@ -6,6 +6,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { RouteView } from "../../src/ai/routing.js";
 import type { WorkKind } from "../../src/core/config.js";
 import { createApp } from "../../src/server.js";
+import { routeBase } from "../../web/src/lib/aiRoutes.js";
 
 type Routes = Record<WorkKind, RouteView>;
 
@@ -150,5 +151,63 @@ describe("AI routes admin API", () => {
     });
     // Put the deleted provider back for the other tests.
     expect((await post("/api/ai/providers/deepseek", { secrets: { apiKey: "sk-deepseek-routes-secret-0003" } })).status).toBe(200);
+  });
+});
+
+/** A route that holds a provider that cannot run (Claude not connected yet) can still be changed: only the providers a save adds are checked. */
+describe("AI routes admin API, Claude not connected", () => {
+  let base = "";
+  let close: () => void;
+  let cookie = "";
+  const post = (path: string, body: unknown = {}) =>
+    fetch(base + path, { method: "POST", headers: { "content-type": "application/json", ...(cookie ? { cookie } : {}) }, body: JSON.stringify(body) });
+  const setRoute = async (kind: string, providers: string[]) => {
+    const res = await post("/api/ai/routes", { kind, providers });
+    return { status: res.status, body: (await res.json()) as { routes?: Routes; error?: string } };
+  };
+
+  beforeAll(async () => {
+    process.env.SKIP_VALIDATION = "1";
+    const dir = await mkdtemp(join(tmpdir(), "army-ai-routes-noclaude-"));
+    const { app } = await createApp({ DATA_DIR: dir, MASTER_KEY: "m", SETUP_TOKEN: "setup-456", RUNNER: "local" });
+    const server = app.listen(0);
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    close = () => server.close();
+    const res = await post("/api/setup", { setupToken: "setup-456", password: "longpassword1" });
+    cookie = res.headers.get("set-cookie")!.split(";")[0]!;
+    expect((await post("/api/ai/providers/kimi", { secrets: { apiKey: "sk-kimi-routes-secret-0004" } })).status).toBe(200);
+  });
+  afterAll(() => {
+    close();
+    delete process.env.SKIP_VALIDATION;
+  });
+
+  it("adds to, reorders and cuts down a route that holds a provider that is not ready, and checks only what it adds", async () => {
+    // The default chat route is Claude alone, not connected: Kimi can still be added after it.
+    const added = await setRoute("chat", ["anthropic", "kimi"]);
+    expect(added.status).toBe(200);
+    expect(added.body.routes?.chat.steps.map((s) => [s.provider, s.ready])).toEqual([
+      ["anthropic", false],
+      ["kimi", true],
+    ]);
+    // Reordered, then cut down to Kimi alone, with Claude still not connected.
+    expect((await setRoute("chat", ["kimi", "anthropic"])).status).toBe(200);
+    const cut = await setRoute("chat", ["kimi"]);
+    expect(cut.status).toBe(200);
+    expect(cut.body.routes?.chat).toEqual({ custom: true, steps: [{ provider: "kimi", name: "Kimi", ready: true }] });
+    // Claude is not in the route any more: adding it back is checked, and refused until it is connected.
+    expect(await setRoute("chat", ["kimi", "anthropic"])).toEqual({ status: 400, body: { error: expect.stringMatching(/^Claude is not connected/) } });
+    // A provider never in the route is checked as before.
+    expect((await setRoute("tasks", ["anthropic", "qwen"])).status).toBe(400);
+    // Back to the default, whatever it holds.
+    expect((await setRoute("chat", [])).status).toBe(200);
+  });
+
+  it("starts the owner's route without a default step that cannot run (the console's list)", () => {
+    const notReady: RouteView = { custom: false, steps: [{ provider: "anthropic", name: "Claude", ready: false }] };
+    expect(routeBase(notReady)).toEqual([]);
+    expect(routeBase({ ...notReady, steps: [{ ...notReady.steps[0]!, ready: true }] })).toEqual(["anthropic"]);
+    // A route the owner set keeps every step, ready or not.
+    expect(routeBase({ ...notReady, custom: true })).toEqual(["anthropic"]);
   });
 });

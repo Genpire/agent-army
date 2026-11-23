@@ -47,6 +47,27 @@ export const BROWSER_TOOLS = [
   "browser_emulate_media",
 ].map(tool);
 
+/**
+ * The browser tools that act on a page (click, type, submit a form, run a
+ * script, upload a file): they can change things wherever the page lives,
+ * outside the checkout. Navigating, reading and screenshots change nothing
+ * there. A repo task that moves to another provider tells it which ran
+ * (worker.ts, takeOverPrompt), so it does not do them again.
+ */
+export const BROWSER_ACTION_TOOLS: ReadonlySet<string> = new Set(
+  [
+    "browser_click",
+    "browser_type",
+    "browser_fill_form",
+    "browser_select_option",
+    "browser_drag",
+    "browser_press_key",
+    "browser_evaluate",
+    "browser_handle_dialog",
+    "browser_file_upload",
+  ].map(tool),
+);
+
 export type BrowserServerConfig = McpStdioServerConfig;
 
 /**

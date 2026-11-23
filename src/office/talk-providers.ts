@@ -74,6 +74,8 @@ export interface TalkOutcome {
   error?: string;
   /** "chat" only: the provider that answered (or was asked last), whose spend the call is. */
   provider?: AiProviderId;
+  /** "chat" only: what each provider asked spent of costUsd, when more than one was (a failed one's on its own cap). */
+  providerCosts?: Record<string, number>;
 }
 
 export interface TalkCallOptions {
@@ -174,14 +176,17 @@ export async function geminiTalk(key: string, call: TalkCall, opts: TalkCallOpti
 export async function chatTalk(route: ProviderRuntime | ProviderRuntime[], call: TalkCall, opts: TalkCallOptions = {}): Promise<TalkOutcome> {
   let costUsd = 0;
   let tokens = 0;
+  // Each attempt's cost on the provider it ran on, so a failed one counts against its own cap.
+  const providerCosts: Record<string, number> = {};
   const done = await acrossRoute(Array.isArray(route) ? route : [route], async (runtime) => {
     const attempt = await chatTalkOn(runtime, call, opts);
     costUsd += attempt.value.costUsd;
     tokens += attempt.value.tokens;
+    if (attempt.value.costUsd > 0) providerCosts[runtime.provider] = (providerCosts[runtime.provider] ?? 0) + attempt.value.costUsd;
     return attempt;
   });
   for (const note of done.fallback) console.warn(`[office] ${fallbackLine(note, "took over")}`);
-  return { ...done.value, costUsd, tokens, provider: done.runtime.provider };
+  return { ...done.value, costUsd, tokens, provider: done.runtime.provider, ...(done.fallback.length ? { providerCosts } : {}) };
 }
 
 /** One conversation from one provider, as estimateTaskSize asks for a size, and the provider failure it ended on, if any. */

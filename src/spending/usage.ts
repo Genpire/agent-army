@@ -66,6 +66,12 @@ export interface ChatSpend {
   agentCosts?: AgentCosts;
   /** The provider it ran on; absent: the chat provider when the month is read. */
   provider?: string;
+  /**
+   * What each provider spent of costUsd, when more than one did (a provider
+   * failed and the next answered, routing.ts). What they leave of costUsd is
+   * `provider`'s.
+   */
+  providerCosts?: Record<string, number>;
 }
 
 type Tally = UsageTotals & { tokens?: number };
@@ -119,9 +125,10 @@ export class UsageRepo {
         a.count += 1;
         if (amount(c.tokens) > 0) a.tokens = (a.tokens ?? 0) + amount(c.tokens);
       }
-      if (s.provider) {
-        const p = (current.providers[s.provider] ??= { usd: 0, count: 0 });
-        p.usd += costUsd;
+      // Each provider its own part (a failed attempt's on the provider that failed), the rest on the one that answered.
+      for (const [provider, usd] of providerParts(s.providerCosts, s.provider, costUsd)) {
+        const p = (current.providers[provider] ??= { usd: 0, count: 0 });
+        p.usd += usd;
         p.count += 1;
       }
       await this.store.put(
@@ -255,17 +262,46 @@ export function agentTotals(tasks: Pick<Task, "agentCosts">[], chat: Pick<ChatTa
   return by.sorted((a) => a.agentId);
 }
 
-/** Per provider: each repo task's Claude cost on the provider it ran on, its engine runs' estimates, and chat. */
+/**
+ * A cost shared out between the providers that spent it: each one's own part
+ * (`costs`, when more than one ran), and what they leave of `total` on
+ * `provider` (the one that did the work; all of it without `costs`). The
+ * providers in the order they come, each once; `provider` is listed even when
+ * nothing is left for it, so its count goes up as before.
+ */
+export function providerParts(costs: Record<string, number> | undefined, provider: string | undefined, total: number): [string, number][] {
+  const parts = new Map<string, number>();
+  for (const [p, usd] of Object.entries(costs ?? {})) {
+    if (validCost(usd) && usd > 0) parts.set(p, (parts.get(p) ?? 0) + usd);
+  }
+  const rest = total - [...parts.values()].reduce((sum, usd) => sum + usd, 0);
+  if (provider) parts.set(provider, (parts.get(provider) ?? 0) + (rest > 1e-9 ? rest : 0));
+  return [...parts.entries()];
+}
+
+/** `costs` with `usd` more on `provider`: a run's cost, added when it ends. */
+export function addProviderCost(costs: Record<string, number> | undefined, provider: string, usd: number): Record<string, number> {
+  const next = { ...costs };
+  if (validCost(usd) && usd > 0) next[provider] = (next[provider] ?? 0) + usd;
+  return next;
+}
+
+/** Per provider: each repo task's Claude cost on the providers it ran on (the one that did the work for older tasks), its engine runs' estimates, and chat. */
 export function providerTotals(
-  tasks: Pick<Task, "costUsd" | "provider" | "agentCosts">[],
+  tasks: Pick<Task, "costUsd" | "provider" | "providerCosts" | "agentCosts">[],
   chat: Pick<ChatTally, "usd" | "count" | "providers">,
   chatProvider: string,
 ): ProviderUsage[] {
   const by = totalsBy<ProviderUsage>((provider) => ({ provider, ...blank() }));
   for (const t of tasks) {
+    // A task that moved to the next provider of its route: each one's runs on it; tasks saved before that, all on `provider`.
+    for (const [provider, usd] of providerParts(t.providerCosts, t.provider ?? "anthropic", amount(t.costUsd))) {
+      const e = by.get(provider);
+      e.usd += usd;
+      e.tasks += 1;
+    }
+    // Tokens are counted on the provider that did the work.
     const own = by.get(t.provider ?? "anthropic");
-    own.usd += amount(t.costUsd);
-    own.tasks += 1;
     const engines = new Set<string>();
     for (const c of Object.values(t.agentCosts ?? {})) {
       if (!c) continue;

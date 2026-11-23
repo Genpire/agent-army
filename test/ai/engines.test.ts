@@ -729,21 +729,24 @@ describe("coding agent CLIs in a repo task", () => {
       expect(engines.promptRule).toContain("- codex (Codex, Coder (Codex)) works through Codex and changes files.");
       expect(engines.promptRule).toContain("- gemini (Gemini, Coder (Gemini CLI)) works through Gemini CLI and looks only.");
 
-      const base: AgentDefinition = { description: "Codex (Coder): writes code", tools: ["Read", "Edit"], prompt: "My own instructions.", effort: "medium" };
+      const base: AgentDefinition = { description: "Codex (Coder): writes code", tools: ["Read", "Edit"], prompt: "My own instructions.", effort: "medium", mcpServers: ["browser"] };
       const def = engines.agentDefinition(coder, base)!;
-      // Its own tools too, after the run tool and the checks (the hooks hold them back while the CLI works).
-      expect(def.tools).toEqual(["mcp__engines__codex_run", "Read", "Glob", "Grep", "Bash", "Edit"]);
+      // No Claude in its line: its run tool and the read-only checks only, none of its own tools or servers, on the cheap tier.
+      expect(def.tools).toEqual(["mcp__engines__codex_run", "Read", "Glob", "Grep", "Bash"]);
       expect(def.model).toBe("haiku");
       expect(def.description).toBe(base.description);
       expect(def.mcpServers).toBeUndefined();
       expect(def.prompt).toContain("You are Codex, the team's Coder (Codex). You work through Codex, OpenAI's coding agent");
       expect(def.prompt).toContain("Send the whole assignment to mcp__engines__codex_run in one call");
+      expect(def.prompt).toContain("Never edit files yourself or run commands that change anything.");
+      expect(def.prompt).toContain("the tool says so and why: do not do the assignment yourself. Report back that it was not done, with why, so the work can go to another agent.");
       expect(def.prompt).toContain("My own instructions.");
       expect(engines.agentDefinition(coder, { ...base, model: "claude-haiku-5-5" })!.model).toBe("claude-haiku-5-5");
+      // Nothing to hold back: no hooks.
+      expect(engines.hooks).toBeUndefined();
 
       const readDef = engines.agentDefinition(looker, { ...base, tools: ["Read", "Glob", "Grep", "WebSearch", "WebFetch"] })!;
-      expect(readDef.tools).toEqual(["mcp__engines__gemini_run_read_only", "Read", "Glob", "Grep", "WebSearch", "WebFetch"]);
-      // A base definition with no list (every tool) adds nothing: the checks only.
+      expect(readDef.tools).toEqual(["mcp__engines__gemini_run_read_only", "Read", "Glob", "Grep"]);
       expect(engines.agentDefinition(looker, { description: "d", prompt: "p" })!.tools).toEqual(["mcp__engines__gemini_run_read_only", "Read", "Glob", "Grep"]);
       // An agent on Claude, or on an engine this task does not have, keeps its own definition.
       expect(engines.agentDefinition({ ...coder, id: "other", engine: "gemini" }, base)).toBeUndefined();
@@ -865,8 +868,9 @@ describe("coding agent CLIs in a repo task", () => {
 
     describe("an agent's fallback", () => {
       const TASK = "Add feature.txt with a line of text.";
-      /** Dana: Gemini CLI first, then Codex on a model of its own (then Claude, always). */
+      /** Dana: Gemini CLI first, then Codex on a model of its own (Claude only when her fallback names it: danaClaude). */
       const dana = (fallback: AgentSpec["fallback"] = [{ engine: "codex", model: "gpt-6.2-sol" }]): AgentSpec => ({ ...agent("dana", "gemini", "write"), fallback });
+      const danaClaude = () => dana([{ engine: "codex", model: "gpt-6.2-sol" }, { engine: "claude", model: "" }]);
       const base: AgentDefinition = { description: "d", tools: repoToolsFor("write"), prompt: "My own instructions.", mcpServers: ["browser"] };
       const readRecord = async (engine: "codex" | "gemini"): Promise<Record_> => JSON.parse(await readFile(join(root, `record-${engine}.json`), "utf8"));
       const textOf = (r: { content: { text?: string }[] }) => r.content[0]?.text ?? "";
@@ -918,17 +922,31 @@ describe("coding agent CLIs in a repo task", () => {
         engines = (await repoTaskEngines(configWith([dana()], { codex: CODEX_KEY, gemini: GEMINI_KEY }, { gemini: true }), deps()))!;
         expect(engines.allToolNames).toEqual(["mcp__engines__gemini_run_as_dana"]);
         expect(engines.promptRule).toContain("- dana (Dana, Coder (Gemini CLI)) works through Gemini CLI and changes files; if Gemini CLI is unavailable, the work moves to Codex (gpt-6.2-sol).");
-        expect(engines.promptRule).toContain("when none is left the agent does the work itself as Claude");
+        expect(engines.promptRule).toContain(
+          "When none is left, an agent whose line ends with Claude does the work itself; any other reports back that it could not, so give that work to another agent.",
+        );
         const def = engines.agentDefinition(dana(), base)!;
         expect(def.prompt).toContain("When Gemini CLI itself cannot work (a rate limit, its quota or credit used up, a rejected key, the service down), the same call hands the assignment to Codex (gpt-6.2-sol)");
-        expect(def.prompt).toContain("do the assignment yourself with your own tools, which stay closed to you until then");
+        // No Claude in her line: when no CLI is left she reports back, with the tools she always had.
+        expect(def.prompt).toContain("When none can, the tool says so and why: do not do the assignment yourself.");
+        expect(def.prompt).not.toContain("your own tools");
+        expect(def.tools).toEqual(["mcp__engines__gemini_run_as_dana", "Read", "Glob", "Grep", "Bash"]);
+        expect(def.mcpServers).toBeUndefined();
         // The cheap tier hands work over; a line that names Claude gets the team's model.
         expect(def.model).toBe("haiku");
-        expect(engines.agentDefinition(dana([{ engine: "codex", model: "" }, { engine: "claude", model: "" }]), base)).toBeUndefined(); // another line: no tool in this task
-        const withClaude = dana([{ engine: "codex", model: "gpt-6.2-sol" }, { engine: "claude", model: "" }]);
-        const named = (await repoTaskEngines(configWith([withClaude], { codex: CODEX_KEY, gemini: GEMINI_KEY }, { gemini: true }), deps()))!;
-        expect(named.agentDefinition(withClaude, base)!.model).toBeUndefined();
-        expect(named.agentDefinition(withClaude, { ...base, model: "claude-sonnet-5-5" })!.model).toBe("claude-sonnet-5-5");
+        expect(engines.hooks).toBeUndefined();
+        expect(engines.agentDefinition(danaClaude(), base)).toBeUndefined(); // another line: no tool in this task
+
+        // Her fallback names Claude: her own tools and servers too (held back by the hooks), on the team's model.
+        const named = (await repoTaskEngines(configWith([danaClaude()], { codex: CODEX_KEY, gemini: GEMINI_KEY }, { gemini: true }), deps()))!;
+        expect(named.promptRule).toContain("if Gemini CLI is unavailable, the work moves to Codex (gpt-6.2-sol), then Dana itself as Claude.");
+        const claudeDef = named.agentDefinition(danaClaude(), base)!;
+        expect(claudeDef.model).toBeUndefined();
+        expect(claudeDef.tools).toEqual(["mcp__engines__gemini_run_as_dana", "Read", "Glob", "Grep", "Bash", "WebSearch", "WebFetch", "Edit", "Write"]);
+        expect(claudeDef.mcpServers).toEqual(["browser"]);
+        expect(claudeDef.prompt).toContain("When none can, the tool says so: from then on, do the assignment yourself with your own tools, which stay closed to you until then.");
+        expect(named.hooks).toHaveLength(1);
+        expect(named.agentDefinition(danaClaude(), { ...base, model: "claude-sonnet-5-5" })!.model).toBe("claude-sonnet-5-5");
 
         // Gemini CLI's monthly cap used up (budget.ts): the worker's team has Dana on Codex already.
         const capped = configWith([dana()], { codex: CODEX_KEY, gemini: GEMINI_KEY }, { gemini: true });
@@ -955,10 +973,10 @@ describe("coding agent CLIs in a repo task", () => {
         await behave({ gemini: { kind: "apiError", message: "[API Error: Resource has been exhausted (e.g. check quota). (Status: RESOURCE_EXHAUSTED)]\nPlease wait and try again later." } });
         const begun: { engine: string; tool: string; agent?: string }[] = [];
         const engines = (await repoTaskEngines(
-          configWith([dana()], { codex: CODEX_KEY, gemini: GEMINI_KEY }, { gemini: true }),
+          configWith([danaClaude()], { codex: CODEX_KEY, gemini: GEMINI_KEY }, { gemini: true }),
           deps({ spend: { begin: ({ engine, tool, agent: who }) => void begun.push({ engine, tool, ...(who ? { agent: who } : {}) }) } }),
         ))!;
-        engines.agentDefinition(dana(), base);
+        engines.agentDefinition(danaClaude(), base);
         const gate = gateOf(engines);
         const client = await mcpClient(engines.servers[ENGINES_SERVER] as McpSdkServerConfigWithInstance);
 
@@ -991,39 +1009,81 @@ describe("coding agent CLIs in a repo task", () => {
         expect((await readRecord("codex")).input).not.toContain("Another coding agent");
         expect(notes.filter((n) => n.includes("Gemini CLI was rate limited"))).toHaveLength(1);
         // The team's next run gets her definition on Codex.
-        expect(engines.agentDefinition(dana(), base)!.prompt).toContain("You work through Codex, OpenAI's coding agent");
+        expect(engines.agentDefinition(danaClaude(), base)!.prompt).toContain("You work through Codex, OpenAI's coding agent");
       });
 
-      it("tells the agent to do the work itself when no CLI is left, and opens its own tools only then", async () => {
+      it("reports the failure when no CLI is left and the line does not name Claude, with only the tools it always had", async () => {
         await behave({ gemini: { kind: "apiError", message: "[API Error: API key not valid. Please pass a valid API key. (Status: INVALID_ARGUMENT)]" } });
+        // No fallback at all, and a model of its own with no fallback: as before fallbacks.
         const gem = agent("gemini", "gemini", "write");
         const carbon = { ...agent("carbon", "gemini", "write"), engineModel: "gemini-4-carbon" };
         const engines = (await repoTaskEngines(configWith([gem, carbon], { gemini: GEMINI_KEY }, { gemini: true }), deps()))!;
+        const def = engines.agentDefinition(gem, base)!;
+        expect(def.tools).toEqual(["mcp__engines__gemini_run", "Read", "Glob", "Grep", "Bash"]);
+        expect(def.mcpServers).toBeUndefined();
+        expect(def.model).toBe("haiku");
+        expect(engines.hooks).toBeUndefined();
+
+        const client = await mcpClient(engines.servers[ENGINES_SERVER] as McpSdkServerConfigWithInstance);
+        const result = await client.call("gemini_run", { task: TASK });
+        // A failure, with why, for the agent to report: not a turn to do the work itself.
+        expect(result.isError).toBe(true);
+        const text = textOf(result);
+        expect(text).toContain("Gemini CLI is unavailable for the rest of this task (its key or account was refused: [API Error: API key not valid.");
+        expect(text).toContain("No coding agent CLI can work for you for the rest of this task.");
+        expect(text).toContain(
+          "Do not do the assignment yourself. Report back that it was not done because Gemini CLI was unavailable, with the reason above, so the work can go to another agent. Do not call mcp__engines__gemini_run again in this task.",
+        );
+        expect(text).not.toContain("your own tools");
+        expect(text).not.toContain(GEMINI_KEY);
+        expect(notes).toContain("Gemini CLI had its key or account refused for Gemini; no coding agent CLI is left for Gemini in this task, so it reports back without doing the work.");
+
+        // A refused key is the whole engine's: Carbon, on another model, gets the same answer without a run.
+        await rm(join(root, "record.json"));
+        const carbonResult = await client.call("gemini_run_as_carbon", { task: TASK });
+        expect(existsSync(join(root, "record.json"))).toBe(false);
+        expect(carbonResult.isError).toBe(true);
+        expect(textOf(carbonResult)).toContain("Report back that it was not done because Gemini CLI was unavailable");
+        expect(notes).toContain("Gemini CLI is unavailable in this task (its key or account was refused); no coding agent CLI is left for Carbon in this task, so it reports back without doing the work.");
+        // The team's next run: still the engine agents they were (never Claude), whose tool says why at once.
+        const next = engines.agentDefinition(gem, base)!;
+        expect(next.tools).toEqual(["mcp__engines__gemini_run", "Read", "Glob", "Grep", "Bash"]);
+        expect(next.prompt).toContain("You work through Gemini CLI");
+        expect(engines.agentDefinition(carbon, base)!.tools![0]).toBe("mcp__engines__gemini_run_as_carbon");
+      });
+
+      it("tells an agent whose line names Claude to do the work itself when no CLI is left, and opens its own tools only then", async () => {
+        await behave({ gemini: { kind: "apiError", message: "[API Error: API key not valid. Please pass a valid API key. (Status: INVALID_ARGUMENT)]" } });
+        const claudeLast: AgentSpec["fallback"] = [{ engine: "claude", model: "" }];
+        const gem = { ...agent("gemini", "gemini", "write"), fallback: claudeLast };
+        const carbon = { ...agent("carbon", "gemini", "write"), engineModel: "gemini-4-carbon", fallback: claudeLast };
+        const engines = (await repoTaskEngines(configWith([gem, carbon], { gemini: GEMINI_KEY }, { gemini: true }), deps()))!;
         // Its own tools and servers are in its definition, after the run tool and the checks.
         const def = engines.agentDefinition(gem, base)!;
-        expect(def.tools).toEqual(["mcp__engines__gemini_run", "Read", "Glob", "Grep", "Bash", "WebSearch", "WebFetch", "Edit", "Write"]);
+        expect(def.tools).toEqual(["mcp__engines__gemini_run_as_gemini", "Read", "Glob", "Grep", "Bash", "WebSearch", "WebFetch", "Edit", "Write"]);
         expect(def.mcpServers).toEqual(["browser"]);
         engines.agentDefinition(carbon, base);
+        expect(engines.promptRule).toContain("- gemini (Gemini, Coder (Gemini CLI)) works through Gemini CLI and changes files; if Gemini CLI is unavailable, the work moves to Gemini itself as Claude.");
 
         // While Gemini CLI works: the run tool and the checks only. Other agents and the lead are not held.
         const gate = gateOf(engines);
         expect(await gate("gemini", "Edit")).toBe(
-          "Gemini CLI does your work in this task: hand it the assignment with mcp__engines__gemini_run, and check what it did with Read, Glob, Grep, Bash. Your other tools open only if no coding agent CLI can work for you; the tool says so when that happens.",
+          "Gemini CLI does your work in this task: hand it the assignment with mcp__engines__gemini_run_as_gemini, and check what it did with Read, Glob, Grep, Bash. Your other tools open only if no coding agent CLI can work for you; the tool says so when that happens.",
         );
         expect(await gate("gemini", "WebFetch")).toBeDefined();
         expect(await gate("gemini", "mcp__browser__browser_navigate")).toBeDefined();
-        for (const allowed of ["mcp__engines__gemini_run", "Read", "Glob", "Grep", "Bash"]) expect(await gate("gemini", allowed)).toBeUndefined();
+        for (const allowed of ["mcp__engines__gemini_run_as_gemini", "Read", "Glob", "Grep", "Bash"]) expect(await gate("gemini", allowed)).toBeUndefined();
         expect(await gate("coder", "Edit")).toBeUndefined();
         expect(await gate(undefined, "Edit")).toBeUndefined();
 
         const client = await mcpClient(engines.servers[ENGINES_SERVER] as McpSdkServerConfigWithInstance);
-        const result = await client.call("gemini_run", { task: TASK });
+        const result = await client.call("gemini_run_as_gemini", { task: TASK });
         expect(result.isError).toBeFalsy();
         const text = textOf(result);
         expect(text).toContain("Gemini CLI is unavailable for the rest of this task (its key or account was refused: [API Error: API key not valid.");
         expect(text).toContain("No coding agent CLI can work for you for the rest of this task.");
         expect(text).toContain("Do the assignment yourself now, with your own tools: they are open to you from now on.");
-        expect(text).toContain("say in your report that you did the work yourself because Gemini CLI was unavailable. Do not call mcp__engines__gemini_run again in this task.");
+        expect(text).toContain("say in your report that you did the work yourself because Gemini CLI was unavailable. Do not call mcp__engines__gemini_run_as_gemini again in this task.");
         expect(text).not.toContain(GEMINI_KEY);
         expect(notes).toContain("Gemini CLI had its key or account refused for Gemini; Gemini works as Claude from now on.");
         // Now its own tools are open.
@@ -1033,7 +1093,7 @@ describe("coding agent CLIs in a repo task", () => {
         await rm(join(root, "record.json"));
         const carbonResult = await client.call("gemini_run_as_carbon", { task: TASK });
         expect(existsSync(join(root, "record.json"))).toBe(false);
-        expect(textOf(carbonResult)).toContain("No coding agent CLI can work for you");
+        expect(textOf(carbonResult)).toContain("Do the assignment yourself now");
         expect(notes).toContain("Gemini CLI is unavailable in this task (its key or account was refused); Carbon works as Claude from now on.");
         expect(await gate("carbon", "Edit")).toBeUndefined();
         // The team's next run: both work as Claude, held by nothing.
@@ -1048,7 +1108,7 @@ describe("coding agent CLIs in a repo task", () => {
         const engines = (await repoTaskEngines(configWith([carbon, neon, dana()], { codex: CODEX_KEY, gemini: GEMINI_KEY }, { gemini: true }), deps()))!;
         const client = await mcpClient(engines.servers[ENGINES_SERVER] as McpSdkServerConfigWithInstance);
         expect(textOf(await client.call("gemini_run_as_carbon", { task: TASK }))).toContain("No coding agent CLI can work for you");
-        expect(notes).toContain("Gemini CLI was rate limited for Carbon; Carbon works as Claude from now on.");
+        expect(notes).toContain("Gemini CLI was rate limited for Carbon; no coding agent CLI is left for Carbon in this task, so it reports back without doing the work.");
         // Neon's model is not Carbon's: it still runs.
         await behave({});
         expect((await client.call("gemini_run_as_neon", { task: TASK })).isError).toBeFalsy();
@@ -1070,8 +1130,8 @@ describe("coding agent CLIs in a repo task", () => {
             message: "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying.",
           },
         });
-        const engines = (await repoTaskEngines(configWith([dana()], { codex: CODEX_KEY, gemini: GEMINI_KEY }, { gemini: true }), deps()))!;
-        engines.agentDefinition(dana(), base);
+        const engines = (await repoTaskEngines(configWith([danaClaude()], { codex: CODEX_KEY, gemini: GEMINI_KEY }, { gemini: true }), deps()))!;
+        engines.agentDefinition(danaClaude(), base);
         const client = await mcpClient(engines.servers[ENGINES_SERVER] as McpSdkServerConfigWithInstance);
         const failed = await client.call("gemini_run_as_dana", { task: TASK });
         expect(failed.isError).toBe(true);

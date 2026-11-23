@@ -128,11 +128,11 @@ export const engineModelSpecials = (engineName: string, engineModel: string): Pi
   },
 ];
 
-/** When an agent's fallbacks (AgentSpec.fallback) take over from its engine. */
+/** When an agent's fallbacks (AgentSpec.fallback) take over from its engine, and that Claude does only when listed. */
 export const fallbackHint = (engine: AgentEngine): string =>
   engine === "claude"
     ? "Used when Claude is rate limited, out of credit, its key is rejected or it is down — not when the work itself fails."
-    : "Used when the engine is rate limited, out of credit, its key is rejected or it is down — not when the work itself fails. Claude is always the last resort.";
+    : "Used when the engine is rate limited, out of credit, its key is rejected or it is down — not when the work itself fails. Claude takes over only if you add it; without it, the agent reports that it could not do the work, so it can go to another agent.";
 
 // ---------- Effort ----------
 
@@ -307,9 +307,9 @@ export function agentErrors(d: AgentDraft): AgentErrors {
 
 /**
  * The fallback to save, as the server keeps it (TeamSaveSchema): none for an
- * agent on Claude (Claude is the last resort; the repo tasks route orders its
- * providers), never the agent's own engine, nothing after Claude, and Claude
- * on the team's model.
+ * agent on Claude (the repo tasks route orders its providers), never the
+ * agent's own engine, nothing after Claude (when the owner adds it, it is
+ * last), and Claude on the team's model.
  */
 export function toFallback(d: Pick<AgentDraft, "engine" | "fallback">): AgentSpec["fallback"] {
   if (d.engine === "claude") return [];

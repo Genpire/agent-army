@@ -67,6 +67,17 @@ export class ToolCallMemory {
   }
 }
 
+/**
+ * What a session has asked of the bridge: its requests in flight now, and
+ * all it has made. The token is in the environment of whatever the query
+ * runs (a repo task's shell too, where the checkout's own code runs), so the
+ * bridge limits both per session (server.ts), not only Claude Code's own use.
+ */
+export interface SessionLoad {
+  inFlight: number;
+  requests: number;
+}
+
 /** A session as the bridge serves it. */
 export interface BridgeSession {
   readonly apiKey: string;
@@ -75,6 +86,7 @@ export interface BridgeSession {
   readonly calls: ToolCallMemory;
   /** Hides the key and the token in text that leaves the bridge. */
   readonly redact: (text: string) => string;
+  readonly load: SessionLoad;
 }
 
 const TOKEN_PREFIX = "gbr_";
@@ -95,6 +107,7 @@ export class SessionRegistry {
       models: { ...models },
       calls: new ToolCallMemory(),
       redact: (text) => needles.reduce((acc, s) => acc.split(s).join("[redacted]"), text),
+      load: { inFlight: 0, requests: 0 },
     };
     const key = digest.toString("hex");
     this.byDigest.set(key, { digest, session });

@@ -146,6 +146,30 @@ describe("watching a run", () => {
     late.thrown(new Error("API Error: 503"));
     expect(late.failure).toBeUndefined();
   });
+
+  it("collects the calls with effects outside the run, by kind, each tool once with how many times", () => {
+    const calls = (parent: string | null, ...names: string[]) =>
+      ({
+        type: "assistant",
+        parent_tool_use_id: parent,
+        message: { content: names.map((name, i) => ({ type: "tool_use", id: `t${i}`, name, input: {} })) },
+      }) as unknown as SDKMessage;
+    const effectOf = (name: string) => (name.startsWith("mcp__app-") ? ("app" as const) : name === "mcp__browser__browser_click" ? ("browser" as const) : undefined);
+    const w = new RunWatch(effectOf);
+    expect(w.reachedOutside).toBe(false);
+    // The lead's calls and a subagent's alike; reading and navigating are no effect outside.
+    w.feed(calls(null, "Read", "mcp__browser__browser_navigate"));
+    expect(w.reachedOutside).toBe(false);
+    w.feed(calls("toolu_coder", "mcp__browser__browser_click", "mcp__app-stripe__create_issue"));
+    w.feed(calls("toolu_coder", "mcp__browser__browser_click"));
+    // A streamed start says nothing new: the whole message that follows does.
+    const streamed = { type: "stream_event", parent_tool_use_id: null, event: { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "t9", name: "mcp__app-stripe__create_issue", input: {} } } };
+    w.feed(streamed as unknown as SDKMessage);
+    expect(w.reachedOutside).toBe(true);
+    expect(w.outside).toEqual({ app: [{ tool: "mcp__app-stripe__create_issue", count: 1 }], browser: [{ tool: "mcp__browser__browser_click", count: 2 }] });
+    // Without a way to tell, nothing is collected.
+    expect(watch(calls(null, "mcp__app-stripe__create_issue")).outside).toEqual({ app: [], browser: [] });
+  });
 });
 
 describe("calls without side effects along a route", () => {

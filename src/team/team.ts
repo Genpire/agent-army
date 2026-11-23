@@ -137,9 +137,12 @@ export const AgentSpecSchema = z.object({
    * Who takes over in repo tasks, in order, when the agent's engine cannot do
    * the work: not connected, or a run fails for the engine's own reasons (rate
    * limit, quota or credit used up, a rejected key, the service down), never
-   * because the work itself failed. "claude" is the team's model on the task
-   * route. Empty = no fallback (an engine that is not connected still leaves
-   * the agent working as Claude, as before).
+   * because the work itself failed. "claude" is the agent itself on the team's
+   * model on the task route, and only when it is listed: without it, an agent
+   * whose CLIs all fail during a task reports back so the work can go to
+   * another agent, and one whose CLIs are all capped sits the task out.
+   * Empty = no fallback, as before (an engine that is not connected at all
+   * still leaves the agent working as Claude).
    */
   fallback: z.array(AgentFallbackSchema).max(AGENT_FALLBACK_MAX).default(() => []),
 });
@@ -219,16 +222,16 @@ const ENGINE_NAMES: Record<AgentEngine, string> = { claude: "Claude", codex: "Co
 
 /**
  * Why an agent's fallback cannot be saved (the step at `index`), or undefined.
- * Each engine once, never the agent's own, nothing after Claude (the last
- * resort: what came after it would never run). A CLI that is not connected
- * may be in it: a task skips it.
+ * Each engine once, never the agent's own, nothing after Claude (Claude, when
+ * the owner adds it, works until the task ends: what came after it would
+ * never run). A CLI that is not connected may be in it: a task skips it.
  */
 export function fallbackProblem(a: Pick<AgentSpec, "engine" | "fallback">): { index: number; message: string } | undefined {
   const seen = new Set<AgentEngine>();
   for (const [index, f] of a.fallback.entries()) {
     if (f.engine === a.engine) return { index, message: `${ENGINE_NAMES[f.engine]} is the agent's own engine, so it cannot be its fallback.` };
     if (seen.has(f.engine)) return { index, message: `${ENGINE_NAMES[f.engine]} is in the fallback twice.` };
-    if (seen.has("claude")) return { index, message: "Nothing can come after Claude in a fallback: Claude is the last resort." };
+    if (seen.has("claude")) return { index, message: "Nothing can come after Claude in a fallback: Claude is always last." };
     seen.add(f.engine);
   }
   return undefined;
@@ -236,9 +239,9 @@ export function fallbackProblem(a: Pick<AgentSpec, "engine" | "fallback">): { in
 
 /**
  * The team as the owner saves it: TeamSchema with each agent's fallback
- * checked (fallbackProblem) and tidied: an agent on Claude has none (Claude
- * is the last resort), and Claude in a fallback runs the team's model. A
- * stored team loads with TeamSchema alone.
+ * checked (fallbackProblem) and tidied: an agent on Claude has none (the
+ * repo tasks route orders Claude's providers), and Claude in a fallback runs
+ * the team's model. A stored team loads with TeamSchema alone.
  */
 export const TeamSaveSchema = TeamSchema.superRefine((team, ctx) => {
   team.agents.forEach((a, i) => {

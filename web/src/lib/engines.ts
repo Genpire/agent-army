@@ -27,8 +27,8 @@ export const engineReady = (config: PublicConfig, engine: AgentEngine): boolean 
 
 /**
  * The engine a new fallback starts on: not the agent's own and not in the
- * list yet; a connected CLI first (Claude is the last resort anyway), then
- * Claude, then a CLI that is not connected. Undefined when none is left.
+ * list yet; a connected CLI first (Claude, when listed, is kept last anyway),
+ * then Claude, then a CLI that is not connected. Undefined when none is left.
  */
 export function nextFallbackEngine(own: AgentEngine, taken: readonly AgentEngine[], isReady: (engine: AgentEngine) => boolean): AgentEngine | undefined {
   const free = AGENT_ENGINE_OPTIONS.filter((e) => e !== own && !taken.includes(e));

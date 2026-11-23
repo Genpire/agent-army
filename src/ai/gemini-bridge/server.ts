@@ -19,6 +19,13 @@
  *   stream that sends nothing for a few minutes, and Gemini may think longer.
  * - Request bodies up to 32 MB. Gemini calls have deadlines (upstream.ts) and
  *   stop when Claude Code hangs up. Nothing logged holds the key or a token.
+ * - Each session has limits of its own: requests in flight at once, and
+ *   requests in all. Its token is in the environment of everything the query
+ *   runs, a repo task's shell included, where the checkout's own (untrusted)
+ *   code runs too: the limits bound what that code can spend through the
+ *   bridge, on top of the task's own budget, which only Claude Code's
+ *   requests count against. Past one, a 429 rate_limit_error, as Anthropic
+ *   answers.
  */
 import { type IncomingMessage, type Server, type ServerResponse, createServer } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -44,6 +51,10 @@ export interface GeminiBridgeOptions {
   pingMs?: number;
   /** How long a stream waits for Gemini to answer before it starts anyway (default 10 s). */
   streamStartMs?: number;
+  /** Requests one session may have in flight at once (default 8). */
+  maxConcurrent?: number;
+  /** Requests one session may make in all (default 10 000). */
+  maxRequests?: number;
   log?: (line: string) => void;
 }
 
@@ -60,6 +71,14 @@ const DEFAULT_IDLE_TIMEOUT_MS = 10 * 60_000;
 export const MAX_BODY_BYTES = 32 * 1024 * 1024;
 const PING_MS = 15_000;
 const STREAM_START_MS = 10_000;
+/**
+ * A query's lead and the subagents it runs side by side each have one request
+ * in flight at a time, with room for Claude Code's own small calls; a 429
+ * past it is retried by Claude Code after a pause (retry-after).
+ */
+export const MAX_CONCURRENT = 8;
+/** Far above a long repo task's requests (its runs and fix rounds share one session): a bound on a loop, not on work. */
+export const MAX_REQUESTS = 10_000;
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const isLoopback = (address: string | undefined) => !!address && /^(?:::ffff:)?127\.\d{1,3}\.\d{1,3}\.\d{1,3}$|^::1$/.test(address);
@@ -114,6 +133,8 @@ export class GeminiBridge {
   private readonly maxBodyBytes: number;
   private readonly pingMs: number;
   private readonly streamStartMs: number;
+  private readonly maxConcurrent: number;
+  private readonly maxRequests: number;
   private readonly log: (line: string) => void;
 
   constructor(opts: GeminiBridgeOptions = {}) {
@@ -125,6 +146,8 @@ export class GeminiBridge {
     this.maxBodyBytes = opts.maxBodyBytes ?? MAX_BODY_BYTES;
     this.pingMs = opts.pingMs ?? PING_MS;
     this.streamStartMs = opts.streamStartMs ?? STREAM_START_MS;
+    this.maxConcurrent = opts.maxConcurrent ?? MAX_CONCURRENT;
+    this.maxRequests = opts.maxRequests ?? MAX_REQUESTS;
     this.log = opts.log ?? ((line) => console.warn(line));
   }
 
@@ -177,17 +200,43 @@ export class GeminiBridge {
       if (!isLoopback(req.socket.remoteAddress)) throw new BridgeError(403, "permission_error", "The Gemini bridge answers only this machine.");
       if (req.headers.origin !== undefined) throw new BridgeError(403, "permission_error", "The Gemini bridge does not answer browsers.");
       if (!this.hostAllowed(req.headers.host)) throw new BridgeError(403, "permission_error", "The Gemini bridge does not answer this Host.");
-      session = this.sessions.authenticate(tokenOf(req));
-      if (!session) throw new BridgeError(401, "authentication_error", "Invalid bridge token: unknown, or its session has ended.");
+      const known = this.sessions.authenticate(tokenOf(req));
+      if (!known) throw new BridgeError(401, "authentication_error", "Invalid bridge token: unknown, or its session has ended.");
+      session = known;
       const path = (req.url ?? "/").split("?")[0];
-      if (req.method === "POST" && path === "/v1/messages") return await this.messages(req, res, session);
-      if (req.method === "POST" && path === "/v1/messages/count_tokens") return await this.countTokens(req, res, session);
+      if (req.method === "POST" && path === "/v1/messages") return await this.limited(known, () => this.messages(req, res, known));
+      if (req.method === "POST" && path === "/v1/messages/count_tokens") return await this.limited(known, () => this.countTokens(req, res, known));
       throw new BridgeError(404, "not_found_error", "The Gemini bridge serves POST /v1/messages and /v1/messages/count_tokens only.");
     } catch (err) {
       const e = toBridgeError(err, session?.redact);
       if (e.status >= 500 || e.status === 429) this.log(`[gemini-bridge] ${e.status} ${e.type}: ${e.message.slice(0, 200)}`);
       // A body left unread (too large) is not drained: the connection closes after the answer.
       sendJson(res, e.status, errorBody(e.type, e.message), { ...e.headers, ...(e.status === 413 ? { connection: "close" } : {}) });
+    }
+  }
+
+  /**
+   * One request of a session within its limits (SessionLoad): past the
+   * requests in flight at once, a 429 that asks for a retry a second later;
+   * past the requests in all, a 429 that asks for none (x-should-retry, which
+   * Anthropic's SDK honours): the session has had its share.
+   */
+  private async limited(session: BridgeSession, serve: () => Promise<void>): Promise<void> {
+    const { load } = session;
+    if (load.requests >= this.maxRequests) {
+      throw new BridgeError(429, "rate_limit_error", `This session has made the ${this.maxRequests} requests the Gemini bridge allows one session.`, { "x-should-retry": "false" });
+    }
+    if (load.inFlight >= this.maxConcurrent) {
+      throw new BridgeError(429, "rate_limit_error", `This session already has ${this.maxConcurrent} requests in progress on the Gemini bridge. Try again when one has finished.`, {
+        "retry-after": "1",
+      });
+    }
+    load.inFlight += 1;
+    load.requests += 1;
+    try {
+      await serve();
+    } finally {
+      load.inFlight -= 1;
     }
   }
 

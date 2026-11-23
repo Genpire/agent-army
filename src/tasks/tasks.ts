@@ -44,8 +44,19 @@ export interface Task {
   costUsd?: number;
   /** Each agent's share of what the task cost ("pointer" is the lead; see attribution.ts), live while it runs. */
   agentCosts?: AgentCosts;
-  /** The AI provider the team ran on (config.ai.taskProvider when it started); absent on older tasks: Anthropic. */
+  /**
+   * The AI provider that did the team's work: the first of the task route that
+   * could run, or the one that took over when it failed (routing.ts); absent on
+   * older tasks: Anthropic.
+   */
   provider?: string;
+  /**
+   * What each provider of the task route spent of costUsd (each run's Claude
+   * cost on the provider it ran on, the size estimate's on the first), so a
+   * failed provider's runs count against its own cap. Absent on older tasks:
+   * all of costUsd is `provider`'s.
+   */
+  providerCosts?: Record<string, number>;
   turns?: number;
   error?: string;
   /** Live progress while the team works, saved by the worker; Pointer reads it for status questions. */

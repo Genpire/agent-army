@@ -613,13 +613,17 @@ export function createPointerBrain(
 
       let reply = attempts.at(-1)?.reply;
       if (attempts.length > 1) {
-        // Every attempt's spend counts: a failed one's too.
+        // Every attempt's spend counts: a failed one's too, on the provider it ran on (its cap), as HR's and the Scout's do.
         const costs = attempts.map((a) => a.reply?.costUsd).filter((c): c is number => c !== undefined);
+        const providerCosts: Record<string, number> = {};
+        for (const a of attempts) {
+          if (a.reply?.costUsd !== undefined && a.reply.provider) providerCosts[a.reply.provider] = (providerCosts[a.reply.provider] ?? 0) + a.reply.costUsd;
+        }
         const agentCosts = attempts.reduce<AgentCosts | undefined>((sum, a) => (a.reply?.agentCosts ? addCosts(sum, a.reply.agentCosts) : sum), undefined);
         reply ??= { text: "I finished without an answer. Please try again.", isError: true };
         reply = {
           ...reply,
-          ...(costs.length ? { costUsd: costs.reduce((a, b) => a + b, 0), provider: last.provider } : {}),
+          ...(costs.length ? { costUsd: costs.reduce((a, b) => a + b, 0), provider: last.provider, providerCosts } : {}),
           ...(agentCosts ? { agentCosts } : {}),
         };
       }

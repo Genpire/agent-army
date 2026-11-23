@@ -283,9 +283,10 @@ export type CappedAgent = Pick<AgentSpec, "id" | "name" | "engine" | "enabled"> 
  * own cap, an agent sits out. Working through an engine (Codex, Gemini CLI)
  * whose cap is used up: an agent with no fallback sits out; one with a
  * fallback stays, and moves to the next step of its line whose CLI still has
- * budget (Claude, the last resort, when none has), while a capped CLI further
- * down its line is only dropped from it. Pointer itself is never left out
- * (its cap refuses the task instead).
+ * budget (Claude when none has and its fallback names Claude; else it sits
+ * out too, as Claude takes over only where the owner put it), while a capped
+ * CLI further down its line is only dropped from it. Pointer itself is never
+ * left out (its cap refuses the task instead).
  */
 export function agentsLeftOut(budget: Budget, usage: Partial<Pick<MonthUsage, "agents" | "providers">>, agents: CappedAgent[]): LeftOutAgent[] {
   const out: LeftOutAgent[] = [];
@@ -320,13 +321,18 @@ export function agentsLeftOut(budget: Budget, usage: Partial<Pick<MonthUsage, "a
     const dropped = steps.filter((s) => s.engine !== "claude" && capped(s.engine));
     if (!dropped.length) continue;
     const [first, ...rest] = steps.filter((s) => !dropped.includes(s));
-    const line: LeftOutAgent["line"] = first && first.engine !== "claude" ? { engine: first.engine, engineModel: first.model, fallback: rest } : { engine: "claude", engineModel: "", fallback: [] };
     const why = dropped
       .map((s) => {
         const status = capped(s.engine)!;
         return `${providerLabel(s.engine)} has used up its monthly cap (${usd(status.usedUsd)} of ${usd(status.capUsd)})`;
       })
       .join(" and ");
+    // Every CLI of its line is capped and its fallback does not name Claude: it sits out, as an agent with no fallback does.
+    if (!first) {
+      out.push({ id: a.id, note: `${why}, so ${a.name} is left out of this task.` });
+      continue;
+    }
+    const line: LeftOutAgent["line"] = first.engine !== "claude" ? { engine: first.engine, engineModel: first.model, fallback: rest } : { engine: "claude", engineModel: "", fallback: [] };
     const where =
       line.engine === a.engine
         ? `so ${dropped.length === 1 ? "it is" : "they are"} left out of ${a.name}'s fallback in this task`
@@ -704,6 +710,17 @@ export class Spending implements TaskBudgetCheck {
     if (!c) return { ok: true, budgetUsd: maxBudgetUsd };
     const ctx = Spending.context(c.config, "tasks");
     return taskBudgetFor(c.config.budget, c.usage, repo, maxBudgetUsd, provider ? { ...ctx, provider, providers: [provider] } : ctx);
+  }
+
+  /**
+   * The worker, before the next provider of the task route takes over a
+   * task: the least left of the caps that bound a task on `repo` on that
+   * provider (remainingForTask: monthly, repository, the provider's own), or
+   * undefined when none applies or the spend cannot be read. Never throws.
+   */
+  async leftFor(repo: string, provider: string): Promise<{ usd: number; scope: "monthly" | "repo" | "provider" } | undefined> {
+    const c = await this.current(repo);
+    return c ? remainingForTask(c.config.budget, c.usage, repo, provider) : undefined;
   }
 
   /**

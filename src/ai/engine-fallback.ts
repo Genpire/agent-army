@@ -1,6 +1,8 @@
 /**
  * A team member's line of engines in repo tasks: its own engine, then its
- * fallback in order (AgentSpec.fallback), then Claude, the last resort.
+ * fallback in order (AgentSpec.fallback), which may end with Claude. Claude
+ * takes over only when the fallback names it; without it, an agent whose
+ * CLIs all fail reports back so the work can go to another agent.
  *
  * Which step works is decided when the task starts (engines.ts: connected,
  * installed, allowed to run here; budget.ts drops a CLI whose monthly cap is
@@ -23,7 +25,8 @@ export interface LineStep {
 /**
  * The CLI steps of an agent's line, in order: its own engine, then its
  * fallback up to Claude (nothing after Claude ever runs), each engine once.
- * `claude`: the line names Claude itself (so Claude's own model takes over).
+ * `claude`: the line names Claude itself (so the agent does the work as
+ * Claude, on the team's model, once no CLI can); without it, no Claude.
  */
 export function agentLine(agent: Pick<AgentSpec, "engine" | "engineModel"> & { fallback?: AgentSpec["fallback"] }): { steps: LineStep[]; claude: boolean } {
   const steps: LineStep[] = [];

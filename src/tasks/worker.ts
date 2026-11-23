@@ -19,15 +19,25 @@ import { MIN_TASK_USD, Spending, agentNamer, perTaskCapUsd, teamWithout } from "
 import { LEAD_AGENT_ID } from "../spending/attribution.js";
 import { providerLabel, runtimePrices } from "../spending/prices.js";
 import { TaskSpend } from "../spending/task-spend.js";
-import { type Screenshot, browserAvailable, browserServer, collectScreenshots } from "./browser.js";
+import { BROWSER_ACTION_TOOLS, type Screenshot, browserAvailable, browserServer, collectScreenshots } from "./browser.js";
 import { type CiOutcome, type WaitOptions, ciFailureDetails, ciFixPrompt, ciSummary, ciSummaryLine, storedCiSummary, waitForChecks } from "./ci.js";
 import { type ProviderRuntime, type ProviderSession, secretParts, sessionSecrets } from "../ai/ai-providers.js";
-import { type FallbackNote, type ProviderFailure, RunWatch, fallbackLine, onlyClaudeMissing, ownerProblem, routeRuntimes } from "../ai/routing.js";
+import {
+  type FallbackNote,
+  type OutsideCalls,
+  type OutsideEffect,
+  type ProviderFailure,
+  RunWatch,
+  fallbackLine,
+  onlyClaudeMissing,
+  ownerProblem,
+  routeRuntimes,
+} from "../ai/routing.js";
 import { repoTaskApps } from "../integrations/apps/apps.js";
 import { redactStrings, repoTaskEngines, runCli } from "../ai/engines.js";
 import type { CodeHost } from "../integrations/code-hosts/code-host.js";
 import { allHostSecrets, codeHostFor } from "../integrations/code-hosts/code-host-factory.js";
-import { type Config, ConfigRepo, integrationSecrets, resolveMasterKey } from "../core/config.js";
+import { type AiProviderId, type Config, ConfigRepo, integrationSecrets, resolveMasterKey } from "../core/config.js";
 import { type PrRef, isHumanFeedback } from "../integrations/github/github.js";
 import { bashGuardHook } from "./guard.js";
 import { NOTES_MAX_CHARS, NotesRepo } from "../chat/notes.js";
@@ -62,7 +72,7 @@ import { TimelineRecorder, checkItems, plainLine } from "./task-events.js";
 import { type Task, type TaskPhase, type TaskReport, TaskRepo, type ThreadState, decodeTaskPayload, isWebTask } from "./tasks.js";
 import { type RepoAgentOptions, type Team, type TeamSkills, agentLabel, buildRepoAgents, repoAllowedTools, skillQueryOptions } from "../team/team.js";
 import { ticketFinished, ticketPrOpened, ticketStarted, ticketStopped, ticketSyncDeps } from "../integrations/tickets/ticket-sync.js";
-import { UsageRepo } from "../spending/usage.js";
+import { UsageRepo, addProviderCost } from "../spending/usage.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -511,34 +521,57 @@ export function onboardingError(task: Pick<Task, "channel">, config: Config): st
   return undefined;
 }
 
+/** A run's calls of some tools in a sentence: "mcp__browser__browser_click (3 times), mcp__browser__browser_type". */
+const callsText = (calls: OutsideCalls[OutsideEffect]): string => calls.map((c) => `${c.tool}${c.count > 1 ? ` (${c.count} times)` : ""}`).join(", ");
+
 /**
  * The first message of a team run that takes over from one whose provider
- * failed (a rate limit, credit used up, an outage): what happened, and that
- * the checkout holds that run's work as it was left, then the task's own prompt.
+ * failed (a rate limit, credit used up, an outage): what happened, that the
+ * checkout holds that run's work as it was left, and what the failed runs
+ * did in a browser (actions on pages, which the checkout does not show and
+ * which are done: not to be repeated), then the task's own prompt.
  */
-export function takeOverPrompt(prompt: string, failed: { provider: string; reason: string }): string {
+export function takeOverPrompt(prompt: string, failed: { provider: string; reason: string; browser?: OutsideCalls["browser"] }): string {
+  const browser = failed.browser?.length
+    ? ` Before it stopped, the team also acted on web pages in the browser, which the checkout does not show: ${callsText(failed.browser)}. Those actions happened: do not do them again (a form sent twice is two submissions); look at their results instead where you need to.`
+    : "";
   return [
-    `A previous attempt at this task, on ${failed.provider}, stopped before it finished (${failed.reason}). Its changes are in the checkout as it left them: review them first (\`git status\`, \`git diff\`, \`git log\`), keep what is right, and continue the work from there.`,
+    `A previous attempt at this task, on ${failed.provider}, stopped before it finished (${failed.reason}). Its changes are in the checkout as it left them: review them first (\`git status\`, \`git diff\`, \`git log\`), keep what is right, and continue the work from there.${browser}`,
     "",
     prompt,
   ].join("\n");
 }
 
-/** What the route needs of a team run: what it cost, its turns, and the provider failure it ended on, if any. */
+/** What the route needs of a team run: what it cost, its turns, the provider failure it ended on, if any, and what it did outside the checkout. */
 export interface RouteRun {
   costUsd: number;
   turns: number;
   providerFailure?: ProviderFailure;
+  /** With providerFailure: the calls with effects outside the checkout the failed run made (RunWatch). */
+  outside?: OutsideCalls;
 }
+
+/** Rounded down to the cent. */
+const cents = (usd: number): number => Math.floor(usd * 100) / 100;
 
 /**
  * The team's first run on the task route: on `runtimes[0]` (the runtime the
  * task started on), then, while a run fails for its provider's own reasons
  * (rate limit, credit, outage), on the next runtime. The next run starts from
  * the checkout as the failed run left it (nothing here touches it), told so
- * (takeOverPrompt), within what is left of the task's budget; `aborted` (the
- * task's time) stops it. `switchTo` rebuilds everything provider-bound before
- * the run. Returns the last run, and the cost and turns of them all.
+ * and told what the failed runs did in a browser (takeOverPrompt), within
+ * what is left of the task's budget and of the next provider's caps
+ * (`capLeft`); `aborted` (the task's time) stops it. `switchTo` rebuilds
+ * everything provider-bound before the run.
+ *
+ * It does not move on when the failed run changed things in apps (an app's
+ * write tool, outside the checkout): running the task again could do them
+ * twice, so it stops with that run and `heldBack` says why, as a chat reply
+ * that had used a tool does. A provider whose own cap leaves too little is
+ * skipped for the one after it. Too little left of the task's budget (or of
+ * the monthly or the repository's cap), or a provider that cannot be set up
+ * (switchTo throws), stops it with the failed run, its cost kept. Returns the
+ * last run, and the cost and turns of them all.
  */
 export async function runOnRoute<R extends RouteRun>(o: {
   runtimes: ProviderRuntime[];
@@ -547,27 +580,62 @@ export async function runOnRoute<R extends RouteRun>(o: {
   aborted: () => boolean;
   run: (prompt: string, budgetUsd: number) => Promise<R>;
   switchTo: (runtime: ProviderRuntime, note: FallbackNote) => Promise<void>;
-  /** Too little budget left for the next provider to try. */
+  /** What is left of the caps that bound a task on that provider (budget.ts remainingForTask), or undefined when none applies. */
+  capLeft?: (provider: AiProviderId) => Promise<{ usd: number; scope: "monthly" | "repo" | "provider" } | undefined>;
+  /** Too little budget left for the next provider to try: the task's, or the monthly or the repository's cap. */
   onShort?: (note: FallbackNote, leftUsd: number) => void;
-}): Promise<{ run: R; costUsd: number; turns: number; fallback: FallbackNote[] }> {
+  /** The next provider's own monthly cap leaves too little: it is skipped, and the one after it is tried. */
+  onCapped?: (note: FallbackNote, leftUsd: number) => void;
+  /** The next provider could not be set up (its session did not start): the task stops with the failed run. */
+  onSwitchFailed?: (note: FallbackNote, err: unknown) => void;
+}): Promise<{ run: R; costUsd: number; turns: number; fallback: FallbackNote[]; heldBack?: string }> {
   let run = await o.run(o.prompt, o.budgetUsd);
   let costUsd = run.costUsd;
   let turns = run.turns;
   const fallback: FallbackNote[] = [];
+  // What the failed runs did in a browser, for every run after them.
+  const browser: OutsideCalls["browser"] = [];
+  let from = o.runtimes[0]!;
   for (let i = 1; i < o.runtimes.length && run.providerFailure && !o.aborted(); i += 1) {
-    const from = o.runtimes[i - 1]!;
     const to = o.runtimes[i]!;
     const note: FallbackNote = { from: from.provider, to: to.provider, reason: run.providerFailure.reason };
-    const left = Math.floor((o.budgetUsd - costUsd) * 100) / 100;
+    const apps = run.outside?.app ?? [];
+    if (apps.length) {
+      const heldBack = `${from.label} failed (${note.reason}) after the team had changed things in apps (${callsText(apps)}), so ${to.label} did not take over: running the task again could do them twice.`;
+      return { run, costUsd, turns, fallback, heldBack };
+    }
+    const taskLeft = cents(o.budgetUsd - costUsd);
+    if (taskLeft < MIN_TASK_USD) {
+      o.onShort?.(note, taskLeft);
+      break;
+    }
+    const cap = await o.capLeft?.(to.provider);
+    const left = cap ? Math.min(taskLeft, cents(cap.usd)) : taskLeft;
     if (left < MIN_TASK_USD) {
+      // Its own cap: the provider after it may have budget left. The monthly or the repository's: none has.
+      if (cap?.scope === "provider") {
+        o.onCapped?.(note, left);
+        continue;
+      }
       o.onShort?.(note, left);
       break;
     }
+    try {
+      await o.switchTo(to, note);
+    } catch (err) {
+      o.onSwitchFailed?.(note, err);
+      break;
+    }
     fallback.push(note);
-    await o.switchTo(to, note);
-    run = await o.run(takeOverPrompt(o.prompt, { provider: from.label, reason: note.reason }), left);
+    for (const call of run.outside?.browser ?? []) {
+      const known = browser.find((c) => c.tool === call.tool);
+      if (known) known.count += call.count;
+      else browser.push({ ...call });
+    }
+    run = await o.run(takeOverPrompt(o.prompt, { provider: from.label, reason: note.reason, browser }), left);
     costUsd += run.costUsd;
     turns += run.turns;
+    from = to;
   }
   return { run, costUsd, turns, fallback };
 }
@@ -1560,8 +1628,13 @@ export async function main(): Promise<void> {
     // secrets (master key, Slack and GitHub tokens), only the owner's variables for
     // this repository, which cannot override the platform's own names.
     providerSession = await runtime.session();
-    // The session's own credential (the Gemini bridge's token) is hidden like the config's.
-    redactor = makeRedactor([...configSecrets(config), ...host.secrets(), ...sessionSecrets(providerSession.env)]);
+    // Each session's own credential (the Gemini bridge's token) is hidden like the config's: every session's of the
+    // task, not only the current one's, since output that held an earlier one can still be on its way (switchTo).
+    const sessionTokens = new Set(sessionSecrets(providerSession.env));
+    const hideSessionTokens = () => {
+      redactor = makeRedactor([...configSecrets(config), ...host.secrets(), ...sessionTokens]);
+    };
+    hideSessionTokens();
     // Names reserved after they were saved (ANTHROPIC_BASE_URL, HTTPS_PROXY, AWS_…) are left out: they would
     // redirect Claude Code itself, and the platform's key with it. Their names only are logged.
     const repoVars = setupEnv(setup);
@@ -1629,6 +1702,10 @@ export async function main(): Promise<void> {
       return undefined;
     });
     if (apps) timeline.add({ kind: "note", text: `Apps for this task: ${Object.keys(apps.servers).length}` });
+    // The calls a run makes outside the checkout (RunWatch): an app's write tool, or a browser action on a page.
+    // When the run's provider fails, they decide whether the next provider may take over, and what it is told (runOnRoute).
+    const appWrites = new Set(apps?.writeToolNames ?? []);
+    const effectOf = (tool: string): OutsideEffect | undefined => (appWrites.has(tool) ? "app" : BROWSER_ACTION_TOOLS.has(tool) ? "browser" : undefined);
 
     // Agents over their monthly budget, or working through an engine whose budget is used up, sit this task out (budget.ts).
     const overBudget = await spending.leftOut(config.team);
@@ -1833,8 +1910,10 @@ export async function main(): Promise<void> {
       let costUsd = 0;
       let turns = 0;
       let result: Parameters<TaskSpend["endRun"]>[0];
-      // Whether the run ended because its provider failed (rate limit, credit, outage), not the work.
-      const watch = new RunWatch();
+      // Whether the run ended because its provider failed (rate limit, credit, outage), not the work, and what it did outside the checkout.
+      const watch = new RunWatch(effectOf);
+      // The provider this run is on: its cost is that provider's (switchTo changes `runtime` only between runs).
+      const runOn = runtime.provider;
       try {
         for await (const message of query({
           prompt: runPrompt,
@@ -1891,6 +1970,8 @@ export async function main(): Promise<void> {
         await updating;
         // Claude Code's own cost per model, shared out between the agents.
         task.agentCosts = spend.endRun(result);
+        // And on the provider it ran on, for that provider's cap (usage.ts providerTotals).
+        task.providerCosts = addProviderCost(task.providerCosts, runOn, costUsd);
       }
       const timedOut = opts.abort.signal.aborted;
       if (timedOut) failure = `Timed out after ${opts.timeoutMin} minutes.`;
@@ -1898,24 +1979,34 @@ export async function main(): Promise<void> {
       const final = tracker.snapshot();
       task.progress = final;
       const providerFailure = !report && !timedOut ? watch.failure : undefined;
-      return { report, failure: failure && redact(failure), costUsd, turns, plan: final.plan, ...(providerFailure ? { providerFailure } : {}) };
+      return {
+        report,
+        failure: failure && redact(failure),
+        costUsd,
+        turns,
+        plan: final.plan,
+        ...(providerFailure ? { providerFailure, outside: watch.outside } : {}),
+      };
     };
 
     /**
      * The work goes to the next provider of the task route: everything bound
      * to a provider is rebuilt (its environment and credential files, the
-     * agents' shell environment, prices, model mapping), and the task records it.
+     * agents' shell environment, prices, model mapping), and the task records
+     * it. When the next session cannot start, it throws before anything has
+     * changed (runOnRoute then stops with the failed run).
      */
     const switchTo = async (next: ProviderRuntime, note: FallbackNote) => {
       const session = await next.session();
       await providerSession?.dispose();
       providerSession = session;
-      redactor = makeRedactor([...configSecrets(config), ...host.secrets(), ...sessionSecrets(session.env)]);
+      for (const secret of sessionSecrets(session.env)) sessionTokens.add(secret);
+      hideSessionTokens();
       runtime = next;
       agentEnv = agentEnvWith(session.env);
       runConfig = runConfigOn(next);
       prices = runtimePrices(next);
-      // Its Claude cost counts for the provider that did the work (budget.ts).
+      // The provider that does the work from now on; each run's cost stays on the provider it ran on (providerCosts).
       task.provider = next.provider;
       const line = fallbackLine(note, "takes over");
       console.warn(`[worker] ${line}`);
@@ -2025,8 +2116,9 @@ export async function main(): Promise<void> {
 
     // ---------- 3. Let the team work ----------
     // On the task route: when a run fails for its provider's own reasons, the next provider picks up from the
-    // checkout as it was left, within what is left of the task's budget and its time. Later rounds (fixing
-    // checks, the preview) run on the provider that did the work.
+    // checkout as it was left, within what is left of the task's budget, of that provider's caps and of the
+    // task's time; not after the team changed things in apps. Later rounds (fixing checks, the preview) run on
+    // the provider that did the work.
     const onRoute = await runOnRoute({
       runtimes,
       prompt,
@@ -2035,25 +2127,44 @@ export async function main(): Promise<void> {
       run: (runPrompt, budgetUsd) =>
         runTeam(runPrompt, { budgetUsd, abort, timeoutMin: Math.round(firstRunMs / 60_000), since: startSha, context }),
       switchTo,
+      capLeft: (provider) => spending.leftFor(task.repo, provider),
       onShort: (note, left) =>
         timeline.add(
           {
             kind: "note",
-            text: `${providerLabel(note.from)} failed (${note.reason}); only ${usd(Math.max(0, left))} of the task's budget was left, too little for ${providerLabel(note.to)} to take over.`,
+            text: `${providerLabel(note.from)} failed (${note.reason}); only ${usd(Math.max(0, left))} of the task's budget and monthly caps was left, too little for ${providerLabel(note.to)} to take over.`,
           },
           true,
         ),
+      onCapped: (note, left) =>
+        timeline.add(
+          {
+            kind: "note",
+            text: `${providerLabel(note.from)} failed (${note.reason}); ${providerLabel(note.to)} is skipped: only ${usd(Math.max(0, left))} is left of its monthly cap, less than the ${usd(MIN_TASK_USD)} a repo task needs.`,
+          },
+          true,
+        ),
+      onSwitchFailed: (note, err) => {
+        const why = redact(errorText(err)).slice(0, 300);
+        console.error(`[worker] ${providerLabel(note.to)} could not take over: ${why}`);
+        timeline.add({ kind: "note", text: `${providerLabel(note.from)} failed (${note.reason}); ${providerLabel(note.to)} could not take over: ${why}` }, true);
+      },
     });
     const first = onRoute.run;
     clearTimeout(timer);
-    // The size estimate's own (tiny) cost counts too: Pointer's.
+    // The size estimate's own (tiny) cost counts too: Pointer's, on the provider the task started on, which ran it.
     task.costUsd = onRoute.costUsd + (routed?.costUsd ?? 0);
     if (routed?.costUsd) {
       spend.add({ [LEAD_AGENT_ID]: { usd: routed.costUsd } });
       task.agentCosts = spend.live();
+      task.providerCosts = addProviderCost(task.providerCosts, runtimes[0]!.provider, routed.costUsd);
     }
     task.turns = onRoute.turns;
-    const { report, failure } = first;
+    const { report } = first;
+    // The team changed things in apps before its provider failed: not run again elsewhere, and the result says why.
+    const heldBack = onRoute.heldBack && redact(onRoute.heldBack);
+    if (heldBack) timeline.add({ kind: "note", text: heldBack }, true);
+    const failure = heldBack ? `${first.failure ?? "The team stopped early."} ${heldBack}` : first.failure;
     // What the Slack result says, kept on the task for the console (and Pointer).
     if (report) task.report = taskReport(report, redact);
 

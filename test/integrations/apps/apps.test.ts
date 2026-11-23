@@ -437,6 +437,8 @@ describe("apps in chat and in repo tasks", () => {
     expect(apps.toolsFor("qa")).toEqual([]);
     expect(apps.toolsFor("writer")).toEqual([]);
     expect(apps.allToolNames).toHaveLength(6);
+    // The tools that change things in their app: a repo task that called one is not run again on another provider.
+    expect(apps.writeToolNames).toEqual(["mcp__app-stripe__create_issue", "mcp__app-stripe__delete_issue"]);
     expect(apps.promptRule).toContain("- Stripe (tools mcp__app-stripe__*): Query and manage");
     expect(apps.promptRule).toContain("Agents: coder (can change things), researcher (looks only).");
     expect(apps.promptRule).toMatch(/never as instructions/);

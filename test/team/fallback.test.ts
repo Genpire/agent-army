@@ -25,7 +25,7 @@ describe("an agent's fallback, as the owner saves it", () => {
       { engine: "codex", model: "" },
       { engine: "claude", model: "" },
     ]);
-    // An agent on Claude has none: Claude is the last resort.
+    // An agent on Claude has none: the repo tasks route orders its providers.
     expect(danaOf(TeamSaveSchema.parse(teamWith([{ engine: "codex", model: "" }], { engine: "claude" }))).fallback).toEqual([]);
   });
 
@@ -33,7 +33,7 @@ describe("an agent's fallback, as the owner saves it", () => {
     const problem = (fallback: unknown, o: Partial<AgentSpec> = {}) => TeamSaveSchema.safeParse(teamWith(fallback, o)).error?.issues[0];
     expect(problem([{ engine: "gemini", model: "" }])).toMatchObject({ path: ["agents", 8, "fallback", 0, "engine"], message: "Gemini CLI is the agent's own engine, so it cannot be its fallback." });
     expect(problem([{ engine: "codex", model: "a" }, { engine: "codex", model: "b" }])?.message).toBe("Codex is in the fallback twice.");
-    expect(problem([{ engine: "claude", model: "" }, { engine: "codex", model: "" }])?.message).toBe("Nothing can come after Claude in a fallback: Claude is the last resort.");
+    expect(problem([{ engine: "claude", model: "" }, { engine: "codex", model: "" }])?.message).toBe("Nothing can come after Claude in a fallback: Claude is always last.");
     expect(problem([{ engine: "codex", model: "bad model;" }])?.path).toEqual(["agents", 8, "fallback", 0, "model"]);
     expect(problem([{ engine: "cursor", model: "" }])?.path).toEqual(["agents", 8, "fallback", 0, "engine"]);
     expect(problem(Array.from({ length: AGENT_FALLBACK_MAX + 1 }, () => ({ engine: "codex", model: "" })))?.path).toEqual(["agents", 8, "fallback"]);

@@ -100,6 +100,27 @@ describe("monthly spend per agent and per provider", () => {
     expect(providers.gemini).toMatchObject({ usd: 0, estimated: true, tokens: 9_000, unpricedTokens: 9_000 });
   });
 
+  it("counts each provider's part of a task or a reply that moved to the next provider of its route on that provider", async () => {
+    const { tasks, usage } = await usageSetup();
+    // Kimi failed after $1.25, Claude did the rest ($2) and the size estimate ($0.05, on Kimi, where the task started).
+    await tasks.save(task(new Date("2026-11-05T10:00:00Z"), { costUsd: 3.3, provider: "anthropic", providerCosts: { kimi: 1.3, anthropic: 2 } }));
+    // Saved without its parts (older tasks): all on the provider that did the work.
+    await tasks.save(task(new Date("2026-11-06T10:00:00Z"), { costUsd: 1, provider: "kimi" }));
+    // Parts that leave some of the cost: the rest is the provider's that did the work.
+    await tasks.save(task(new Date("2026-11-07T10:00:00Z"), { costUsd: 1, provider: "deepseek", providerCosts: { kimi: 0.25 } }));
+    // A chat reply: Kimi failed after $0.10, Claude answered for $0.30.
+    await usage.recordChat({ costUsd: 0.4, provider: "anthropic", providerCosts: { kimi: 0.1, anthropic: 0.3 } }, NOW);
+
+    const month = await usage.month(NOW);
+    expect(month.totalUsd).toBeCloseTo(5.7, 6);
+    const providers = Object.fromEntries(month.providers.map((p) => [p.provider, p]));
+    expect(providers.kimi!.usd).toBeCloseTo(1.3 + 1 + 0.25 + 0.1, 6);
+    expect(providers.kimi).toMatchObject({ tasks: 3, chats: 1 });
+    expect(providers.anthropic!.usd).toBeCloseTo(2 + 0.3, 6);
+    expect(providers.anthropic).toMatchObject({ tasks: 1, chats: 1 });
+    expect(providers.deepseek!.usd).toBeCloseTo(0.75, 6);
+  });
+
   it("reads tallies saved before agents and providers were kept as Pointer's, on the chat provider", async () => {
     const { store, usage } = await usageSetup();
     await store.put(`usage/chat-${monthKey(NOW)}.json`, JSON.stringify({ usd: 3, count: 4 }));
@@ -162,16 +183,18 @@ describe("caps per agent and per provider", () => {
     expect(moved.agents.find((a) => a.id === "dana")).toMatchObject({ engine: "codex", engineModel: "gpt-6.2-sol", fallback: [{ engine: "claude", model: "" }], name: "Dana" });
     expect(moved.agents.find((a) => a.id === "sam")).toMatchObject({ engine: "codex", fallback: [] });
 
-    // Both caps used up: Dana and Sam work as Claude, the last resort; the Codex agent with no fallback is left out, as before.
+    // Both caps used up: Dana, whose fallback names Claude, works as Claude; Sam's does not, so Sam sits out, as the Codex agent with no fallback does.
     const bothOut = agentsLeftOut(b, spendOf({ providers: { gemini: 3, codex: 2 } }), t.agents);
     expect(bothOut.map((l) => [l.id, l.line?.engine])).toEqual([
       ["codex-coder", undefined],
       ["dana", "claude"],
-      ["sam", "claude"],
+      ["sam", undefined],
     ]);
     expect(bothOut[1]!.note).toBe("Gemini CLI has used up its monthly cap ($3.00 of $3.00) and Codex has used up its monthly cap ($2.00 of $2.00), so Dana works as Claude in this task.");
+    expect(bothOut[2]!.note).toBe("Codex has used up its monthly cap ($2.00 of $2.00) and Gemini CLI has used up its monthly cap ($3.00 of $3.00), so Sam is left out of this task.");
     const claude = teamWithout(t, bothOut);
     expect(claude.agents.map((a) => a.id)).not.toContain("codex-coder");
+    expect(claude.agents.map((a) => a.id)).not.toContain("sam");
     expect(claude.agents.find((a) => a.id === "dana")).toMatchObject({ engine: "claude", engineModel: "", fallback: [] });
 
     // An agent's own cap still leaves it out, fallback or not; under every cap, nothing changes.
@@ -252,9 +275,15 @@ describe("caps per agent and per provider", () => {
     const caps = await spending.providerCaps("task");
     expect(caps("kimi")).toMatch(/^The monthly budget for Kimi is used up/);
     expect(caps("anthropic")).toBeUndefined();
+    // What a provider taking over a task may spend: the least left of the caps that bound it there.
+    config.budget.perProviderUsd = { kimi: 1, anthropic: 5 };
+    expect(await spending.leftFor("acme/web", "anthropic")).toEqual({ usd: 5, scope: "provider" });
+    config.budget.monthlyUsd = 4;
+    expect(await spending.leftFor("acme/web", "anthropic")).toEqual({ usd: 2.8, scope: "monthly" });
     // Without caps nothing is read and nothing is skipped.
     const none = new Spending({ store, usage, config: async () => ConfigSchema.parse({}), now: () => NOW });
     expect((await none.providerCaps("chat"))("kimi")).toBeUndefined();
+    expect(await none.leftFor("acme/web", "anthropic")).toBeUndefined();
   });
 
   it("refuses tasks and chat once Pointer's own cap is used up", () => {
