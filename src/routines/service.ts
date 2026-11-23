@@ -56,6 +56,16 @@ export interface RoutineDraft {
 
 export type RoutineResult = { ok: true; routine: RoutineView } | { ok: false; status: 400 | 404 | 409; error: string };
 
+/** Who makes a change: the owner (the console, their DM with Pointer) or anyone else. */
+export interface RoutineChangeOptions {
+  /**
+   * The owner makes it: the routine is marked ownerOnly, and its runs may read
+   * the owner's Slack account while it reports to them alone (ownerRoutine in
+   * slack/user-account.ts). Left out, the mark is cleared.
+   */
+  ownerOnly?: boolean;
+}
+
 export type SchedulePreview = { ok: true; timezone: string; scheduleText: string; nextRuns: string[] } | { ok: false; error: string };
 
 const EMAIL = z.email();
@@ -227,8 +237,11 @@ export class RoutineService {
     return routine ? this.view(routine) : null;
   }
 
-  /** A new routine; the timezone defaults to the organisation's. It counts its schedule from now. */
-  async create(draft: RoutineDraft, createdBy: string): Promise<RoutineResult> {
+  /**
+   * A new routine; the timezone defaults to the organisation's. It counts its
+   * schedule from now. ownerOnly only when the owner makes it.
+   */
+  async create(draft: RoutineDraft, createdBy: string, opts: RoutineChangeOptions = {}): Promise<RoutineResult> {
     const now = this.now();
     let created: Routine | undefined;
     let problem: RoutineResult | undefined;
@@ -248,6 +261,7 @@ export class RoutineService {
         enabled: true,
         createdBy: createdBy.slice(0, 120),
         createdAt: now.toISOString(),
+        ownerOnly: opts.ownerOnly === true,
       };
       const applied = applyDraft(base, { ...draft, timezone: draft.timezone?.trim() || c.timezone }, now);
       if (!applied.ok) {
@@ -265,9 +279,10 @@ export class RoutineService {
 
   /**
    * Changes a routine. A new schedule or timezone, or resuming it, counts the
-   * schedule from now: runs missed before are not caught up.
+   * schedule from now: runs missed before are not caught up. A change by the
+   * owner marks it ownerOnly; a change by anyone else clears the mark.
    */
-  async update(id: string, draft: RoutineDraft): Promise<RoutineResult> {
+  async update(id: string, draft: RoutineDraft, opts: RoutineChangeOptions = {}): Promise<RoutineResult> {
     const now = this.now();
     let updated: Routine | undefined;
     let restart = false;
@@ -285,6 +300,7 @@ export class RoutineService {
         return;
       }
       const next = applied.routine;
+      next.ownerOnly = opts.ownerOnly === true;
       restart =
         next.schedule.cron !== current.schedule.cron || next.schedule.timezone !== current.schedule.timezone || (next.enabled && !current.enabled);
       c.routines[index] = next;

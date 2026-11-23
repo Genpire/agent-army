@@ -66,6 +66,8 @@ const FIELD_CHARS = 80;
 
 const USER_ID_RE = /^[UW][A-Z0-9]{2,30}$/;
 const CHANNEL_ID_RE = /^[CGD][A-Z0-9]{2,30}$/;
+/** A Slack @handle: one word of letters, digits, dots, dashes and underscores. */
+const HANDLE_RE = /^[\p{L}\p{N}._-]{1,80}$/u;
 
 const NOT_CONNECTED = "Slack is not connected. Ask the owner to connect it on the admin page.";
 
@@ -504,8 +506,9 @@ export function slackHandlers(opts: SlackToolOptions): SlackHandlers {
    * The one active person a name or @handle names, from the member
    * directory. An @handle that is exactly someone's handle is that person
    * (handles are unique); otherwise every match counts, and several or none
-   * send nothing. Candidates are listed by id, @handle and real name only:
-   * titles are free text people write.
+   * send nothing. Candidates are listed by user id and @handle only: real
+   * names and titles are free text people write, and this tool's output is
+   * trusted (confirm-gate.ts). A handle that is more than one word is left out.
    */
   const personByName = async (client: SlackToolsClient, to: string): Promise<string> => {
     const q = oneLine(to).slice(0, 100);
@@ -526,8 +529,8 @@ export function slackHandlers(opts: SlackToolOptions): SlackHandlers {
     }
     const shown = found.slice(0, SLACK_LIMITS.matches);
     const lines = [
-      `Nothing was sent: ${found.length} people match "${clip(q, 80)}" (id · @handle · name). Ask the user which one they mean and write these ids in your reply (later turns see only the conversation's text); then send to the chosen user id.`,
-      ...shown.map((m) => `- ${m.id} · @${m.name || m.id}${m.realName ? ` · ${m.realName}` : ""}`),
+      `Nothing was sent: ${found.length} people match "${clip(q, 80)}" (user id · @handle). Ask the user which one they mean and write these ids in your reply (later turns see only the conversation's text); then send to the chosen user id.`,
+      ...shown.map((m) => `- ${m.id}${HANDLE_RE.test(m.name) ? ` · @${m.name}` : ""}`),
     ];
     if (found.length > shown.length) lines.push(`… and ${found.length - shown.length} more: ask the user for a fuller name or the @handle.`);
     throw new InputError(lines.join("\n") + partial);

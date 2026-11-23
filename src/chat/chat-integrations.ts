@@ -49,6 +49,8 @@ export interface ChatIntegrationContext {
   addAttachment?: AddAttachment;
   /** The owner's own Slack account, only when this request is the owner's (ownSlackAccount in slack/user-account.ts). */
   slackAccount?: SlackUserAccess;
+  /** The owner's own conversation with Pointer: the console, or their DM with Pointer (ownerConversation in slack/user-account.ts). */
+  ownerConversation?: boolean;
   redact: (text: string) => string;
 }
 

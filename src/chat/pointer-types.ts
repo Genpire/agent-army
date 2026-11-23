@@ -89,6 +89,12 @@ export interface PointerRequest {
   surface?: "slack" | "web" | "routine";
   /** This request's own spending cap instead of Pointer's per-message budget (a routine's budgetUsd). */
   budgetUsd?: number;
+  /**
+   * A routine run only: the routine is the owner's and reports to them alone
+   * (ownerRoutine in slack/user-account.ts), so it may read their Slack
+   * account. Set by the runner on each run, never from a message.
+   */
+  ownerRoutine?: boolean;
 }
 
 /** What a step Pointer takes is about, so the console can show an icon. */
