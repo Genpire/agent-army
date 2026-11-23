@@ -32,18 +32,18 @@ export function fakeBrain(reply: (req: PointerRequest) => PointerReply | Promise
 }
 
 export function fakeThreads() {
-  const started: { id: string; title: string; markdown: string; isError?: boolean }[] = [];
-  const posted: { id: string; markdown: string; isError?: boolean }[] = [];
+  const started: { id: string; title: string; markdown: string; isError?: boolean; relayed?: string }[] = [];
+  const posted: { id: string; markdown: string; isError?: boolean; relayed?: string }[] = [];
   let n = 0;
   const threads: ConsoleThreads = {
-    async post(id, markdown, isError) {
+    async post(id, markdown, isError, relayed) {
       if (!started.some((s) => s.id === id)) return false;
-      posted.push({ id, markdown, ...(isError ? { isError } : {}) });
+      posted.push({ id, markdown, ...(isError ? { isError } : {}), ...(relayed ? { relayed } : {}) });
       return true;
     },
-    async start(title, markdown, isError) {
+    async start(title, markdown, isError, relayed) {
       const id = `c-conversation-${++n}`;
-      started.push({ id, title, markdown, ...(isError ? { isError } : {}) });
+      started.push({ id, title, markdown, ...(isError ? { isError } : {}), ...(relayed ? { relayed } : {}) });
       return id;
     },
   };
@@ -51,11 +51,11 @@ export function fakeThreads() {
 }
 
 export function fakeSlack() {
-  const messages: { token: string; channel: string; text: string }[] = [];
+  const messages: { token: string; channel: string; text: string; metadata?: unknown }[] = [];
   const slack = (token: string): SlackPoster => ({
     chat: {
-      postMessage: (async (args: { channel: string; text: string }) => {
-        messages.push({ token, channel: args.channel, text: args.text });
+      postMessage: (async (args: { channel: string; text: string; metadata?: unknown }) => {
+        messages.push({ token, channel: args.channel, text: args.text, ...(args.metadata ? { metadata: args.metadata } : {}) });
         return { ok: true, ts: "1.0" };
       }) as unknown as SlackPoster["chat"]["postMessage"],
     },

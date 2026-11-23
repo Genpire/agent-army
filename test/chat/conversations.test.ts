@@ -118,6 +118,19 @@ describe("ConversationService", () => {
     });
   });
 
+  it("keeps a reply that read the owner's inbox marked: the next reply starts as if it had read it", async () => {
+    const t = await setup();
+    t.setScript(async () => ({ text: "Sam needs the deck.", isError: false, readInbox: true }));
+    const c = await created(t.service, "what needs me on Slack?");
+    await t.service.idle();
+    expect(lastPointer((await t.service.view(c.id))!.conversation)?.relayed).toBe("inbox");
+    t.setScript(async () => ({ text: "ok", isError: false }));
+    expect((await t.service.send(c.id, "thanks")).ok).toBe(true);
+    await t.service.idle();
+    expect(t.calls[1]!.req.history.map((h) => h.outsideContent)).toEqual([undefined, "inbox"]);
+    expect(lastPointer((await t.service.view(c.id))!.conversation)?.relayed).toBeUndefined();
+  });
+
   it("refuses a second message while Pointer answers (409), then sends it with the history", async () => {
     const t = await setup();
     const gate = deferred<PointerReply>();
@@ -458,6 +471,11 @@ describe("conversation helpers", () => {
     expect(toHistory([m("hi", "1"), m("yo", "2", "pointer")], "Scout")).toEqual([
       { ts: "1", userId: "admin", name: "Admin (console)", text: "hi", isPointer: false },
       { ts: "2", name: "Scout", text: "yo", isPointer: true },
+    ]);
+    // Pointer's messages that relayed outside content (a routine's report, a reply that read the inbox) say so.
+    expect(toHistory([{ ...m("report", "3", "pointer"), relayed: "inbox" }, { ...m("me", "4"), relayed: "inbox" }], "Scout")).toEqual([
+      { ts: "3", name: "Scout", text: "report", isPointer: true, outsideContent: "inbox" },
+      { ts: "4", userId: "admin", name: "Admin (console)", text: "me", isPointer: false },
     ]);
   });
 

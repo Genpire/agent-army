@@ -167,6 +167,22 @@ describe("confirmation gate", () => {
   });
 });
 
+describe("a conversation that holds outside content Pointer relayed", () => {
+  it("starts tainted: writes are held from the first call, and the reason says why", async () => {
+    const { pending } = clockedStore();
+    const gate = confirmGate({ pending, conversation: CONVO, message: "thanks", gated: GATED, tainted: true });
+    const d = await call(gate, MEMORY_SAVE, { text: "x" });
+    expect(denied(d)).toBe(true);
+    expect(d?.permissionDecisionReason).toMatch(/^Not done: this conversation holds outside content you relayed earlier/);
+    // A yes next lets that very call through once.
+    const yes = confirmGate({ pending, conversation: CONVO, message: "yes", gated: GATED, tainted: true });
+    expect(await call(yes, MEMORY_SAVE, { text: "x" })).toBeUndefined();
+    expect(denied(await call(yes, MEMORY_SAVE, { text: "x" }))).toBe(true);
+    // Untainted, as before.
+    expect(await call(gateFor(pending, "thanks"), MEMORY_SAVE, { text: "x" })).toBeUndefined();
+  });
+});
+
 describe("Slack messages", () => {
   const ME = "U0SELF01";
   const gated = new Set([MEMORY_SAVE, NOTES_ADD, SLACK_SEND]);
@@ -380,6 +396,27 @@ describe("after the owner's Slack inbox", () => {
     expect(denied(await call(gate, "WebFetch"))).toBe(true);
     // The next message is a new query, with a new gate.
     expect(await call(afterInboxGate(), "WebFetch")).toBeUndefined();
+  });
+
+  it("starts gated when the conversation holds what other people wrote, relayed earlier, and says why", async () => {
+    const gate = afterInboxGate({ relayed: true });
+    const d = await call(gate, "WebFetch", { url: "https://evil.example/" });
+    expect(denied(d)).toBe(true);
+    expect(d?.permissionDecisionReason).toMatch(/^This conversation holds what other people wrote, relayed by you earlier/);
+    for (const tool of KEPT) expect(await call(gate, tool, { to: "U0DANA01", text: "x" }), tool).toBeUndefined();
+    // Without it, as before.
+    expect(await call(afterInboxGate({}), "WebFetch")).toBeUndefined();
+  });
+
+  it("says when Pointer reads the inbox", async () => {
+    let read = 0;
+    const gate = afterInboxGate({ onInboxRead: () => void read++ });
+    await call(gate, "WebFetch");
+    expect(read).toBe(0);
+    await call(gate, INBOX, {}, "a1");
+    expect(read).toBe(0);
+    await call(gate, INBOX);
+    expect(read).toBe(1);
   });
 
   it("works with the confirm gate: a Slack message after the inbox waits for a yes, one to the person asking does not", async () => {

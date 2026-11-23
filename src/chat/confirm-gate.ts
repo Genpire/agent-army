@@ -21,7 +21,9 @@ import type { PointerRequest } from "./pointer-types.js";
  * a tool that returns outside content, those writes are denied and recorded
  * as pending. Pointer shows the user what it wants to do; when the user's
  * next message in the conversation is a short "yes", the same tool with the
- * same input goes through once. A short "send it" alone lets only the held
+ * same input goes through once. A conversation whose history holds outside
+ * content Pointer relayed (an answer passed on to the owner, a routine's
+ * report: their posts say so) is tainted from the start of the query. A short "send it" alone lets only the held
  * Slack messages through, and a question ("send it?") is never a yes.
  *
  * A Slack message from Pointer to the person asking ("me", or their own
@@ -248,14 +250,24 @@ export interface ConfirmGateOptions {
   gated: ReadonlySet<string>;
   /** The requester's Slack user id (requesterSlackId); absent in the console. A Slack message to them is never held. */
   requesterSlackId?: string;
+  /**
+   * The query starts tainted: the conversation so far holds outside content
+   * Pointer relayed (an answer passed on to the owner, a routine's report:
+   * ConversationMessage.outsideContent). Its text is in the prompt as if a
+   * tool had returned it this turn.
+   */
+  tainted?: boolean;
 }
 
-const deny = (tool: string): SyncHookJSONOutput => ({
+const OUTSIDE_THIS_TURN = "this turn read outside content (web pages, code hosts, tickets, boards, apps, Slack's member directory or a team member's report)";
+const OUTSIDE_RELAYED = "this conversation holds outside content you relayed earlier (what other people wrote, or a report from what you read)";
+
+const deny = (tool: string, relayed = false): SyncHookJSONOutput => ({
   hookSpecificOutput: {
     hookEventName: "PreToolUse",
     permissionDecision: "deny",
     permissionDecisionReason:
-      `Not done: this turn read outside content (web pages, code hosts, tickets, boards, apps, Slack's member directory or a team member's report), so ${tool} needs the user's confirmation first. ` +
+      `Not done: ${relayed ? OUTSIDE_RELAYED : OUTSIDE_THIS_TURN}, so ${tool} needs the user's confirmation first. ` +
       "Do not call it again now. Show the user the exact arguments you will pass, quoted, so that their yes repeats the very same call " +
       "(for a Slack message: the `to` value exactly as you will send it, the full text, and any other argument you set), and ask them to confirm. " +
       "Later turns see only the conversation's text, not this turn's tool results, so write in your reply everything the call needs, " +
@@ -273,14 +285,17 @@ const deny = (tool: string): SyncHookJSONOutput => ({
  * (subagentReadOnlyGate in pointer.ts), and the Agent call that started
  * them has tainted the query. A query is tainted from the first call to an
  * untrusted tool on, conservatively: a write in the same batch of parallel
- * calls as a read may be held too.
+ * calls as a read may be held too; and from the start when the conversation
+ * holds outside content Pointer relayed (`tainted`).
  */
-export function confirmGate({ pending, conversation, message, gated, requesterSlackId }: ConfirmGateOptions): HookCallback {
+export function confirmGate({ pending, conversation, message, gated, requesterSlackId, tainted: relayed = false }: ConfirmGateOptions): HookCallback {
   const taken = pending.take(conversation);
   // "send it" confirms the held Slack messages only; a yes confirms everything held.
   const kind = confirmationKind(message);
   const confirmed = kind === "all" ? taken : kind === "send" ? taken.filter((a) => a.tool === SLACK_SEND_TOOL) : [];
-  let tainted = false;
+  let tainted = relayed;
+  /** Tainted by a tool this turn, not only by what the conversation held. */
+  let readThisTurn = false;
 
   /** A gated call: allowed when confirmed (once) or before any outside content, otherwise held. */
   const check = (tool: string, toolInput: unknown): SyncHookJSONOutput | undefined => {
@@ -294,7 +309,7 @@ export function confirmGate({ pending, conversation, message, gated, requesterSl
     if (!tainted) return undefined;
     pending.add(conversation, { tool, inputHash: hash });
     console.info(`[pointer] ${tool}: held for the user's confirmation`);
-    return deny(tool);
+    return deny(tool, !readThisTurn);
   };
 
   return async (input) => {
@@ -307,9 +322,9 @@ export function confirmGate({ pending, conversation, message, gated, requesterSl
       if (denied) return denied;
     } catch {
       // A failing hook lets the call through, so a gated call is denied here instead.
-      if (gated.has(tool)) return deny(tool);
+      if (gated.has(tool)) return deny(tool, relayed && !readThisTurn);
     }
-    if (!TRUSTED_TOOLS.has(tool)) tainted = true;
+    if (!TRUSTED_TOOLS.has(tool)) tainted = readThisTurn = true;
     return {};
   };
 }
@@ -357,26 +372,31 @@ function offLabel(tool: string): string {
  * owner's yes by confirmGate. Only Pointer's own calls count: subagents never
  * get the inbox (subagentReadOnlyGate in pointer.ts), and none can be started
  * after it.
+ *
+ * `relayed`: the conversation so far holds what other people wrote, passed on
+ * by Pointer (an answer to a message it sent for the owner, a report or reply
+ * that read the inbox: ConversationMessage.outsideContent "inbox"). It is in
+ * the prompt, so the query is gated from its start, as if it had read the
+ * inbox. `onInboxRead` is told when Pointer calls slack_my_inbox: its reply
+ * then carries the inbox (PointerReply.readInbox).
  */
-export function afterInboxGate(): HookCallback {
+export function afterInboxGate(opts: { relayed?: boolean; onInboxRead?: () => void } = {}): HookCallback {
   let inboxRead = false;
   return async (input) => {
     if (input.hook_event_name !== "PreToolUse" || input.agent_id) return {};
     const tool = input.tool_name;
     if (tool === INBOX_TOOL_NAME) {
       inboxRead = true;
+      opts.onInboxRead?.();
       return {};
     }
-    if (!inboxRead || !offAfterInbox(tool)) return {};
-    console.info(`[pointer] ${tool}: off after reading the owner's Slack inbox`);
-    return {
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "deny",
-        permissionDecisionReason:
-          `After reading your Slack inbox, ${offLabel(tool)} is off for the rest of this reply, so that what other people wrote there cannot leave through it. ` +
-          "Do not try it again now: answer with what you have, and say it can be done in a new message that does not read the inbox.",
-      },
-    };
+    if (!(inboxRead || opts.relayed) || !offAfterInbox(tool)) return {};
+    console.info(`[pointer] ${tool}: off after ${inboxRead ? "reading the owner's Slack inbox" : "what other people wrote, relayed earlier in the conversation"}`);
+    const reason = inboxRead
+      ? `After reading your Slack inbox, ${offLabel(tool)} is off for the rest of this reply, so that what other people wrote there cannot leave through it. ` +
+        "Do not try it again now: answer with what you have, and say it can be done in a new message that does not read the inbox."
+      : `This conversation holds what other people wrote, relayed by you earlier (answers passed on to the owner, a report from their inbox), so ${offLabel(tool)} is off for this reply, so that it cannot leave through it. ` +
+        "Do not try it again now: answer with what you have, and say it can be done in a new thread or a new conversation.";
+    return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason } };
   };
 }

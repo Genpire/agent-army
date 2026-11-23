@@ -8,6 +8,7 @@ import { KeyedQueue } from "../slack/listen.js";
 import type {
   ActivityKind,
   ConversationMessage,
+  OutsideContent,
   PointerActivity,
   PointerBrain,
   PointerContext,
@@ -98,6 +99,12 @@ export interface ChatMessage {
   tasks?: string[];
   /** This message reports on a repo task. */
   result?: { taskId: string; milestone: TaskMilestone; round?: number };
+  /**
+   * Pointer's message relays outside content (a routine's report, a reply
+   * that read the owner's Slack inbox): a reply after it in this conversation
+   * starts as if it had read it (pointer.ts).
+   */
+  relayed?: OutsideContent;
 }
 
 export interface Conversation {
@@ -417,6 +424,7 @@ export function toHistory(messages: ChatMessage[], pointerName: string): Convers
     name: m.role === "user" ? WEB_USER_NAME : pointerName,
     text: m.files?.length ? (m.text ? `${m.text}\n[Attached: ${fileNames(m.files)}]` : filesOnlyText(m.files)) : m.text,
     isPointer: m.role === "pointer",
+    ...(m.role === "pointer" && m.relayed ? { outsideContent: m.relayed } : {}),
   }));
 }
 
@@ -800,11 +808,19 @@ export class ConversationService implements WebThreads {
 
   // ---------- WebThreads (also used by the webhook) ----------
 
-  post(conversationId: string, markdown: string, isError = false): Promise<boolean> {
+  /** `relayed`: the message relays outside content (ChatMessage.relayed), a routine's report. */
+  post(conversationId: string, markdown: string, isError = false, relayed?: OutsideContent): Promise<boolean> {
     return this.queue.run(conversationId, async () => {
       const c = await this.repo.get(conversationId);
       if (!c) return false;
-      c.messages.push({ id: newMessageId(), role: "pointer", text: clip(markdown, REPLY_MAX_CHARS), at: this.iso(), ...(isError ? { isError } : {}) });
+      c.messages.push({
+        id: newMessageId(),
+        role: "pointer",
+        text: clip(markdown, REPLY_MAX_CHARS),
+        at: this.iso(),
+        ...(isError ? { isError } : {}),
+        ...(relayed ? { relayed } : {}),
+      });
       await this.repo.save(c, this.now());
       return true;
     });
@@ -864,7 +880,7 @@ export class ConversationService implements WebThreads {
     const reply: LiveReply = { messageId: newMessageId(), startedAt: this.iso(), text: "", activity: [], tasks: [] };
     let redact = (text: string) => text;
     this.live.set(id, { reply, redact });
-    let result: { text: string; costUsd?: number; isError: boolean };
+    let result: { text: string; costUsd?: number; isError: boolean; readInbox?: boolean };
     try {
       const config = await this.deps.configRepo.load();
       redact = makeRedactor(configSecrets(config));
@@ -887,6 +903,8 @@ export class ConversationService implements WebThreads {
           at,
           ...(result.costUsd !== undefined ? { costUsd: result.costUsd } : {}),
           ...(result.isError ? { isError: true } : {}),
+          // It read the owner's Slack inbox: the next reply here starts as if it had too.
+          ...(result.readInbox ? { relayed: "inbox" as const } : {}),
           ...(reply.activity.length ? { activity: closeActivity(reply.activity, at) } : {}),
           ...(reply.tasks.length ? { tasks: [...reply.tasks] } : {}),
         });
@@ -905,7 +923,7 @@ export class ConversationService implements WebThreads {
     config: Config,
     reply: LiveReply,
     redact: (text: string) => string,
-  ): Promise<{ text: string; costUsd?: number; isError: boolean }> {
+  ): Promise<{ text: string; costUsd?: number; isError: boolean; readInbox?: boolean }> {
     // A provider of the chat route (Claude by default) must be connected before any model call.
     const route = routeRuntimes(config, "chat");
     if (!route.ok) return { text: onlyClaudeMissing(route.skipped) ? NOT_CONNECTED : route.error, isError: true };
@@ -951,7 +969,7 @@ export class ConversationService implements WebThreads {
       .then(() => this.deps.spending?.notify())
       .catch((err: unknown) => console.error("[usage] chat cost not recorded:", errorText(err)));
     const text = redact(answer.text.trim()) || "(no reply)";
-    return { text, ...(answer.costUsd !== undefined ? { costUsd: answer.costUsd } : {}), isError: answer.isError };
+    return { text, ...(answer.costUsd !== undefined ? { costUsd: answer.costUsd } : {}), isError: answer.isError, ...(answer.readInbox ? { readInbox: true } : {}) };
   }
 
   /** start_repo_task from the console: no Slack; the task's card appears under Pointer's reply. Never throws. */

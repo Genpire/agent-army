@@ -29,6 +29,19 @@ export interface SlackFileRef {
   file_access?: string;
 }
 
+/** The message inside a `message_changed` event: as it reads after the edit. */
+export interface SlackChangedMessage {
+  type?: string;
+  /** "tombstone" for a thread's first message deleted while it has replies. */
+  subtype?: string;
+  user?: string;
+  bot_id?: string;
+  text?: string;
+  ts?: string;
+  thread_ts?: string;
+  files?: SlackFileRef[];
+}
+
 /** A Slack `message` or `app_mention` event, as delivered by the Events API. */
 export interface SlackMessageEvent {
   type: string; // "message" | "app_mention"
@@ -45,6 +58,10 @@ export interface SlackMessageEvent {
   user_team?: string;
   /** Files uploaded with the message (subtype "file_share"). */
   files?: SlackFileRef[];
+  /** Subtype "message_changed": the message as it reads now. */
+  message?: SlackChangedMessage;
+  /** Subtype "message_deleted": the deleted message's ts. */
+  deleted_ts?: string;
   /**
    * Set by the events route, not by Slack: the delivery named a person's
    * account in its authorizations (a user token's events), so the
@@ -52,6 +69,18 @@ export interface SlackMessageEvent {
    */
   viaPerson?: boolean;
 }
+
+/**
+ * What one of Pointer's posts carries that is not its own words (Slack message
+ * metadata, slack.ts; a console message's `relayed`):
+ * - "inbox": what other people wrote to the owner, passed on (answers to the
+ *   messages Pointer sent for them, a report or a reply that read their Slack
+ *   inbox). A reply after it starts as if it had read the inbox: writes need
+ *   a yes, and nothing can carry it out (confirm-gate.ts).
+ * - "read": a routine's report, written from what Pointer read on its own
+ *   (web pages, apps). A reply after it starts tainted: writes need a yes.
+ */
+export type OutsideContent = "inbox" | "read";
 
 /** One earlier message in the conversation, oldest first. */
 export interface ConversationMessage {
@@ -63,6 +92,8 @@ export interface ConversationMessage {
   isPointer: boolean;
   /** Files attached to that earlier message. */
   files?: SlackFileRef[];
+  /** Pointer's post relayed outside content (never set on anyone else's message): data, never its own words. */
+  outsideContent?: OutsideContent;
 }
 
 export interface PointerRequest {
@@ -148,6 +179,8 @@ export interface PointerReply {
   provider?: string;
   /** Providers that failed before this one answered (routing.ts), in order; absent when the first answered. */
   fallback?: FallbackNote[];
+  /** The reply read the owner's Slack inbox (slack_my_inbox): it may quote what people wrote there, so it is posted as outside content. */
+  readInbox?: boolean;
   isError: boolean;
 }
 

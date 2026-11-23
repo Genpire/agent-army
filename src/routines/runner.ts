@@ -14,10 +14,10 @@
 import { randomBytes } from "node:crypto";
 import type { WebClient } from "@slack/web-api";
 import { type ChatMessage, type Conversation, type ConversationRepo, conversationTitle, newConversationId } from "../chat/conversations.js";
-import type { PointerBrain, PointerContext, PointerRequest } from "../chat/pointer-types.js";
+import type { OutsideContent, PointerBrain, PointerContext, PointerRequest } from "../chat/pointer-types.js";
 import type { Config, ConfigRepo, Routine } from "../core/config.js";
 import type { EmailMessage, EmailResult } from "../integrations/email/email.js";
-import { toMrkdwn } from "../slack/slack.js";
+import { pointerPostMetadata, toMrkdwn } from "../slack/slack.js";
 import { splitText } from "../slack/slack-tools.js";
 import { ownerRoutine } from "../slack/user-account.js";
 import type { Spending } from "../spending/budget.js";
@@ -97,24 +97,38 @@ export function routineRequest(routine: Routine, input: RoutineRequestInput): Po
 
 // ---------- Delivery targets ----------
 
-/** The console conversations reports go to. */
+/**
+ * The console conversations reports go to. `relayed`: the report relays
+ * outside content (ChatMessage.relayed), so a reply after it in that
+ * conversation starts as if it had read it.
+ */
 export interface ConsoleThreads {
   /** Adds Pointer's message to a conversation; false when it no longer exists. */
-  post(conversationId: string, markdown: string, isError?: boolean): Promise<boolean>;
+  post(conversationId: string, markdown: string, isError?: boolean, relayed?: OutsideContent): Promise<boolean>;
   /** Starts a conversation titled `title` whose first message is Pointer's; returns its id. */
-  start(title: string, markdown: string, isError?: boolean): Promise<string>;
+  start(title: string, markdown: string, isError?: boolean, relayed?: OutsideContent): Promise<string>;
 }
 
 /** Console conversations through the ConversationService (posting) and its repo (starting one). */
 export function consoleThreads(
-  conversations: { repo: Pick<ConversationRepo, "save">; post(conversationId: string, markdown: string, isError?: boolean): Promise<boolean> },
+  conversations: {
+    repo: Pick<ConversationRepo, "save">;
+    post(conversationId: string, markdown: string, isError?: boolean, relayed?: OutsideContent): Promise<boolean>;
+  },
   now: () => Date = () => new Date(),
 ): ConsoleThreads {
   return {
-    post: (id, markdown, isError) => conversations.post(id, markdown, isError),
-    async start(title, markdown, isError) {
+    post: (id, markdown, isError, relayed) => conversations.post(id, markdown, isError, relayed),
+    async start(title, markdown, isError, relayed) {
       const at = now();
-      const message: ChatMessage = { id: `m-${randomBytes(5).toString("hex")}`, role: "pointer", text: clip(markdown, REPORT_MAX_CHARS), at: at.toISOString(), ...(isError ? { isError } : {}) };
+      const message: ChatMessage = {
+        id: `m-${randomBytes(5).toString("hex")}`,
+        role: "pointer",
+        text: clip(markdown, REPORT_MAX_CHARS),
+        at: at.toISOString(),
+        ...(isError ? { isError } : {}),
+        ...(relayed ? { relayed } : {}),
+      };
       const c: Conversation = {
         id: newConversationId(at.getTime()),
         title: conversationTitle(title),
@@ -304,7 +318,8 @@ export class RoutineRunner {
 
       const report = clip(redact(reply.text.trim()) || "(The run returned an empty report.)", REPORT_MAX_CHARS);
       run.report = report;
-      const delivered = await this.deliver(routine, config, run, redact);
+      // A report is outside content: what the run read on its own, and what other people wrote when it read the owner's inbox.
+      const delivered = await this.deliver(routine, config, run, redact, reply.readInbox ? "inbox" : "read");
       await this.deps.repo.updateState(routine.id, { lastSuccessAt: run.startedAt });
       return await finish({ status: "succeeded", delivered });
     } catch (err) {
@@ -312,8 +327,14 @@ export class RoutineRunner {
     }
   }
 
-  /** Sends the report to the routine's recipients, and only to them. Each failure is recorded, never thrown. */
-  private async deliver(routine: Routine, config: Config, run: RoutineRun, redact: (text: string) => string): Promise<Delivered> {
+  /**
+   * Sends the report to the routine's recipients, and only to them. Each
+   * failure is recorded, never thrown. On Slack and in the console the report
+   * is marked as the outside content it relays (`relayed`): a reply after it
+   * starts as if it had read it (pointer.ts); a Slack post of a routine's in a
+   * DM also ends the window of an earlier outreach there (outreach.ts).
+   */
+  private async deliver(routine: Routine, config: Config, run: RoutineRun, redact: (text: string) => string, relayed: OutsideContent): Promise<Delivered> {
     const report = run.report ?? "";
     const tz = routine.schedule.timezone;
     const date = formatRunDate(new Date(run.scheduledFor), tz);
@@ -345,7 +366,13 @@ export class RoutineRunner {
         const body = `*${escapeMrkdwn(oneLine(routine.name))}* · ${date}\n\n${toMrkdwn(withoutBroadcasts(report))}`;
         const parts = splitText(body, SLACK_PART_CHARS);
         for (const part of parts) {
-          await client.chat.postMessage({ channel: target, text: part, unfurl_links: false, unfurl_media: false });
+          await client.chat.postMessage({
+            channel: target,
+            text: part,
+            metadata: pointerPostMetadata("outside", "routine_report", relayed),
+            unfurl_links: false,
+            unfurl_media: false,
+          });
         }
         return { ok: true, detail: parts.length === 1 ? `Posted to ${target}` : `Posted to ${target} in ${parts.length} messages` };
       });
@@ -354,19 +381,19 @@ export class RoutineRunner {
     if (routine.deliver.console) {
       const head = `_${run.trigger === "manual" ? "Run now" : run.trigger === "catch-up" ? "Late run" : "Scheduled run"} · ${formatRunTime(new Date(run.scheduledFor), tz)} (${tz})_`;
       const note = run.note ? `\n\n_${run.note}_` : "";
-      out.console = await attempt(() => this.toConsole(routine, `${head}${note}\n\n${report}`, false, redact));
+      out.console = await attempt(() => this.toConsole(routine, `${head}${note}\n\n${report}`, false, redact, relayed));
     }
     return out;
   }
 
   /** Appends to the routine's console conversation, starting it (titled with the routine's name) when there is none. */
-  private async toConsole(routine: Routine, markdown: string, isError: boolean, redact: (text: string) => string): Promise<DeliveryOutcome> {
+  private async toConsole(routine: Routine, markdown: string, isError: boolean, redact: (text: string) => string, relayed?: OutsideContent): Promise<DeliveryOutcome> {
     const threads = this.deps.threads;
     if (!threads) return { ok: false, error: "The console is not available." };
     try {
       const state = await this.deps.repo.state(routine.id);
-      if (state?.conversationId && (await threads.post(state.conversationId, markdown, isError))) return { ok: true, detail: state.conversationId };
-      const id = await threads.start(routine.name, markdown, isError);
+      if (state?.conversationId && (await threads.post(state.conversationId, markdown, isError, relayed))) return { ok: true, detail: state.conversationId };
+      const id = await threads.start(routine.name, markdown, isError, relayed);
       await this.deps.repo.updateState(routine.id, { conversationId: id });
       return { ok: true, detail: id };
     } catch (err) {

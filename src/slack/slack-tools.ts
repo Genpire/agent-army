@@ -4,11 +4,12 @@ import type { WebClient } from "@slack/web-api";
 import { z } from "zod";
 import type { ChatIntegration, ChatIntegrationContext } from "../chat/chat-integrations.js";
 import type { PointerRequest } from "../chat/pointer-types.js";
-import type { Config } from "../core/config.js";
+import type { Config, ConfigRepo } from "../core/config.js";
 import type { CallToolResult } from "../integrations/monday/monday.js";
+import type { SlackInbox } from "./inbox.js";
 import { slackInboxFor } from "./inbox-tools.js";
 import type { Outreach } from "./outreach.js";
-import { slackClient, slackErrorCode, toMrkdwn, truncate, userName } from "./slack.js";
+import { pointerPostMetadata, slackClient, slackErrorCode, toMrkdwn, truncate, userName } from "./slack.js";
 import type { SlackUserAccess } from "./user-account.js";
 
 /**
@@ -35,7 +36,11 @@ import type { SlackUserAccess } from "./user-account.js";
  *   A message as the owner always does then.
  * - A message Pointer sends as itself for the owner, from their own
  *   conversation with it, is kept in their inbox so that the answer reaches
- *   them (slack/outreach.ts); nothing else of Pointer's conversations is.
+ *   them (slack/outreach.ts); nothing else of Pointer's conversations is. It
+ *   names the owner as the one who asked and says that replies are passed on
+ *   to them. In a channel, only where the owner is a member.
+ * - Pointer's messages carry metadata saying they were sent at someone's
+ *   request (slack.ts): in a DM, one ends the window of an earlier outreach.
  * - Members' emails are never read (the app has no users:read.email).
  */
 
@@ -83,10 +88,31 @@ export interface SlackToolsClient {
   conversations: Pick<WebClient["conversations"], "list">;
 }
 
-/** The calls a message as the owner makes, with their user token: a WebClient, or a fake in tests. */
+/**
+ * The calls made with the owner's user token: a message as them, and whether
+ * they are in a channel Pointer posts in for them. A WebClient, or a fake in tests.
+ */
 export interface SlackOwnerClient {
   chat: Pick<WebClient["chat"], "postMessage" | "getPermalink">;
-  conversations: Pick<WebClient["conversations"], "open">;
+  conversations: Pick<WebClient["conversations"], "open" | "info">;
+}
+
+/**
+ * Keeps what Pointer sends as itself for the owner as an outreach
+ * (slack/outreach.ts), so that the answer reaches them. Present only in the
+ * owner's own conversation with Pointer while their account listens.
+ */
+export interface OutreachRecorder {
+  /** The owner's Slack name: the message says they asked, and that replies are passed on to them. */
+  ownerName: string;
+  /**
+   * Whether a message to this place would be kept, asked before it is sent:
+   * never one to the owner themselves, a channel only where the owner is a
+   * member (with its name when Slack gave it). Never throws.
+   */
+  check(to: { channel?: string; person?: string }): Promise<{ keep: boolean; name?: string }>;
+  /** Keeps it; true once kept. Checked again (the inbox may have been cleared since the request started). */
+  record(outreach: Outreach): Promise<boolean>;
 }
 
 /** The owner's own account, for slack_send_message with as "me". */
@@ -118,10 +144,9 @@ export interface SlackToolOptions {
    * Present only in the owner's own conversation with Pointer (the console,
    * their DM with it) while their account is connected with listening on: a
    * message Pointer sends as itself is kept as an outreach, so that the
-   * answer reaches the owner (slack/outreach.ts). Resolves true when kept
-   * (never for a message to the owner themselves).
+   * answer reaches the owner (slack/outreach.ts).
    */
-  recordOutreach?: (outreach: Outreach) => Promise<boolean>;
+  outreach?: OutreachRecorder;
   redact?: (text: string) => string;
   now?: () => number;
 }
@@ -568,25 +593,44 @@ export function slackHandlers(opts: SlackToolOptions): SlackHandlers {
   };
 
   /**
-   * Keeps a message Pointer sent for the owner as an outreach (recordOutreach),
-   * so that the answer reaches them. True when kept; a failure only means
-   * the answer is not passed on, never that the send failed.
+   * Whether a message Pointer sends as itself to this place will be kept as an
+   * outreach (OutreachRecorder.check), asked before it is sent so that the
+   * message can say so. A failure means it is not kept.
    */
-  const keepOutreach = async (client: SlackToolsClient, res: { channel?: string; ts?: string }, person: string | undefined, text: string): Promise<boolean> => {
-    const record = opts.recordOutreach;
-    if (!record || !res.channel || !res.ts) return false;
+  const outreachPlan = async (to: { channel?: string; person?: string }): Promise<{ keep: boolean; name?: string }> => {
+    const recorder = opts.outreach;
+    if (!recorder) return { keep: false };
+    try {
+      return await recorder.check(to);
+    } catch {
+      return { keep: false };
+    }
+  };
+
+  /**
+   * Keeps a message Pointer sent for the owner as an outreach, so that the
+   * answer reaches them. True when kept; a failure only means the answer is
+   * not passed on, never that the send failed.
+   */
+  const keepOutreach = async (
+    client: SlackToolsClient,
+    res: { channel?: string; ts?: string },
+    sent: { person: string | undefined; text: string; requester: string; channelName?: string },
+  ): Promise<boolean> => {
+    const recorder = opts.outreach;
+    if (!recorder || !res.channel || !res.ts) return false;
     try {
       const dm = res.channel.startsWith("D");
-      const recipientName = person ? await userName(client, person) : dm ? res.channel : await knownChannelName(res.channel);
-      return await record({
+      const recipientName = sent.person ? await userName(client, sent.person) : dm ? res.channel : (sent.channelName ?? (await knownChannelName(res.channel)));
+      return await recorder.record({
         id: `${res.channel}:${res.ts}`,
         channel: res.channel,
         ts: res.ts,
         where: dm ? "dm" : "channel",
-        recipient: person ?? res.channel,
+        recipient: sent.person ?? res.channel,
         recipientName: field(recipientName) || res.channel,
-        requester: field(opts.requester) || "someone",
-        text: redact(text),
+        requester: sent.requester,
+        text: redact(sent.text),
       });
     } catch (err) {
       console.warn("[slack] a message sent for the owner was not kept, so its answer will not reach them:", clip(oneLine(redact(errMessage(err))), 200));
@@ -697,7 +741,12 @@ export function slackHandlers(opts: SlackToolOptions): SlackHandlers {
           link = await permalink(owner.client, res);
           sent = `Sent from ${field(owner.userName) || "the owner"}'s own Slack account, as ${where}.`;
         } else {
-          const context = `Sent by ${escapeMrkdwn(field(name))} at ${escapeMrkdwn(field(opts.requester) || "someone")}'s request`;
+          // Kept for the owner (their answer reaches them): the message names them and says so.
+          const plan = await outreachPlan({ ...(channel ? { channel } : {}), ...(person ? { person } : {}) });
+          const asker = (plan.keep ? field(opts.outreach?.ownerName) : "") || field(opts.requester) || "someone";
+          const dm = !channel || channel.startsWith("D");
+          const context = [`Sent by ${escapeMrkdwn(field(name))} at ${escapeMrkdwn(asker)}'s request`];
+          if (plan.keep) context.push(`${dm ? "Replies to this message" : "Replies in this thread"} are passed on to ${escapeMrkdwn(asker)}.`);
           let res: Awaited<ReturnType<SlackToolsClient["chat"]["postMessage"]>>;
           try {
             res = await client.chat.postMessage({
@@ -706,8 +755,10 @@ export function slackHandlers(opts: SlackToolOptions): SlackHandlers {
               text: message,
               blocks: [
                 ...splitText(message).map((part) => ({ type: "section" as const, text: { type: "mrkdwn" as const, text: part } })),
-                { type: "context", elements: [{ type: "mrkdwn", text: context }] },
+                { type: "context", elements: context.map((text) => ({ type: "mrkdwn", text })) },
               ],
+              // Sent at someone's request, not a chat reply: in a DM it ends an earlier outreach's window (outreach.ts).
+              metadata: pointerPostMetadata("sent", "slack_send_message"),
               // A link in the message is not fetched by Slack: an unfurl would call that address even if nobody clicks.
               unfurl_links: false,
               unfurl_media: false,
@@ -719,11 +770,11 @@ export function slackHandlers(opts: SlackToolOptions): SlackHandlers {
           }
           link = await permalink(client, res);
           sent = `Sent as ${where}.`;
-          kept = await keepOutreach(client, res, person, written);
+          if (plan.keep) kept = await keepOutreach(client, res, { person, text: written, requester: asker, ...(plan.name ? { channelName: plan.name } : {}) });
         }
 
         const lines = [sent, link ? `Link: ${link}` : "Slack did not return a link to the message."];
-        if (kept) lines.push("Answers to it are passed on to the owner (their Slack inbox, slack_my_inbox).");
+        if (kept) lines.push("Answers to it are passed on to the owner (their Slack inbox, slack_my_inbox); the message tells the recipient so.");
         if (cut) lines.push(`The message was longer than ${SLACK_LIMITS.text} characters, so its end was cut; tell the user.`);
         return lines.join("\n");
       }),
@@ -841,14 +892,7 @@ export function slackToolOptions(
   // The owner's own conversation with listening on: what Pointer sends for them is kept, so the answer reaches them.
   const account = ctx.ownerConversation ? ctx.slackAccount : undefined;
   const inbox = account?.listen ? slackInboxFor(ctx.configRepo) : undefined;
-  const recordOutreach =
-    account && inbox
-      ? async (o: Outreach) => {
-          if (o.recipient === account.userId) return false;
-          await inbox.recordOutreach(account.userId, o);
-          return true;
-        }
-      : undefined;
+  const outreach = account && inbox ? outreachRecorder(inbox, account, ctx.configRepo, ownerClient) : undefined;
   return {
     client: client ?? slackClient(token),
     cacheKey: tokenCacheKey(token),
@@ -858,8 +902,29 @@ export function slackToolOptions(
     allowedUserIds: config.slack.allowedUserIds,
     ...(config.slack.botUserId ? { botUserId: config.slack.botUserId } : {}),
     ...(owner ? { asOwner: { client: ownerClient ?? slackClient(owner.token), userId: owner.userId, userName: owner.userName } } : {}),
-    ...(recordOutreach ? { recordOutreach } : {}),
+    ...(outreach ? { outreach } : {}),
     redact: ctx.redact,
+  };
+}
+
+/**
+ * What Pointer sends for the owner, kept in their inbox. The inbox's state is
+ * taken now, as the request starts: once the inbox is cleared (listening
+ * turned off, the account disconnected or replaced), nothing this request
+ * sends is kept. The current config is read again for each check.
+ */
+function outreachRecorder(
+  inbox: SlackInbox,
+  account: Pick<SlackUserAccess, "userId" | "userName">,
+  configRepo: Pick<ConfigRepo, "load">,
+  ownerClient: SlackOwnerClient | undefined,
+): OutreachRecorder {
+  const ticket = inbox.outreachTicket(account.userId);
+  const now = async () => ({ config: await configRepo.load(true), ownerClient: (token: string) => ownerClient ?? slackClient(token) });
+  return {
+    ownerName: account.userName,
+    check: async ({ channel, person }) => (person === account.userId ? { keep: false } : inbox.outreachPlace(ticket, await now(), channel)),
+    record: async (o) => inbox.recordOutreach(ticket, o, await now()),
   };
 }
 
