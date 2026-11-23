@@ -64,6 +64,9 @@ import { aiRoutes } from "./routes/ai.js";
 import { dataSourcesRoutes } from "./routes/data-sources.js";
 import { emailRoutes } from "./routes/email.js";
 import { routinesRoutes } from "./routes/routines.js";
+import { slackAccountRoutes } from "./routes/slack-account.js";
+import { SlackInbox } from "./slack/inbox.js";
+import { registerSlackInbox } from "./slack/inbox-tools.js";
 import { normalizeTimeZone } from "./routines/cron.js";
 import { registerRoutineService } from "./routines/routines.js";
 import { consoleThreads } from "./routines/runner.js";
@@ -314,7 +317,10 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
     brainSlot: withBrainSlot,
   });
   registerRoutineService(configRepo, routines);
-  const slackDeps: SlackDeps & { web: WebThreads; spending: Spending } = {
+  // The owner's Slack inbox: what reaches their own account, for slack_my_inbox and the attention report.
+  const inbox = new SlackInbox(store, masterKey);
+  registerSlackInbox(configRepo, inbox);
+  const slackDeps: SlackDeps & { web: WebThreads; spending: Spending; inbox: SlackInbox } = {
     configRepo,
     tasks,
     runner,
@@ -325,6 +331,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
     slack: slackFactory,
     web: conversations,
     spending,
+    inbox,
   };
 
   // The setup token creates the admin account on first run and resets its
@@ -1451,6 +1458,8 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
   app.use(officeRoutes({ ...routeDeps, usage, spending }));
   // The Routines page's API, and POST /routines/tick for external schedulers (outside /api: its own secret header, no session).
   app.use(routinesRoutes({ ...routeDeps, routines }));
+  // The owner's own Slack account: connect, switches, disconnect, the attention report.
+  app.use(slackAccountRoutes({ ...routeDeps, routines, inbox, slack: slackFactory }));
   app.use(chatRoutes({ ...routeDeps, conversations }));
   app.use(lessonsRoutes({ ...routeDeps, lessons }));
 

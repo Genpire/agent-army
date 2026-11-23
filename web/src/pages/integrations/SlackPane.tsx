@@ -20,6 +20,7 @@ import { api, errorMessage } from "../../lib/api";
 import { useConfig } from "../../lib/state";
 import type { IntegrationSummary } from "./catalog";
 import { FormActions, FormError, PaneHeader, PaneSection, Steps, Strong, useSave } from "./parts";
+import { SlackAccountSection } from "./SlackAccount";
 
 type SlackManifest = ReturnType<typeof buildManifest>;
 
@@ -43,6 +44,21 @@ const SCOPE_USES: Record<string, string> = {
   "reactions:write": "React to messages while it works",
   "files:read": "Read files people share",
   "files:write": "Post screenshots from browser checks",
+};
+
+/** What each user scope (your own account, see Your Slack account) is for. */
+const USER_SCOPE_USES: Record<string, string> = {
+  "chat:write": "Send messages as you, when you ask and allow it",
+  "im:write": "Open a DM to send as you",
+  "im:history": "Read your direct messages",
+  "mpim:history": "Read your group DMs",
+  "channels:history": "Read replies in your threads and mentions of you in public channels",
+  "groups:history": "The same in private channels you are in",
+  "im:read": "Tell your DMs apart from its own",
+  "mpim:read": "Name your group DMs",
+  "channels:read": "Name the public channels you are in",
+  "groups:read": "Name the private channels you are in",
+  "users:read": "Check whose token it is",
 };
 
 interface ScopeRow extends Record<string, unknown> {
@@ -103,6 +119,12 @@ export function SlackPane({ summary, onBack }: { summary: IntegrationSummary; on
   };
 
   const scopes: ScopeRow[] = (manifest.data?.manifest.oauth_config.scopes.bot ?? Object.keys(SCOPE_USES)).map((scope) => ({ scope, use: SCOPE_USES[scope] ?? "" }));
+  const userScopeNames = manifest.data?.manifest.oauth_config.scopes.user ?? Object.keys(USER_SCOPE_USES);
+  const userScopes: ScopeRow[] = userScopeNames.map((scope) => ({ scope, use: USER_SCOPE_USES[scope] ?? "" }));
+  const scopeColumns = [
+    { key: "scope", header: "Scope", width: proportional(1, { minWidth: 130 }), renderCell: (r: ScopeRow) => <Code size="inherit">{r.scope}</Code> },
+    { key: "use", header: "What it is for", width: proportional(2, { minWidth: 150 }) },
+  ];
   const eventsUrl = state.eventsUrl ?? manifest.data?.manifest.settings.event_subscriptions.request_url ?? "";
 
   return (
@@ -187,9 +209,11 @@ export function SlackPane({ summary, onBack }: { summary: IntegrationSummary; on
         </Stepper>
       </PaneSection>
 
+      <SlackAccountSection requiredScopes={manifest.data ? userScopeNames : []} />
+
       <PaneSection
         title="Already have an app? Update it"
-        description={`Apps created with an earlier version miss some scopes: direct messages, reactions, shared files and screenshots. Update the app once, and again whenever you rename ${name}.`}>
+        description={`Apps created with an earlier version miss some scopes: direct messages, reactions, shared files and screenshots, and your own account's scopes and events (Your Slack account). Update the app once, and again whenever you rename ${name}.`}>
         <Steps
           label="To update the app"
           steps={[
@@ -208,15 +232,9 @@ export function SlackPane({ summary, onBack }: { summary: IntegrationSummary; on
             </>,
           ]}
         />
-        <Table<ScopeRow>
-          data={scopes}
-          idKey="scope"
-          density="compact"
-          columns={[
-            { key: "scope", header: "Scope", width: proportional(1, { minWidth: 130 }), renderCell: (r) => <Code size="inherit">{r.scope}</Code> },
-            { key: "use", header: "What it is for", width: proportional(2, { minWidth: 150 }) },
-          ]}
-        />
+        <Table<ScopeRow> data={scopes} idKey="scope" density="compact" columns={scopeColumns} />
+        <Text color="secondary">Your own account's scopes, used only when you connect it under Your Slack account:</Text>
+        <Table<ScopeRow> data={userScopes} idKey="scope" density="compact" columns={scopeColumns} />
         <Collapsible trigger={<Text weight="semibold">Manifest to paste</Text>} defaultIsOpen={false}>
           {manifest.data ? (
             <CodeBlock code={JSON.stringify(manifest.data.manifest, null, 2)} language="json" title="manifest.json" width="100%" maxHeight={360} size="sm" />
