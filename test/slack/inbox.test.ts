@@ -250,7 +250,7 @@ describe("SlackInbox", () => {
     expect((await t.inbox.list({ since: new Date(0), openOnly: false, ownerId: "UOTHER" })).entries).toEqual([]);
     await t.inbox.clear();
     const after = await t.inbox.list({ since: new Date(0), openOnly: false, ownerId: OWNER });
-    expect(after).toEqual({ entries: [] });
+    expect(after).toEqual({ entries: [], outreach: [] });
   });
 });
 

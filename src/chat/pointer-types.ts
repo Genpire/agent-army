@@ -103,6 +103,22 @@ export interface PointerRequest {
    * account. Set by the runner on each run, never from a message.
    */
   ownerRoutine?: boolean;
+  /**
+   * Slack only, set by the Slack layer, never from a message: this message
+   * answers one Pointer sent this person (or into this thread) for the owner
+   * (slack/outreach.ts), so it is passed on to the owner. What Pointer sent
+   * is already visible to them in this conversation.
+   */
+  answering?: {
+    /** Who asked for it (the owner), as that message named them. */
+    askedBy: string;
+    /** When Pointer sent it (ISO). */
+    sentAt: string;
+    /** What Pointer sent, redacted and clipped. */
+    text: string;
+    /** The message is a reply in that message's own thread. */
+    inThread: boolean;
+  };
 }
 
 /** What a step Pointer takes is about, so the console can show an icon. */

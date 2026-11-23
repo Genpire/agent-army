@@ -27,6 +27,7 @@ import type {
   StartRepoTask,
 } from "../chat/pointer-types.js";
 import type { SlackInbox } from "./inbox.js";
+import type { AnswerNotifier } from "./outreach.js";
 import {
   BotConversations,
   type BotPresence,
@@ -36,6 +37,7 @@ import {
   slackFileRefs,
   toMrkdwn,
   truncate,
+  tsDate,
   unreact,
   userName,
 } from "./slack.js";
@@ -83,6 +85,8 @@ export type DispatchDeps = SlackDeps & {
   spending?: Pick<Spending, "checkTask" | "checkChat" | "notify">;
   /** The owner's Slack inbox (inbox.ts): what reaches their own account. Absent = not kept (older tests). */
   inbox?: SlackInbox;
+  /** Tells the owner when someone answers a message Pointer sent for them (outreach.ts). Absent = nobody is told. */
+  answers?: Pick<AnswerNotifier, "add">;
 };
 
 interface Ctx {
@@ -98,7 +102,8 @@ interface Ctx {
 /**
  * Routes one Slack `message`/`app_mention` event: decide whether Pointer
  * answers, run a command or ask the brain, and reply; and, apart from that,
- * keep what reaches the owner's own account in their inbox. Never throws;
+ * keep what reaches the owner's own account in their inbox, and the answers
+ * to messages Pointer sent for them (outreach.ts). Never throws;
  * problems the user should know about are posted in the conversation.
  */
 export async function handleSlackEvent(event: SlackMessageEvent, deps: DispatchDeps): Promise<void> {
@@ -108,7 +113,12 @@ export async function handleSlackEvent(event: SlackMessageEvent, deps: DispatchD
   await Promise.all([routed, deps.inbox ? capture(event, deps, deps.inbox) : undefined]);
 }
 
-/** Keeps the message in the owner's inbox when it is for them (inbox.ts decides). Never throws, never logs the text. */
+/**
+ * Keeps the message in the owner's inbox when it is for them (inbox.ts
+ * decides): an answer to a message Pointer sent for them (outreach.ts), which
+ * the owner is also told of, or else what reached their own account. Never
+ * throws, never logs the text.
+ */
 async function capture(event: SlackMessageEvent, deps: DispatchDeps, inbox: SlackInbox): Promise<void> {
   let redact = (text: string) => text;
   try {
@@ -116,7 +126,10 @@ async function capture(event: SlackMessageEvent, deps: DispatchDeps, inbox: Slac
     const account = config.slack.user;
     if (!account?.listen || !config.slack.botToken) return;
     redact = secretsRedactor(config);
-    await inbox.capture(event, { config, client: deps.slack, redact });
+    const ctx = { config, client: deps.slack, redact };
+    const answer = await inbox.captureAnswer(event, ctx);
+    if (answer) return void deps.answers?.add(config, answer.outreach, answer.item);
+    await inbox.capture(event, ctx);
   } catch (err) {
     console.error("[slack] inbox capture failed:", redact(errorText(err)).slice(0, 300));
   }
@@ -271,6 +284,9 @@ async function askPointer(
     }
     pointerCtx.addAttachment = (file) => repo.add(where, file);
   }
+  // An answer to a message Pointer sent this person for the owner: the reply knows what it sent, and that it is passed on.
+  const answering = await answeringContext(ctx);
+  if (answering) req.answering = answering;
   const reply = await state.brainSlots.run(() => deps.brain.reply(req, pointerCtx));
   void deps.usage
     ?.recordChat(reply)
@@ -278,6 +294,29 @@ async function askPointer(
     .catch((err) => console.error("[usage] chat cost not recorded:", errorText(err)));
   const body = ctx.redact(reply.text.trim()) || "(no reply)";
   return { text: toMrkdwn(reply.isError && !body.startsWith(":x:") ? `:x: ${body}` : body), isError: reply.isError };
+}
+
+/**
+ * What Pointer sent this person for the owner when this message answers it
+ * (outreach.ts): already visible to them in this conversation. Undefined
+ * otherwise, or when it cannot be told: the reply goes on without it.
+ */
+async function answeringContext({ e, config, deps, redact }: Ctx): Promise<PointerRequest["answering"]> {
+  const account = config.slack.user;
+  if (!deps.inbox || !account?.listen) return undefined;
+  try {
+    const outreach = await deps.inbox.answering(e, config);
+    if (!outreach) return undefined;
+    return {
+      askedBy: outreach.requester,
+      sentAt: tsDate(outreach.ts).toISOString(),
+      text: outreach.text,
+      inThread: e.thread_ts === outreach.ts,
+    };
+  } catch (err) {
+    console.error("[slack] could not tell whether a message answers one sent for the owner:", redact(errorText(err)).slice(0, 200));
+    return undefined;
+  }
 }
 
 /** A Slack file's name for notes to Pointer: one line, no brackets. */
