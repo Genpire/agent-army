@@ -141,6 +141,46 @@ describe("caps per agent and per provider", () => {
     expect(agentsLeftOut(b, spendOf({ agents: { coder: 50 } }), disabled.agents)).toEqual([]);
   });
 
+  it("moves an agent with a fallback past the CLIs whose cap is used up, instead of leaving it out", () => {
+    const t = team();
+    t.agents.push({ ...t.agents[0]!, id: "dana", name: "Dana", engine: "gemini", engineModel: "gemini-4-pro", fallback: [{ engine: "codex", model: "gpt-6.2-sol" }, { engine: "claude", model: "" }] });
+    t.agents.push({ ...t.agents[0]!, id: "sam", name: "Sam", engine: "codex", engineModel: "", fallback: [{ engine: "gemini", model: "gemini-4-flash" }] });
+    const b = budget({ perProviderUsd: { gemini: 3, codex: 2 } });
+
+    // Gemini CLI's cap used up: Dana starts on Codex, on its step's model; Sam keeps Codex and loses Gemini CLI from its fallback.
+    const geminiOut = agentsLeftOut(b, spendOf({ providers: { gemini: 3.5 } }), t.agents);
+    expect(geminiOut).toEqual([
+      {
+        id: "dana",
+        note: "Gemini CLI has used up its monthly cap ($3.50 of $3.00), so Dana works through Codex in this task.",
+        line: { engine: "codex", engineModel: "gpt-6.2-sol", fallback: [{ engine: "claude", model: "" }] },
+      },
+      { id: "sam", note: "Gemini CLI has used up its monthly cap ($3.50 of $3.00), so it is left out of Sam's fallback in this task.", line: { engine: "codex", engineModel: "", fallback: [] } },
+    ]);
+    const moved = teamWithout(t, geminiOut);
+    expect(moved.agents.map((a) => a.id)).toEqual(t.agents.map((a) => a.id));
+    expect(moved.agents.find((a) => a.id === "dana")).toMatchObject({ engine: "codex", engineModel: "gpt-6.2-sol", fallback: [{ engine: "claude", model: "" }], name: "Dana" });
+    expect(moved.agents.find((a) => a.id === "sam")).toMatchObject({ engine: "codex", fallback: [] });
+
+    // Both caps used up: Dana and Sam work as Claude, the last resort; the Codex agent with no fallback is left out, as before.
+    const bothOut = agentsLeftOut(b, spendOf({ providers: { gemini: 3, codex: 2 } }), t.agents);
+    expect(bothOut.map((l) => [l.id, l.line?.engine])).toEqual([
+      ["codex-coder", undefined],
+      ["dana", "claude"],
+      ["sam", "claude"],
+    ]);
+    expect(bothOut[1]!.note).toBe("Gemini CLI has used up its monthly cap ($3.00 of $3.00) and Codex has used up its monthly cap ($2.00 of $2.00), so Dana works as Claude in this task.");
+    const claude = teamWithout(t, bothOut);
+    expect(claude.agents.map((a) => a.id)).not.toContain("codex-coder");
+    expect(claude.agents.find((a) => a.id === "dana")).toMatchObject({ engine: "claude", engineModel: "", fallback: [] });
+
+    // An agent's own cap still leaves it out, fallback or not; under every cap, nothing changes.
+    const own = agentsLeftOut(budget({ perAgentUsd: { dana: 1 }, perProviderUsd: { gemini: 3 } }), spendOf({ agents: { dana: 1 }, providers: { gemini: 3 } }), t.agents);
+    expect(own.find((l) => l.id === "dana")).toEqual({ id: "dana", note: "Dana is over its monthly budget ($1.00 of $1.00), so it is left out of this task." });
+    expect(teamWithout(t, own).agents.map((a) => a.id)).not.toContain("dana");
+    expect(agentsLeftOut(b, spendOf({ providers: { gemini: 1, codex: 1 } }), t.agents)).toEqual([]);
+  });
+
   it("refuses a task, and a chat reply, when the provider it runs on has used up its cap", () => {
     const b = budget({ perProviderUsd: { kimi: 10 } });
     const usage = spendOf({ total: 30, providers: { kimi: 10.2, anthropic: 20 } });

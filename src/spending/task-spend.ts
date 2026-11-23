@@ -109,13 +109,15 @@ export class TaskSpend {
 
   /** For engines.ts: each run's tokens, priced (prices.ts), counted for its agent and held to its per-task cap. */
   readonly engines: EngineSpend = {
-    begin: ({ engine, tool, task }) => {
+    begin: ({ engine, tool, task, agent: owner }) => {
       const tracker = this.current;
       if (!tracker) return undefined;
       const key = callKey(tool, task);
       const queue = this.pendingCalls.get(key);
       const only = this.o.engineAgents?.[engine];
-      const agent = queue?.shift() ?? (only?.length === 1 ? only[0] : undefined);
+      const matched = queue?.shift();
+      // An agent's own tool says whose run it is: so does the next CLI of its line, taking over within the same call.
+      const agent = (owner && this.o.agents.includes(owner) ? owner : undefined) ?? matched ?? (only?.length === 1 ? only[0] : undefined);
       if (queue && !queue.length) this.pendingCalls.delete(key);
       if (!agent) return undefined;
       const run = tracker.engineRun(agent, engine);

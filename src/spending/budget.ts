@@ -267,15 +267,32 @@ export function taskBudgetFor(budget: Budget, usage: SpendInput, repo: string, m
 export interface LeftOutAgent {
   id: string;
   note: string;
+  /**
+   * Set when the agent stays and only CLIs of its line sit out (an agent with
+   * a fallback): its engine, model and fallback for this task, what is left
+   * of its line once they are out (Claude when no CLI is).
+   */
+  line?: Pick<AgentSpec, "engine" | "engineModel" | "fallback">;
 }
 
+/** An agent as agentsLeftOut reads it: its line only when it has one. */
+export type CappedAgent = Pick<AgentSpec, "id" | "name" | "engine" | "enabled"> & Partial<Pick<AgentSpec, "engineModel" | "fallback">>;
+
 /**
- * The enabled agents that sit out the next repo task: over their own monthly
- * cap, or working through an engine (Codex, Gemini CLI) whose monthly cap is
- * used up. Pointer itself is never left out (its cap refuses the task instead).
+ * The enabled agents a monthly cap changes in the next repo task. Over its
+ * own cap, an agent sits out. Working through an engine (Codex, Gemini CLI)
+ * whose cap is used up: an agent with no fallback sits out; one with a
+ * fallback stays, and moves to the next step of its line whose CLI still has
+ * budget (Claude, the last resort, when none has), while a capped CLI further
+ * down its line is only dropped from it. Pointer itself is never left out
+ * (its cap refuses the task instead).
  */
-export function agentsLeftOut(budget: Budget, usage: Partial<Pick<MonthUsage, "agents" | "providers">>, agents: Pick<AgentSpec, "id" | "name" | "engine" | "enabled">[]): LeftOutAgent[] {
+export function agentsLeftOut(budget: Budget, usage: Partial<Pick<MonthUsage, "agents" | "providers">>, agents: CappedAgent[]): LeftOutAgent[] {
   const out: LeftOutAgent[] = [];
+  const capped = (engine: string) => {
+    const status = providerStatus(budget, usage, engine);
+    return status && status.remainingUsd <= 0 ? status : undefined;
+  };
   for (const a of agents) {
     if (!a.enabled) continue;
     const own = agentStatus(budget, usage, a.id);
@@ -284,23 +301,53 @@ export function agentsLeftOut(budget: Budget, usage: Partial<Pick<MonthUsage, "a
       continue;
     }
     if (a.engine === "claude") continue;
-    const engine = providerStatus(budget, usage, a.engine);
-    if (engine && engine.remainingUsd <= 0) {
+    if (!a.fallback?.length) {
+      const engine = capped(a.engine);
+      if (!engine) continue;
       const label = providerLabel(a.engine);
       out.push({
         id: a.id,
         note: `${a.name} is over its monthly budget: ${label}, which does its work, has used up its cap (${usd(engine.usedUsd)} of ${usd(engine.capUsd)}), so ${a.name} is left out of this task.`,
       });
+      continue;
     }
+    // Its line up to Claude (nothing after Claude runs): the capped CLIs drop out of it.
+    const steps: { engine: AgentSpec["engine"]; model: string }[] = [{ engine: a.engine, model: a.engineModel ?? "" }];
+    for (const f of a.fallback) {
+      if (steps.at(-1)!.engine === "claude") break;
+      steps.push(f);
+    }
+    const dropped = steps.filter((s) => s.engine !== "claude" && capped(s.engine));
+    if (!dropped.length) continue;
+    const [first, ...rest] = steps.filter((s) => !dropped.includes(s));
+    const line: LeftOutAgent["line"] = first && first.engine !== "claude" ? { engine: first.engine, engineModel: first.model, fallback: rest } : { engine: "claude", engineModel: "", fallback: [] };
+    const why = dropped
+      .map((s) => {
+        const status = capped(s.engine)!;
+        return `${providerLabel(s.engine)} has used up its monthly cap (${usd(status.usedUsd)} of ${usd(status.capUsd)})`;
+      })
+      .join(" and ");
+    const where =
+      line.engine === a.engine
+        ? `so ${dropped.length === 1 ? "it is" : "they are"} left out of ${a.name}'s fallback in this task`
+        : `so ${a.name} ${line.engine === "claude" ? "works as Claude" : `works through ${providerLabel(line.engine)}`} in this task`;
+    out.push({ id: a.id, note: `${why}, ${where}.`, line });
   }
   return out;
 }
 
-/** The team without the agents a cap left out. */
-export function teamWithout(team: Team, leftOut: Pick<LeftOutAgent, "id">[]): Team {
+/** The team without the agents a cap left out, and with what is left of the line of those it only moved. */
+export function teamWithout(team: Team, leftOut: (Pick<LeftOutAgent, "id"> & Partial<Pick<LeftOutAgent, "line">>)[]): Team {
   if (!leftOut.length) return team;
-  const ids = new Set(leftOut.map((l) => l.id));
-  return { ...team, agents: team.agents.filter((a) => !ids.has(a.id)) };
+  const byId = new Map(leftOut.map((l) => [l.id, l]));
+  return {
+    ...team,
+    agents: team.agents.flatMap((a) => {
+      const l = byId.get(a.id);
+      if (!l) return [a];
+      return l.line ? [{ ...a, ...l.line }] : [];
+    }),
+  };
 }
 
 // ---------- Alerts ----------
