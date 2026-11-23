@@ -4,7 +4,8 @@ import type { Config } from "../core/config.js";
 import { decrypt, encrypt } from "../core/crypto.js";
 import type { Store } from "../core/store.js";
 import { isPersonMessage, isThreadReply, mentionsUser } from "./listen.js";
-import { slackErrorCode, slackFileRefs, userName } from "./slack.js";
+import { OUTREACH_LIMITS, type Outreach, answerCandidate, answeredOutreach, outreachOpen } from "./outreach.js";
+import { slackErrorCode, slackFileRefs, tsAfter, tsDate, userName } from "./slack.js";
 
 /**
  * The owner's Slack inbox: what reaches their own Slack account
@@ -24,8 +25,14 @@ import { slackErrorCode, slackFileRefs, userName } from "./slack.js";
  * never reaches their inbox, and neither does their DM with Pointer (those
  * are requests to Pointer).
  *
+ * Also the messages Pointer sent for the owner as itself, and the answers
+ * people gave it (outreach.ts): an answer is an item with where "to_pointer",
+ * kept with the outreach it answers. Those come from Pointer's own
+ * conversations (its bot's events), never from the owner's token.
+ *
  * One encrypted blob in the store; texts redacted and clipped; kept 14 days,
- * at most 3 000 items, and what is older is dropped on every read and write.
+ * at most 3 000 items (and 1 000 outreaches), and what is older is dropped on
+ * every read and write.
  * Changes are collected for about a second and written at once, one write at
  * a time in this process (Cloud Storage takes about one write per second per
  * object); a change that changes nothing writes nothing. clear() empties it
@@ -56,8 +63,12 @@ const MAX_KNOWN_CONVERSATIONS = 5_000;
 /** Changes collected before one write. */
 const WRITE_BATCH_MS = 1_000;
 
-/** Where a message reached the owner. */
-export type InboxWhere = "dm" | "group_dm" | "channel";
+/**
+ * Where a message reached the owner; "to_pointer": an answer to a message
+ * Pointer sent for them (in Pointer's DM with that person, or the thread of
+ * its post).
+ */
+export type InboxWhere = "dm" | "group_dm" | "channel" | "to_pointer";
 
 export interface InboxItem {
   /** `channel:ts` */
@@ -76,6 +87,8 @@ export interface InboxItem {
   /** A reply in a thread the owner started or replied in. */
   followed: boolean;
   text: string;
+  /** where "to_pointer": the outreach it answers (Outreach.id). */
+  outreachId?: string;
 }
 
 /** An item as listed: whether the owner answered after it, and whether it waits for them. */
@@ -99,6 +112,22 @@ interface InboxData {
    * is a thread they follow.
    */
   answered: Record<string, string>;
+  /** Messages Pointer sent for the owner as itself (outreach.ts); absent in an inbox from before them. */
+  outreach: Outreach[];
+}
+
+/** A message Pointer sent for the owner, as listed: whether it is still open for answers, and its answers. */
+export interface OutreachEntry extends Outreach {
+  /** Sent in the last 7 days: an answer still reaches the owner. */
+  open: boolean;
+  /** Oldest first. */
+  answers: InboxItem[];
+}
+
+/** An answer to an outreach, just kept. */
+export interface CapturedAnswer {
+  outreach: Outreach;
+  item: InboxItem;
 }
 
 /** The Slack calls the inbox makes. */
@@ -140,15 +169,10 @@ export function inboxSignal(e: SlackMessageEvent, ownerId: string, botUserId: st
   return { kind: "message", ...at, where, mentioned: mentionsUser(e.text, ownerId) };
 }
 
-/** Slack ts "1700000000.123456": compared as seconds, then the fraction, never through a float. */
-export function tsAfter(a: string, b: string): boolean {
-  const [as = "0", af = ""] = a.split(".");
-  const [bs = "0", bf = ""] = b.split(".");
-  if (Number(as) !== Number(bs)) return Number(as) > Number(bs);
-  return af.padEnd(6, "0") > bf.padEnd(6, "0");
-}
+export { tsAfter, tsDate };
 
-export const tsDate = (ts: string): Date => new Date(Number(ts.split(".")[0]) * 1000);
+/** Oldest first, by Slack ts. */
+const byTs = (a: string, b: string) => (tsAfter(a, b) ? 1 : tsAfter(b, a) ? -1 : 0);
 
 const threadKey = (channel: string, threadTs: string) => `${channel}:${threadTs}`;
 const markKey = (ownerId: string, key: string) => `${ownerId}|${key}`;
@@ -197,6 +221,12 @@ interface PendingChange {
   generation: number;
   /** Returns false when it changes nothing. */
   change: (data: InboxData) => boolean;
+  /**
+   * It is something that reached the owner's own account: the first one
+   * starts the inbox (startedAt). Pointer's outreaches and the answers to
+   * them come from its own conversations, so they do not.
+   */
+  starts: boolean;
   /** The marks it holds in `marking`. */
   marks: string[];
   done: () => void;
@@ -215,8 +245,13 @@ export interface SlackInboxOptions {
 export class SlackInbox {
   /** Serialises the blob's reads and writes so concurrent ones don't lose each other. */
   private chain: Promise<unknown> = Promise.resolve();
-  /** The last data read or written, for the quick "is this a thread they follow?" check before a write. */
+  /**
+   * The last data read or written, for the quick checks before a write ("is
+   * this a thread they follow?", "does this answer a message Pointer sent?").
+   */
   private last: InboxData | undefined;
+  /** Writes so far: a read that a write overtook does not replace `last` with older data. */
+  private writes = 0;
   /** What the owner's token said about a conversation, per owner and conversation. */
   private readonly known = new Map<string, { facts: Facts; until: number }>();
   /** Bumped by clear(): a change that started before it is never written. */
@@ -307,24 +342,116 @@ export class SlackInbox {
     });
   }
 
-  /** The items since `since` (oldest first), all or only those the owner has not answered. Writes what is queued first. */
-  async list(opts: { since: Date; openOnly: boolean; ownerId: string }): Promise<{ startedAt?: string; entries: InboxEntry[] }> {
+  /**
+   * The items since `since` (oldest first), all or only those the owner has
+   * not answered; and every kept outreach (newest first) with all its
+   * answers, whatever `since` says. Writes what is queued first.
+   */
+  async list(opts: { since: Date; openOnly: boolean; ownerId: string }): Promise<{ startedAt?: string; entries: InboxEntry[]; outreach: OutreachEntry[] }> {
     await this.flush();
     const data = await this.exclusive(async () => {
       const stored = await this.read(opts.ownerId);
       // Retention holds while nothing new arrives too: what passed 14 days goes when read.
-      if (stored.startedAt && this.prune(stored)) {
+      if (this.prune(stored)) {
         await this.put(stored).catch((err) => console.error("[slack] inbox write failed, expired messages not removed yet:", writeError(err)));
       }
       return stored;
     });
     const from = opts.since.getTime();
     const entries = data.items
-      .filter((i) => tsDate(i.ts).getTime() >= from)
+      .filter((i) => !i.outreachId && tsDate(i.ts).getTime() >= from)
       .map((i) => ({ ...i, answered: isAnswered(i, data.answered), waiting: i.where === "dm" || i.mentioned || i.followed }))
       .filter((i) => !opts.openOnly || !i.answered)
-      .sort((a, b) => (tsAfter(a.ts, b.ts) ? 1 : tsAfter(b.ts, a.ts) ? -1 : 0));
-    return { ...(data.startedAt ? { startedAt: data.startedAt } : {}), entries };
+      .sort((a, b) => byTs(a.ts, b.ts));
+    const answers = new Map<string, InboxItem[]>();
+    for (const i of data.items) if (i.outreachId) answers.set(i.outreachId, [...(answers.get(i.outreachId) ?? []), i]);
+    const now = this.now();
+    const outreach = data.outreach
+      .map((o) => ({ ...o, open: outreachOpen(o, now), answers: (answers.get(o.id) ?? []).sort((a, b) => byTs(a.ts, b.ts)) }))
+      .sort((a, b) => byTs(b.ts, a.ts));
+    return { ...(data.startedAt ? { startedAt: data.startedAt } : {}), entries, outreach };
+  }
+
+  /**
+   * Keeps a message Pointer sent for the owner as itself (outreach.ts), so
+   * that answers to it reach the owner; resolves once it is written. The
+   * caller has checked that the request is the owner's and that listening is on.
+   */
+  async recordOutreach(ownerId: string, outreach: Outreach): Promise<void> {
+    const kept: Outreach = { ...outreach, text: clip(outreach.text, OUTREACH_LIMITS.text) };
+    await this.write(
+      ownerId,
+      this.generation,
+      (data) => {
+        if (data.outreach.some((o) => o.id === kept.id)) return false;
+        data.outreach.push(kept);
+        return true;
+      },
+      [],
+      false,
+    );
+  }
+
+  /** The outreach this message answers (outreach.ts), without keeping anything: for Pointer's reply to it. */
+  async answering(e: SlackMessageEvent, config: Config): Promise<Outreach | undefined> {
+    const account = config.slack.user;
+    if (!account?.listen) return undefined;
+    const m = answerCandidate(e, account.userId, config.slack.botUserId);
+    if (!m) return undefined;
+    const data = this.last?.ownerId === account.userId ? this.last : await this.read(account.userId);
+    return data.outreach.length ? answeredOutreach(m, data.outreach, data.items) : undefined;
+  }
+
+  /**
+   * Keeps a message that answers an outreach (outreach.ts) as an item of the
+   * owner's inbox, and resolves with it once written; undefined when it
+   * answers none (most messages: decided from what is in memory, without
+   * asking Slack). A clear() while it runs drops it.
+   */
+  async captureAnswer(e: SlackMessageEvent, ctx: CaptureContext): Promise<CapturedAnswer | undefined> {
+    const generation = this.generation;
+    const account = ctx.config.slack.user;
+    const botToken = ctx.config.slack.botToken;
+    if (!account?.listen || !botToken) return undefined;
+    const ownerId = account.userId;
+    const m = answerCandidate(e, ownerId, ctx.config.slack.botUserId);
+    if (!m) return undefined;
+    const data = this.last?.ownerId === ownerId ? this.last : await this.read(ownerId);
+    if (!data.outreach.length || !answeredOutreach(m, data.outreach, data.items)) return undefined;
+
+    const bot = ctx.client(botToken);
+    const [sender, text] = await Promise.all([userName(bot, m.userId), this.readable(e, bot, ctx.redact)]);
+    const out: { captured?: CapturedAnswer } = {};
+    await this.write(
+      ownerId,
+      generation,
+      (d) => {
+        // Decided again on what is stored now: another answer may have been kept since.
+        const outreach = answeredOutreach(m, d.outreach, d.items);
+        const id = `${m.channel}:${m.ts}`;
+        if (!outreach || d.items.some((i) => i.id === id)) return false;
+        const item: InboxItem = {
+          id,
+          channel: m.channel,
+          channelName: outreach.where === "dm" ? sender : outreach.recipientName,
+          where: "to_pointer",
+          ts: m.ts,
+          ...(m.threadTs ? { threadTs: m.threadTs } : {}),
+          userId: m.userId,
+          userName: sender,
+          mentioned: false,
+          followed: false,
+          text,
+          outreachId: outreach.id,
+        };
+        d.items.push(item);
+        out.captured = { outreach, item };
+        return true;
+      },
+      [],
+      false,
+    );
+    return out.captured;
   }
 
   /**
@@ -362,8 +489,9 @@ export class SlackInbox {
         const data = await this.read(ownerId);
         let changed = false;
         for (const p of changes) changed = p.change(data) || changed;
-        if (!changed && data.startedAt) return;
-        if (!data.startedAt) data.startedAt = this.now().toISOString();
+        const starts = !data.startedAt && changes.some((p) => p.starts);
+        if (!changed && !starts) return;
+        if (starts) data.startedAt = this.now().toISOString();
         this.prune(data);
         await this.put(data);
       } catch (err) {
@@ -383,11 +511,13 @@ export class SlackInbox {
   /** The stored inbox when it is this owner's; an empty one otherwise. */
   private async read(ownerId: string): Promise<InboxData> {
     const generation = this.generation;
+    const writes = this.writes;
     const blob = await this.store.get(INBOX_KEY);
     // The store has no delete: a cleared inbox is an empty blob.
     const stored = blob && blob.length > 0 ? (JSON.parse(decrypt(this.key, blob)) as InboxData) : undefined;
-    const data: InboxData = stored?.ownerId === ownerId ? stored : { version: 1, ownerId, startedAt: "", items: [], answered: {} };
-    if (generation === this.generation) this.last = data;
+    const data: InboxData = stored?.ownerId === ownerId ? stored : { version: 1, ownerId, startedAt: "", items: [], answered: {}, outreach: [] };
+    data.outreach ??= [];
+    if (generation === this.generation && writes === this.writes) this.last = data;
     return data;
   }
 
@@ -401,16 +531,21 @@ export class SlackInbox {
       await new Promise((resolve) => setTimeout(resolve, this.batchMs));
       await this.store.put(INBOX_KEY, blob);
     }
+    this.writes++;
     this.last = data;
   }
 
-  /** Queues a change for the next write (in about a second); resolves once it is written or dropped. `marks`: threads the owner wrote in. */
-  private write(ownerId: string, generation: number, change: (data: InboxData) => boolean, marks: string[] = []): Promise<void> {
+  /**
+   * Queues a change for the next write (in about a second); resolves once it
+   * is written or dropped. `marks`: threads the owner wrote in. `starts`:
+   * something that reached the owner's own account (PendingChange.starts).
+   */
+  private write(ownerId: string, generation: number, change: (data: InboxData) => boolean, marks: string[] = [], starts = true): Promise<void> {
     if (generation !== this.generation) return Promise.resolve();
     const held = marks.map((key) => markKey(ownerId, key));
     for (const key of held) this.marking.set(key, (this.marking.get(key) ?? 0) + 1);
     return new Promise((done) => {
-      this.pending.push({ ownerId, generation, change, marks: held, done });
+      this.pending.push({ ownerId, generation, change, starts, marks: held, done });
       this.timer ??= setTimeout(() => void this.flush(), this.batchMs);
     });
   }
@@ -425,14 +560,25 @@ export class SlackInbox {
     p.done();
   }
 
-  /** Drops what is older than 14 days, then the oldest beyond the limits. True when it dropped anything. */
+  /**
+   * Drops what is older than 14 days, then the oldest beyond the limits; an
+   * answer goes with the outreach it answers. True when it dropped anything.
+   */
   private prune(data: InboxData): boolean {
-    const size = () => data.items.length + Object.keys(data.answered).length;
+    const size = () => data.items.length + Object.keys(data.answered).length + data.outreach.length;
     const before = size();
     const cutoff = this.now().getTime() - INBOX_LIMITS.days * DAY_MS;
     const recent = (ts: string) => tsDate(ts).getTime() >= cutoff;
-    const byTs = (a: string, b: string) => (tsAfter(a, b) ? 1 : tsAfter(b, a) ? -1 : 0);
-    data.items = data.items.filter((i) => recent(i.ts)).sort((a, b) => byTs(a.ts, b.ts)).slice(-INBOX_LIMITS.items);
+    const outreachCutoff = this.now().getTime() - OUTREACH_LIMITS.days * DAY_MS;
+    data.outreach = data.outreach
+      .filter((o) => tsDate(o.ts).getTime() >= outreachCutoff)
+      .sort((a, b) => byTs(a.ts, b.ts))
+      .slice(-OUTREACH_LIMITS.items);
+    const kept = new Set(data.outreach.map((o) => o.id));
+    data.items = data.items
+      .filter((i) => recent(i.ts) && (!i.outreachId || kept.has(i.outreachId)))
+      .sort((a, b) => byTs(a.ts, b.ts))
+      .slice(-INBOX_LIMITS.items);
     const answered = Object.entries(data.answered)
       .filter(([, ts]) => recent(ts))
       .sort(([, a], [, b]) => byTs(a, b))

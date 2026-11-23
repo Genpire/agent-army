@@ -4,8 +4,9 @@ import type { PointerRequest } from "../chat/pointer-types.js";
 /**
  * The owner's own Slack account (config.slack.user): a user token next to the
  * bot's. With it Pointer reads what reaches the owner (DMs, mentions, the
- * threads they are in: slack/inbox.ts) and, when they allow it, sends as them
- * (slack_send_message with as "me").
+ * threads they are in: slack/inbox.ts), passes on what people answer to the
+ * messages it sends for them (slack/outreach.ts) and, when they allow it,
+ * sends as them (slack_send_message with as "me").
  *
  * Only the owner may use it: in the admin console (its only user is the
  * owner), in their DM with Pointer from the very account the token belongs

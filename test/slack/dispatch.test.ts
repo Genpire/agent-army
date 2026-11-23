@@ -6,8 +6,9 @@ import { AttachmentRepo } from "../../src/chat/attachments.js";
 import { type Config, ConfigRepo } from "../../src/core/config.js";
 import { deriveKey } from "../../src/core/crypto.js";
 import { handleSlackEvent, resetDispatchStateForTests } from "../../src/slack/dispatch.js";
-import { SlackInbox } from "../../src/slack/inbox.js";
-import { BotConversations } from "../../src/slack/slack.js";
+import { type InboxItem, SlackInbox } from "../../src/slack/inbox.js";
+import type { Outreach } from "../../src/slack/outreach.js";
+import { BotConversations, tsDate } from "../../src/slack/slack.js";
 import { MemoryRepo } from "../../src/chat/memory.js";
 import type {
   PointerContext,
@@ -929,6 +930,68 @@ describe("handleSlackEvent: the owner's own conversations are never requests to 
     silent(t);
     const { entries } = await inbox.list({ since: new Date(Date.now() - 60_000), openOnly: true, ownerId: "UOWN" });
     expect(entries).toMatchObject([{ channel: "D9", where: "dm", userName: "Name U2", text: "can you review the plan?", waiting: true }]);
+  });
+});
+
+describe("handleSlackEvent: answers to messages Pointer sent for the owner", () => {
+  /** Pointer sent U2 a message for the owner an hour ago (in its DM D5), and posted in C7 for them. */
+  async function withOutreach(account: Config["slack"]["user"] = OWNER_ACCOUNT) {
+    const t = await setup((c) => void (c.slack.user = account));
+    const inbox = new SlackInbox(new FsStore(await mkdtemp(join(tmpdir(), "army-inbox-"))), deriveKey("k"), { batchMs: 0 });
+    const told: { outreach: string; text: string }[] = [];
+    const answers = { add: (_c: Config, o: Outreach, item: InboxItem) => void told.push({ outreach: o.id, text: item.text }) };
+    const deps = { ...t.deps, inbox, answers };
+    const now = Math.floor(Date.now() / 1000);
+    const ts = (sec: number) => `${now - sec}.000100`;
+    const toU2: Outreach = { id: `D5:${ts(3600)}`, channel: "D5", ts: ts(3600), where: "dm", recipient: "U2", recipientName: "Name U2", requester: "Admin (console)", text: "Can you send the deck by Friday?" };
+    const inC7: Outreach = { id: `C7:${ts(3600)}`, channel: "C7", ts: ts(3600), where: "channel", recipient: "C7", recipientName: "#ops", requester: "Name UOWN", text: "Who has the staging keys?" };
+    await inbox.recordOutreach("UOWN", toU2);
+    await inbox.recordOutreach("UOWN", inC7);
+    const send = (e: Partial<SlackMessageEvent>) => handleSlackEvent({ type: "message", channel: "D5", channel_type: "im", user: "U2", ...e } as SlackMessageEvent, deps);
+    const answered = async (id: string) => (await inbox.list({ since: new Date(0), openOnly: false, ownerId: "UOWN" })).outreach.find((o) => o.id === id)?.answers.map((a) => a.text);
+    return { ...t, inbox, told, send, ts, toU2, inC7, answered };
+  }
+
+  it("keeps the colleague's answer for the owner, tells them, and gives Pointer's reply what it sent", async () => {
+    const t = await withOutreach();
+    await t.send({ ts: t.ts(60), text: "Sure, Friday works" });
+    // Pointer answers her as always, knowing what it sent her and for whom, as that message said.
+    expect(t.requests).toHaveLength(1);
+    expect(t.requests[0]!.answering).toEqual({ askedBy: "Admin (console)", sentAt: tsDate(t.toU2.ts).toISOString(), text: "Can you send the deck by Friday?", inThread: false });
+    expect(t.posts.map((p) => p.channel)).toEqual(["D5"]);
+    // The owner's inbox keeps it under the message it answers, and the owner is told.
+    expect(await t.answered(t.toU2.id)).toEqual(["Sure, Friday works"]);
+    expect(t.told).toEqual([{ outreach: t.toU2.id, text: "Sure, Friday works" }]);
+
+    // A reply in the thread of the post in #ops, from anyone there.
+    await t.send({ channel: "C7", channel_type: "channel", user: "U3", ts: t.ts(30), thread_ts: t.inC7.ts, text: "I keep them" });
+    expect(await t.answered(t.inC7.id)).toEqual(["I keep them"]);
+    expect(t.told.map((x) => x.outreach)).toEqual([t.toU2.id, t.inC7.id]);
+  });
+
+  it("passes on nothing else: her later messages, other people's DMs, the owner, bots", async () => {
+    const t = await withOutreach();
+    await t.send({ ts: t.ts(3000), text: "Sure" });
+    // Over 30 minutes after her answer: her own conversation with Pointer again.
+    await t.send({ ts: t.ts(60), text: "Unrelated: can you help me with my review?" });
+    expect(t.requests.map((r) => r.answering === undefined)).toEqual([false, true]);
+    // Someone else's DM with Pointer, the owner in the post's thread, a bot there.
+    await t.send({ channel: "D6", user: "U3", ts: t.ts(50), text: "hello" });
+    await t.send({ channel: "C7", channel_type: "channel", user: "UOWN", ts: t.ts(40), thread_ts: t.inC7.ts, text: "thanks all" });
+    await t.send({ channel: "C7", channel_type: "channel", user: "U9", bot_id: "B9", ts: t.ts(35), thread_ts: t.inC7.ts, text: "a bot" });
+    expect(await t.answered(t.toU2.id)).toEqual(["Sure"]);
+    expect(await t.answered(t.inC7.id)).toEqual([]);
+    expect(t.told.map((x) => x.text)).toEqual(["Sure"]);
+    const { entries } = await t.inbox.list({ since: new Date(0), openOnly: false, ownerId: "UOWN" });
+    expect(entries).toEqual([]);
+  });
+
+  it("keeps and tells nothing while reading what reaches the owner is off", async () => {
+    const t = await withOutreach({ ...OWNER_ACCOUNT, listen: false });
+    await t.send({ ts: t.ts(60), text: "Sure, Friday works" });
+    expect(t.requests[0]!.answering).toBeUndefined();
+    expect(t.told).toEqual([]);
+    expect(await t.answered(t.toU2.id)).toEqual([]);
   });
 });
 

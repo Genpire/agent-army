@@ -118,15 +118,20 @@ describe("the owner's Slack account API", () => {
   it("connects a person's token, shows it masked, and lists the scopes Slack did not grant", async () => {
     expect(await connect(" xoxp-good-token-1111 ")).toEqual({ status: 200, body: { ok: true, userId: "UOWN", userName: "dana", missingScopes: ["mpim:history"] } });
     const s = await state();
-    expect(s.config.slack.user).toMatchObject({ connected: true, userId: "UOWN", userName: "dana", key: "••••1111", listen: true, sendAsMe: true });
+    expect(s.config.slack.user).toMatchObject({ connected: true, userId: "UOWN", userName: "dana", key: "••••1111", listen: true, sendAsMe: true, notifyAnswers: true });
     expect(JSON.stringify(s)).not.toContain("xoxp-good-token-1111");
   });
 
   it("turns listening and sending as the owner on and off, and keeps them on a reconnect", async () => {
-    expect((await (await post("/api/slack/user/settings", {})).json()).error).toBe("Send listen or sendAsMe.");
+    expect((await (await post("/api/slack/user/settings", {})).json()).error).toBe("Send listen, sendAsMe or notifyAnswers.");
     expect((await post("/api/slack/user/settings", { listen: "yes" })).status).toBe(400);
+    expect((await post("/api/slack/user/settings", { notifyAnswers: "no" })).status).toBe(400);
     await store.put("slack/inbox.enc", "x");
     expect((await post("/api/slack/user/settings", { sendAsMe: false })).status).toBe(200);
+    // Telling the owner of answers off keeps the inbox: the answers stay in it.
+    expect((await post("/api/slack/user/settings", { notifyAnswers: false })).status).toBe(200);
+    expect(await inboxBlob()).toBe(1);
+    expect(await account()).toMatchObject({ notifyAnswers: false });
     expect(await inboxBlob()).toBe(1);
     // Reading off: what was kept is deleted.
     expect((await post("/api/slack/user/settings", { listen: false })).status).toBe(200);
@@ -135,10 +140,11 @@ describe("the owner's Slack account API", () => {
     // The same token again: nothing to revoke.
     expect((await connect("xoxp-good-token-1111")).body).not.toHaveProperty("previousRevoked");
     expect(revoked).toEqual([]);
-    expect(await account()).toMatchObject({ listen: false, sendAsMe: false });
+    expect(await account()).toMatchObject({ listen: false, sendAsMe: false, notifyAnswers: false });
     expect((await (await get("/api/slack/user/report")).json()).blocked).toMatch(/^Turn on reading what reaches you/);
     expect((await post("/api/slack/user/report", {})).status).toBe(400);
-    await post("/api/slack/user/settings", { listen: true, sendAsMe: true });
+    await post("/api/slack/user/settings", { listen: true, sendAsMe: true, notifyAnswers: true });
+    expect(await account()).toMatchObject({ listen: true, sendAsMe: true, notifyAnswers: true });
   });
 
   it("creates the attention report once, on weekdays, to the owner's DM and the console", async () => {

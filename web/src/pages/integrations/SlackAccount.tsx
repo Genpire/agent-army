@@ -1,9 +1,10 @@
 /**
  * The Slack pane's "Your Slack account" section: the owner connects their own
  * Slack account with the app's User OAuth Token, so Pointer can send as them
- * and read what reaches them; then the two switches, Disconnect, and the
- * attention report (an owner-only routine that DMs them what needs their
- * reply). Its steps use the account's own manifest (the bot's plus user
+ * and read what reaches them; then the switches (read, send as me, tell me
+ * of answers to what Pointer sends for me), the privacy note, Disconnect,
+ * and the attention report (an owner-only routine that DMs them what needs
+ * their reply). Its steps use the account's own manifest (the bot's plus user
  * scopes and events): the bot's manifest asks nothing of anyone's account.
  */
 import { Banner } from "@astryxdesign/core/Banner";
@@ -201,7 +202,7 @@ function ConnectedAccount({ requiredScopes, onRevoked }: { requiredScopes: strin
   if (!user.connected) return null;
   const missing = requiredScopes.filter((s) => !(user.scopes ?? []).includes(s));
 
-  const setSwitch = (key: "listen" | "sendAsMe", on: boolean, success: string) =>
+  const setSwitch = (key: "listen" | "sendAsMe" | "notifyAnswers", on: boolean, success: string) =>
     save(() => api.post("/api/slack/user/settings", { [key]: on }), { success }).then(() => undefined);
 
   const createReport = async () => {
@@ -248,7 +249,7 @@ function ConnectedAccount({ requiredScopes, onRevoked }: { requiredScopes: strin
       )}
       <Switch
         label="Read what reaches me"
-        description={`${name} keeps your DMs, group DMs, mentions and replies in your threads for 14 days, encrypted, to tell you what needs your reply. Off: nothing is kept, and what was kept is deleted.`}
+        description={`${name} keeps your DMs, group DMs, mentions and replies in your threads for 14 days, encrypted, to tell you what needs your reply, with the answers to messages it sends for you. Off: nothing is kept, and what was kept is deleted.`}
         value={user.listen ?? false}
         changeAction={(on) =>
           setSwitch("listen", on, on ? `${name} reads what reaches you.` : `${name} no longer reads what reaches you, and what it kept is deleted.`)
@@ -260,6 +261,19 @@ function ConnectedAccount({ requiredScopes, onRevoked }: { requiredScopes: strin
         value={user.sendAsMe ?? false}
         changeAction={(on) => setSwitch("sendAsMe", on, on ? `${name} may send as you when you ask.` : `${name} only sends as itself.`)}
       />
+      <Switch
+        label={`Tell me right away when someone answers a message ${name} sent for me`}
+        description={`When you ask ${name} to message someone and it sends as itself, their answer to it is kept in your inbox. On: ${name} also DMs you who answered and what, about a minute after they do.`}
+        value={(user.listen ?? false) && (user.notifyAnswers ?? false)}
+        isDisabled={!user.listen}
+        disabledMessage="Turn on Read what reaches me first: answers are kept in your inbox."
+        changeAction={(on) =>
+          setSwitch("notifyAnswers", on, on ? `${name} will DM you when someone answers a message it sent for you.` : `Answers stay in your inbox; ${name} no longer DMs you about them.`)
+        }
+      />
+      <Text color="secondary">
+        Answers to messages {name} sends for you are passed on to you. People's own conversations with {name} stay private.
+      </Text>
 
       <VStack gap={3}>
         <Heading level={4}>Attention report</Heading>

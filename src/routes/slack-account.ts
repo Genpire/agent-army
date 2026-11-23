@@ -1,7 +1,8 @@
 /**
  * The owner's own Slack account (/api/slack/user/…, admin only): connect it
  * with a user token (checked with Slack: a person's token, in the bot's
- * workspace), its two switches (read what reaches them, send as them; turning
+ * workspace), its switches (read what reaches them, send as them, tell them
+ * right away when someone answers a message Pointer sent for them; turning
  * reading off empties their inbox), disconnect (which empties their inbox and
  * revokes the token, so Slack stops sending their conversations), and the
  * attention report: an owner-only routine that DMs them what needs their
@@ -106,8 +107,8 @@ const TOKEN = z
   .refine((t) => !/\s/.test(t), "A Slack token has no spaces.");
 const CONNECT = z.object({ token: TOKEN });
 const SETTINGS = z
-  .object({ listen: z.boolean().optional(), sendAsMe: z.boolean().optional() })
-  .refine((s) => s.listen !== undefined || s.sendAsMe !== undefined, "Send listen or sendAsMe.");
+  .object({ listen: z.boolean().optional(), sendAsMe: z.boolean().optional(), notifyAnswers: z.boolean().optional() })
+  .refine((s) => s.listen !== undefined || s.sendAsMe !== undefined || s.notifyAnswers !== undefined, "Send listen, sendAsMe or notifyAnswers.");
 
 const NOT_CONNECTED = "Your Slack account is not connected.";
 
@@ -156,6 +157,7 @@ export function slackAccountRoutes(
         connectedAt: new Date().toISOString(),
         listen: previous?.listen ?? true,
         sendAsMe: previous?.sendAsMe ?? true,
+        notifyAnswers: previous?.notifyAnswers ?? true,
       };
     });
     const previous = replaced.user;
@@ -176,6 +178,7 @@ export function slackAccountRoutes(
       found = true;
       if (input.listen !== undefined) c.slack.user.listen = input.listen;
       if (input.sendAsMe !== undefined) c.slack.user.sendAsMe = input.sendAsMe;
+      if (input.notifyAnswers !== undefined) c.slack.user.notifyAnswers = input.notifyAnswers;
     });
     if (!found) return void res.status(404).json({ error: NOT_CONNECTED });
     // Reading off: nothing new is kept, and what was kept is deleted.

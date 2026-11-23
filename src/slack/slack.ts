@@ -108,6 +108,17 @@ export function truncate(text: string, max = 3500): string {
   return text.length <= max ? text : `${text.slice(0, max - 20)}\n…(truncated)`;
 }
 
+/** Slack ts "1700000000.123456": compared as seconds, then the fraction, never through a float. */
+export function tsAfter(a: string, b: string): boolean {
+  const [as = "0", af = ""] = a.split(".");
+  const [bs = "0", bf = ""] = b.split(".");
+  if (Number(as) !== Number(bs)) return Number(as) > Number(bs);
+  return af.padEnd(6, "0") > bf.padEnd(6, "0");
+}
+
+/** When a Slack ts was, to the second. */
+export const tsDate = (ts: string): Date => new Date(Number(ts.split(".")[0]) * 1000);
+
 /** Display names rarely change; one users.info call per person per process. */
 const userNames = new Map<string, string>();
 
