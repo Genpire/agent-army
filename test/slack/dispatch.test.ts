@@ -102,6 +102,9 @@ function fakeSlack() {
 
 type BrainFn = (req: PointerRequest, ctx: PointerContext) => Promise<PointerReply>;
 
+/** The owner's own Slack account, connected. */
+const OWNER_ACCOUNT = { token: "xoxp-owner-token-123456", userId: "UOWN", userName: "dana", scopes: [], connectedAt: "2026-11-23T08:00:00Z", listen: true, sendAsMe: true };
+
 async function setup(configure?: (c: Config) => void, opts: { attachments?: boolean } = {}) {
   resetDispatchStateForTests();
   const store = new FsStore(await mkdtemp(join(tmpdir(), "army-dispatch-")));
@@ -793,20 +796,54 @@ describe("handleSlackEvent: the owner's own conversations are never requests to 
     expect(t.reactions).toHaveLength(0);
     expect(t.calls).toEqual([]);
   };
+  /** Only while the owner's account is connected does Slack send their conversations, and Pointer check. */
+  const connected = (configure?: (c: Config) => void) =>
+    setup((c) => {
+      c.slack.user = OWNER_ACCOUNT;
+      configure?.(c);
+    });
 
   it("stays out of the owner's DM with a colleague, even when Pointer is mentioned there", async () => {
-    const t = await setup();
+    const t = await connected();
     t.hidden.add("D9");
     await t.send({ channel: "D9", channel_type: "im", ts: "1.1", user: "U2", text: "can you send me the deck?" });
     await t.send({ channel: "D9", channel_type: "im", ts: "1.2", user: "U1", text: "<@UBOT> what do you think?" });
     await t.send({ channel: "D9", channel_type: "im", ts: "1.3", user: "U1", text: "help" });
     silent(t);
-    // A DM's members never change: it is looked up once.
+    // A refusal is remembered for a short while: one lookup for the three.
     expect(t.infoCalls).toEqual(["D9"]);
   });
 
-  it("stays out of channels it is not in, mentioned or listed as a Pointer channel", async () => {
+  it("asks Slack nothing without the owner's account, and answers as before", async () => {
     const t = await setup((c) => void c.slack.pointerChannels.push("C9"));
+    await t.dm("1.1", "hi");
+    await t.send({ channel: "C1", channel_type: "channel", ts: "2.1", text: "<@UBOT> what changed?" });
+    await t.send({ channel: "C9", channel_type: "channel", ts: "3.1", text: "in a Pointer channel" });
+    expect(t.requests.map((r) => r.channel)).toEqual(["D1", "C1", "C9"]);
+    expect(t.infoCalls).toEqual([]);
+  });
+
+  it("logs each message it leaves unanswered as one line, without its text or sender", async () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const t = await connected();
+      t.hidden.add("D9");
+      t.unreachable.add("D8");
+      await t.send({ channel: "D9", channel_type: "im", ts: "1.1", user: "U2", text: "the secret plan" });
+      await t.send({ channel: "D8", channel_type: "im", ts: "1.2", user: "U2", text: "another secret" });
+      silent(t);
+      const lines = [...info.mock.calls, ...warn.mock.calls].map((args) => args.join(" ")).filter((l) => l.startsWith("[slack] not answered"));
+      expect(lines).toEqual(["[slack] not answered in D9: not a conversation the bot is in", "[slack] not answered in D8: Slack could not say whose conversation it is"]);
+      expect(lines.join("\n")).not.toMatch(/secret|U2/);
+    } finally {
+      info.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it("stays out of channels it is not in, mentioned or listed as a Pointer channel", async () => {
+    const t = await connected((c) => void c.slack.pointerChannels.push("C9"));
     t.hidden.add("G9");
     t.notMember.add("C9");
     await t.send({ channel: "G9", channel_type: "group", ts: "1.1", text: "<@UBOT> summarise this" });
@@ -817,7 +854,7 @@ describe("handleSlackEvent: the owner's own conversations are never requests to 
   });
 
   it("stays out of group DMs without even asking Slack", async () => {
-    const t = await setup();
+    const t = await connected();
     await t.send({ channel: "G7", channel_type: "mpim", ts: "1.1", text: "<@UBOT> who is on call?" });
     await t.send({ channel: "G7", channel_type: "mpim", ts: "1.2", text: "status" });
     silent(t);
@@ -825,14 +862,14 @@ describe("handleSlackEvent: the owner's own conversations are never requests to 
   });
 
   it("says nothing to someone not allowed in a channel it is not in", async () => {
-    const t = await setup((c) => void (c.slack.allowedUserIds = ["U1"]));
+    const t = await connected((c) => void (c.slack.allowedUserIds = ["U1"]));
     t.hidden.add("G9");
     await t.send({ channel: "G9", channel_type: "group", ts: "1.1", user: "U5", text: "<@UBOT> hi" });
     silent(t);
   });
 
   it("stays silent while Slack cannot say whose conversation it is, and answers once it can", async () => {
-    const t = await setup();
+    const t = await connected();
     t.unreachable.add("D1");
     await t.dm("1.1", "hi");
     silent(t);
@@ -842,7 +879,7 @@ describe("handleSlackEvent: the owner's own conversations are never requests to 
   });
 
   it("still answers in its own DM and in channels it is in", async () => {
-    const t = await setup();
+    const t = await connected();
     await t.dm("1.1", "hi");
     await t.send({ channel: "C1", channel_type: "channel", ts: "2.1", text: "<@UBOT> what changed?" });
     // app_mention is a bot event, sent only from conversations the app is in: no lookup.
@@ -853,7 +890,7 @@ describe("handleSlackEvent: the owner's own conversations are never requests to 
   });
 
   it("answers in a channel as soon as it joins it", async () => {
-    const t = await setup();
+    const t = await connected();
     t.notMember.add("C5");
     const mention = (ts: string, text: string) => t.send({ channel: "C5", channel_type: "channel", ts, text: `<@UBOT> ${text}` });
     await mention("1.1", "hi");
@@ -865,15 +902,13 @@ describe("handleSlackEvent: the owner's own conversations are never requests to 
   });
 
   it("keeps the owner's DM with a colleague in the owner's inbox instead", async () => {
-    const t = await setup((c) => {
-      c.slack.user = { token: "xoxp-owner-token-123456", userId: "UOWN", userName: "dana", scopes: [], connectedAt: "2026-11-23T08:00:00Z", listen: true, sendAsMe: true };
-    });
+    const t = await connected();
     t.hidden.add("D9");
     const owner = {
       conversations: { info: async () => ({ ok: true, channel: { id: "D9", is_im: true, user: "U2" } }) },
       users: t.client.users,
     };
-    const inbox = new SlackInbox(new FsStore(await mkdtemp(join(tmpdir(), "army-inbox-"))), deriveKey("k"));
+    const inbox = new SlackInbox(new FsStore(await mkdtemp(join(tmpdir(), "army-inbox-"))), deriveKey("k"), { batchMs: 0 });
     const deps = { ...t.deps, inbox, slack: (token: string) => (token.startsWith("xoxp-") ? owner : t.client) as never };
     const ts = `${Math.floor(Date.now() / 1000)}.000100`;
     await handleSlackEvent({ type: "message", channel: "D9", channel_type: "im", user: "U2", ts, text: "can you review the plan?" }, deps);
@@ -918,11 +953,27 @@ describe("BotConversations", () => {
     expect(await bots.presence(c as never, "C7", "channel")).toBe("member");
     expect(c.calls).toEqual(["read:D1", "read:D9", "info:C1", "info:C9", "info:G1", "info:C7", "read:C7"]);
 
-    // An hour later: DMs are known for good; channels are looked up again.
+    // An hour later: a DM the bot reads is known for good; one it could not read, and channels, are looked up again.
     c.calls.length = 0;
     now += 60 * 60_000;
     for (const ch of ["D1", "D9", "C1", "C9"]) await bots.presence(c as never, ch, ch.startsWith("D") ? "im" : "channel");
-    expect(c.calls).toEqual(["info:C1", "info:C9"]);
+    expect(c.calls).toEqual(["read:D9", "info:C1", "info:C9"]);
+  });
+
+  it("looks again soon at a conversation Slack refused, a DM included, so a reinstall takes effect", async () => {
+    let now = 0;
+    const bots = new BotConversations(() => now);
+    const reads: Record<string, true | string> = { D5: "missing_scope" };
+    const c = client({}, reads);
+    expect(await bots.presence(c as never, "D5", "im")).toBe("outside");
+    expect(await bots.presence(c as never, "D5", "im")).toBe("outside");
+    // The app is reinstalled with im:history.
+    reads.D5 = true;
+    now += 31_000;
+    expect(await bots.presence(c as never, "D5", "im")).toBe("member");
+    now += 24 * 60 * 60_000;
+    expect(await bots.presence(c as never, "D5", "im")).toBe("member");
+    expect(c.calls).toEqual(["read:D5", "read:D5"]);
   });
 
   it("keeps apps apart, and does not remember what Slack could not say", async () => {

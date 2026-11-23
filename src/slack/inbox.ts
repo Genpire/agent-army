@@ -25,7 +25,11 @@ import { slackErrorCode, slackFileRefs, userName } from "./slack.js";
  * are requests to Pointer).
  *
  * One encrypted blob in the store; texts redacted and clipped; kept 14 days,
- * at most 3 000 items. Writes are serialised in this process.
+ * at most 3 000 items, and what is older is dropped on every read and write.
+ * Changes are collected for about a second and written at once, one write at
+ * a time in this process (Cloud Storage takes about one write per second per
+ * object); a change that changes nothing writes nothing. clear() empties it
+ * and drops every change that started before it.
  */
 
 export const INBOX_LIMITS = {
@@ -41,10 +45,16 @@ const INBOX_KEY = "slack/inbox.enc";
 const DAY_MS = 24 * 60 * 60_000;
 /** Mentions of people in one message resolved to names; the rest stay as ids. */
 const MAX_NAMED_MENTIONS = 10;
-/** The owner's channel memberships are looked up again after this; DMs never change. */
+/**
+ * The owner's channel memberships are looked up again after this; a DM or
+ * group DM Slack describes never changes. A miss or a refusal is looked up
+ * again sooner: they may join, or reconnect with the scope that was missing.
+ */
 const MEMBER_TTL_MS = 10 * 60_000;
 const OUTSIDE_TTL_MS = 60_000;
 const MAX_KNOWN_CONVERSATIONS = 5_000;
+/** Changes collected before one write. */
+const WRITE_BATCH_MS = 1_000;
 
 /** Where a message reached the owner. */
 export type InboxWhere = "dm" | "group_dm" | "channel";
@@ -141,6 +151,7 @@ export function tsAfter(a: string, b: string): boolean {
 export const tsDate = (ts: string): Date => new Date(Number(ts.split(".")[0]) * 1000);
 
 const threadKey = (channel: string, threadTs: string) => `${channel}:${threadTs}`;
+const markKey = (ownerId: string, key: string) => `${ownerId}|${key}`;
 
 /**
  * The owner answered after this item: in its thread (a top-level message's
@@ -179,24 +190,60 @@ function groupDmName(name: string | undefined, ownerHandle: string): string {
 
 const clip = (text: string, max: number) => (text.length <= max ? text : `${text.slice(0, max - 1).trimEnd()}…`);
 
+/** A change waiting for the next write. */
+interface PendingChange {
+  ownerId: string;
+  /** clear() had run this many times when the change started. */
+  generation: number;
+  /** Returns false when it changes nothing. */
+  change: (data: InboxData) => boolean;
+  /** The marks it holds in `marking`. */
+  marks: string[];
+  done: () => void;
+}
+
+/** Why a write failed, for the log: never the inbox's content. */
+const writeError = (err: unknown): string =>
+  err instanceof SyntaxError ? "the stored inbox could not be read" : (err instanceof Error ? err.message : String(err)).slice(0, 200);
+
+export interface SlackInboxOptions {
+  now?: () => Date;
+  /** How long changes are collected before one write (tests use 0). */
+  batchMs?: number;
+}
+
 export class SlackInbox {
-  /** Serialises writes so concurrent events don't lose each other. */
+  /** Serialises the blob's reads and writes so concurrent ones don't lose each other. */
   private chain: Promise<unknown> = Promise.resolve();
   /** The last data read or written, for the quick "is this a thread they follow?" check before a write. */
   private last: InboxData | undefined;
+  /** What the owner's token said about a conversation, per owner and conversation. */
   private readonly known = new Map<string, { facts: Facts; until: number }>();
+  /** Bumped by clear(): a change that started before it is never written. */
+  private generation = 0;
+  private pending: PendingChange[] = [];
+  /** Threads the owner wrote in (`owner|key`) whose mark waits for its write, counted. */
+  private readonly marking = new Map<string, number>();
+  private timer: ReturnType<typeof setTimeout> | undefined;
+  private readonly now: () => Date;
+  private readonly batchMs: number;
 
   constructor(
     private readonly store: Store,
     private readonly key: Buffer,
-    private readonly now: () => Date = () => new Date(),
-  ) {}
+    opts: SlackInboxOptions = {},
+  ) {
+    this.now = opts.now ?? (() => new Date());
+    this.batchMs = opts.batchMs ?? WRITE_BATCH_MS;
+  }
 
   /**
-   * Keeps one Slack event when it is for the owner (see the file's comment).
-   * Slack and the store may throw; the caller logs the reason, never the text.
+   * Keeps one Slack event when it is for the owner (see the file's comment),
+   * and resolves once it is written. Slack may throw; the caller logs the
+   * reason, never the text. A clear() while it runs drops it.
    */
   async capture(e: SlackMessageEvent, ctx: CaptureContext): Promise<void> {
+    const generation = this.generation;
     const account = ctx.config.slack.user;
     if (!account?.listen) return;
     const ownerId = account.userId;
@@ -204,18 +251,18 @@ export class SlackInbox {
     if (signal.kind === "skip") return;
 
     if (signal.kind === "owner") {
-      await this.write(ownerId, (data) => {
-        const mark = (key: string) => {
+      const keys = signal.threadTs ? [threadKey(signal.channel, signal.threadTs)] : [signal.channel, threadKey(signal.channel, signal.ts)];
+      const mark = (data: InboxData) => {
+        let changed = false;
+        for (const key of keys) {
           const at = data.answered[key];
-          if (at === undefined || tsAfter(signal.ts, at)) data.answered[key] = signal.ts;
-        };
-        if (signal.threadTs) mark(threadKey(signal.channel, signal.threadTs));
-        else {
-          mark(signal.channel);
-          mark(threadKey(signal.channel, signal.ts));
+          if (at !== undefined && !tsAfter(signal.ts, at)) continue;
+          data.answered[key] = signal.ts;
+          changed = true;
         }
-        return true;
-      });
+        return changed;
+      };
+      await this.write(ownerId, generation, mark, keys);
       return;
     }
 
@@ -223,20 +270,22 @@ export class SlackInbox {
     const followedKey = signal.threadTs ? threadKey(signal.channel, signal.threadTs) : undefined;
     if (signal.where === "channel" && !signal.mentioned) {
       if (!followedKey) return;
-      const data = this.last?.ownerId === ownerId ? this.last : await this.read(ownerId);
-      if (data.answered[followedKey] === undefined) return;
+      if (!this.marking.has(markKey(ownerId, followedKey))) {
+        const data = this.last?.ownerId === ownerId ? this.last : await this.read(ownerId);
+        if (data.answered[followedKey] === undefined) return;
+      }
     }
 
     const botToken = ctx.config.slack.botToken;
     if (!botToken) return;
-    const facts = await this.facts(ctx.client(account.token), signal.channel, account.userName);
+    const facts = await this.facts(ctx.client(account.token), ownerId, signal.channel, account.userName, generation);
     // Not theirs (or Slack could not say), or their DM with Pointer: never an inbox item.
     if (!facts?.member || (facts.dmWith && facts.dmWith === ctx.config.slack.botUserId)) return;
 
     const bot = ctx.client(botToken);
     const sender = await userName(bot, e.user!);
     const text = await this.readable(e, bot, ctx.redact);
-    await this.write(ownerId, (data) => {
+    await this.write(ownerId, generation, (data) => {
       const id = `${signal.channel}:${signal.ts}`;
       if (data.items.some((i) => i.id === id)) return false;
       const followed = followedKey !== undefined && data.answered[followedKey] !== undefined;
@@ -258,9 +307,17 @@ export class SlackInbox {
     });
   }
 
-  /** The items since `since` (oldest first), all or only those the owner has not answered. */
+  /** The items since `since` (oldest first), all or only those the owner has not answered. Writes what is queued first. */
   async list(opts: { since: Date; openOnly: boolean; ownerId: string }): Promise<{ startedAt?: string; entries: InboxEntry[] }> {
-    const data = await this.read(opts.ownerId);
+    await this.flush();
+    const data = await this.exclusive(async () => {
+      const stored = await this.read(opts.ownerId);
+      // Retention holds while nothing new arrives too: what passed 14 days goes when read.
+      if (stored.startedAt && this.prune(stored)) {
+        await this.put(stored).catch((err) => console.error("[slack] inbox write failed, expired messages not removed yet:", writeError(err)));
+      }
+      return stored;
+    });
     const from = opts.since.getTime();
     const entries = data.items
       .filter((i) => tsDate(i.ts).getTime() >= from)
@@ -270,11 +327,50 @@ export class SlackInbox {
     return { ...(data.startedAt ? { startedAt: data.startedAt } : {}), entries };
   }
 
-  /** Forgets everything (the account was disconnected or replaced). */
+  /**
+   * Forgets everything (the account was disconnected or replaced, or reading
+   * what reaches the owner was turned off): the stored inbox, what is queued,
+   * what is known of the owner's conversations, and every change that started
+   * before (a capture still waiting on Slack writes nothing).
+   */
   clear(): Promise<void> {
+    this.generation++;
+    clearTimeout(this.timer);
+    this.timer = undefined;
+    for (const p of this.pending.splice(0)) this.settle(p);
+    this.marking.clear();
+    this.known.clear();
+    this.last = undefined;
     return this.exclusive(async () => {
       await this.store.put(INBOX_KEY, "");
       this.last = undefined;
+    });
+  }
+
+  /** Writes the queued changes now, in one write; a write that fails twice is logged with how many were lost. Never throws. */
+  flush(): Promise<void> {
+    clearTimeout(this.timer);
+    this.timer = undefined;
+    return this.exclusive(async () => {
+      const batch = this.pending.splice(0);
+      try {
+        // Changes from before a clear() are dropped; so are another owner's (a new account starts empty).
+        const current = batch.filter((p) => p.generation === this.generation);
+        const ownerId = current.at(-1)?.ownerId;
+        const changes = current.filter((p) => p.ownerId === ownerId);
+        if (!ownerId || !changes.length) return;
+        const data = await this.read(ownerId);
+        let changed = false;
+        for (const p of changes) changed = p.change(data) || changed;
+        if (!changed && data.startedAt) return;
+        if (!data.startedAt) data.startedAt = this.now().toISOString();
+        this.prune(data);
+        await this.put(data);
+      } catch (err) {
+        console.error(`[slack] inbox write failed, ${batch.length} change${batch.length === 1 ? "" : "s"} not kept:`, writeError(err));
+      } finally {
+        for (const p of batch) this.settle(p);
+      }
     });
   }
 
@@ -286,29 +382,53 @@ export class SlackInbox {
 
   /** The stored inbox when it is this owner's; an empty one otherwise. */
   private async read(ownerId: string): Promise<InboxData> {
+    const generation = this.generation;
     const blob = await this.store.get(INBOX_KEY);
     // The store has no delete: a cleared inbox is an empty blob.
     const stored = blob && blob.length > 0 ? (JSON.parse(decrypt(this.key, blob)) as InboxData) : undefined;
     const data: InboxData = stored?.ownerId === ownerId ? stored : { version: 1, ownerId, startedAt: "", items: [], answered: {} };
-    this.last = data;
+    if (generation === this.generation) this.last = data;
     return data;
   }
 
-  /** Read, change and write back, one at a time; `change` returns false when there is nothing to write. */
-  private write(ownerId: string, change: (data: InboxData) => boolean): Promise<void> {
-    return this.exclusive(async () => {
-      const data = await this.read(ownerId);
-      const changed = change(data);
-      if (!changed && data.startedAt) return;
-      if (!data.startedAt) data.startedAt = this.now().toISOString();
-      this.prune(data);
-      await this.store.put(INBOX_KEY, encrypt(this.key, JSON.stringify(data)));
-      this.last = data;
+  /** Writes the inbox; a failed write is tried once more after a pause, and logged without the content. */
+  private async put(data: InboxData): Promise<void> {
+    const blob = encrypt(this.key, JSON.stringify(data));
+    try {
+      await this.store.put(INBOX_KEY, blob);
+    } catch (err) {
+      console.warn("[slack] inbox write failed, trying once more:", writeError(err));
+      await new Promise((resolve) => setTimeout(resolve, this.batchMs));
+      await this.store.put(INBOX_KEY, blob);
+    }
+    this.last = data;
+  }
+
+  /** Queues a change for the next write (in about a second); resolves once it is written or dropped. `marks`: threads the owner wrote in. */
+  private write(ownerId: string, generation: number, change: (data: InboxData) => boolean, marks: string[] = []): Promise<void> {
+    if (generation !== this.generation) return Promise.resolve();
+    const held = marks.map((key) => markKey(ownerId, key));
+    for (const key of held) this.marking.set(key, (this.marking.get(key) ?? 0) + 1);
+    return new Promise((done) => {
+      this.pending.push({ ownerId, generation, change, marks: held, done });
+      this.timer ??= setTimeout(() => void this.flush(), this.batchMs);
     });
   }
 
-  /** Drops what is older than 14 days, then the oldest beyond the limits. */
-  private prune(data: InboxData): void {
+  /** A queued change is written or dropped: its marks go, its capture resolves. */
+  private settle(p: PendingChange): void {
+    for (const key of p.marks) {
+      const left = (this.marking.get(key) ?? 0) - 1;
+      if (left > 0) this.marking.set(key, left);
+      else this.marking.delete(key);
+    }
+    p.done();
+  }
+
+  /** Drops what is older than 14 days, then the oldest beyond the limits. True when it dropped anything. */
+  private prune(data: InboxData): boolean {
+    const size = () => data.items.length + Object.keys(data.answered).length;
+    const before = size();
     const cutoff = this.now().getTime() - INBOX_LIMITS.days * DAY_MS;
     const recent = (ts: string) => tsDate(ts).getTime() >= cutoff;
     const byTs = (a: string, b: string) => (tsAfter(a, b) ? 1 : tsAfter(b, a) ? -1 : 0);
@@ -318,14 +438,17 @@ export class SlackInbox {
       .sort(([, a], [, b]) => byTs(a, b))
       .slice(-INBOX_LIMITS.answered);
     data.answered = Object.fromEntries(answered);
+    return size() < before;
   }
 
-  /** Whether the owner is in a conversation and what to call it, from their own token (cached). */
-  private async facts(client: InboxSlackClient, channel: string, ownerHandle: string): Promise<Facts | undefined> {
-    const hit = this.known.get(channel);
+  /** Whether the owner is in a conversation and what to call it, from their own token (cached per owner). */
+  private async facts(client: InboxSlackClient, ownerId: string, channel: string, ownerHandle: string, generation: number): Promise<Facts | undefined> {
+    const cacheKey = `${ownerId}:${channel}`;
+    const hit = this.known.get(cacheKey);
     if (hit && hit.until > this.now().getTime()) return hit.facts;
     let facts: Facts;
-    let forever = channel.startsWith("D");
+    // Only what Slack described is known for good: a refusal may change with a reconnect.
+    let forever = false;
     try {
       const { channel: info } = await client.conversations.info({ channel });
       if (info?.is_im) {
@@ -344,8 +467,10 @@ export class SlackInbox {
       if (!code || !OUTSIDE_ERRORS.has(code)) return undefined;
       facts = { member: false, name: channel };
     }
-    this.known.delete(channel);
-    this.known.set(channel, { facts, until: forever ? Number.POSITIVE_INFINITY : this.now().getTime() + (facts.member ? MEMBER_TTL_MS : OUTSIDE_TTL_MS) });
+    // Asked before a clear(): not remembered for whoever comes next.
+    if (generation !== this.generation) return facts;
+    this.known.delete(cacheKey);
+    this.known.set(cacheKey, { facts, until: forever ? Number.POSITIVE_INFINITY : this.now().getTime() + (facts.member ? MEMBER_TTL_MS : OUTSIDE_TTL_MS) });
     for (const oldest of this.known.keys()) {
       if (this.known.size <= MAX_KNOWN_CONVERSATIONS) break;
       this.known.delete(oldest);

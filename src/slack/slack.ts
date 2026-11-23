@@ -28,10 +28,8 @@ export function verifySlackSignature(opts: {
  * existing app). Pointer reads channel, private-channel and DM messages so it
  * can answer without a mention; `app_mention` stays for older installs.
  * channels:read and groups:read let it find a channel by name when asked to
- * post there (slack_list_channels in slack-tools.ts). The user scopes and
- * events are for the owner's own account (slack/user-account.ts): once the
- * app is reinstalled, Slack also sends the owner's conversations, which are
- * read into their inbox (slack/inbox.ts) and never answered.
+ * post there (slack_list_channels in slack-tools.ts). Bot only: the owner's
+ * own account has its manifest (buildAccountManifest).
  */
 export function buildManifest(baseUrl: string, botName: string) {
   return {
@@ -58,19 +56,35 @@ export function buildManifest(baseUrl: string, botName: string) {
           "files:read",
           "files:write",
         ],
-        user: [...SLACK_USER_SCOPES],
       },
     },
     settings: {
       event_subscriptions: {
         request_url: `${baseUrl}/slack/events`,
         bot_events: ["app_mention", "message.channels", "message.groups", "message.im"],
-        user_events: [...SLACK_USER_EVENTS],
       },
       org_deploy_enabled: false,
       socket_mode_enabled: false,
       token_rotation_enabled: false,
     },
+  };
+}
+
+/**
+ * The manifest for the owner's own account (slack/user-account.ts), used only
+ * by the Slack card's "Your Slack account" section: the bot's manifest plus
+ * the user scopes and user events. Once the app is reinstalled with it, Slack
+ * also sends the installer's own conversations to the events URL, which are
+ * read into their inbox (slack/inbox.ts) and never answered. So the bot's
+ * manifest never asks for them: a deployment without the owner's account
+ * receives nothing private.
+ */
+export function buildAccountManifest(baseUrl: string, botName: string) {
+  const bot = buildManifest(baseUrl, botName);
+  return {
+    ...bot,
+    oauth_config: { scopes: { ...bot.oauth_config.scopes, user: [...SLACK_USER_SCOPES] } },
+    settings: { ...bot.settings, event_subscriptions: { ...bot.settings.event_subscriptions, user_events: [...SLACK_USER_EVENTS] } },
   };
 }
 
@@ -375,7 +389,11 @@ export type BotPresence = "member" | "outside" | "unknown";
 
 /** Slack's answers that mean the bot cannot see a conversation. */
 const OUTSIDE_ERRORS = new Set(["channel_not_found", "not_in_channel", "missing_scope", "method_not_supported_for_channel_type"]);
-/** A channel the bot is in is looked up again after this; one it is not in, sooner (it may be invited). */
+/**
+ * A channel the bot is in is looked up again after this; one it is not in, or
+ * any conversation Slack refused to describe (a DM included), sooner: the bot
+ * may be invited, or the app reinstalled with the scope it lacked.
+ */
 const MEMBER_TTL_MS = 5 * 60_000;
 const OUTSIDE_TTL_MS = 30_000;
 const MAX_KNOWN_CONVERSATIONS = 5_000;
@@ -388,17 +406,18 @@ async function botReads(client: Pick<WebClient, "conversations">, channel: strin
 
 /**
  * Which conversations Pointer's bot is in, asked with the bot's token and
- * cached. Once the owner's account is connected, Slack also sends the owner's
- * own conversations: their DMs and group DMs with colleagues and the channels
- * Pointer is not in. Only the bot's conversations hold requests to Pointer,
- * whoever Slack names in the event's authorizations.
+ * cached. Asked only while the owner's account is connected (dispatch.ts):
+ * Slack then also sends the owner's own conversations, their DMs and group DMs
+ * with colleagues and the channels Pointer is not in. Only the bot's
+ * conversations hold requests to Pointer, whoever Slack names in the event's
+ * authorizations.
  *
  * A DM is the bot's when the bot can read it (conversations.history with
  * im:history: the app has no im:read for conversations.info); a channel says
  * whether the bot is in it (conversations.info), or, for an app without
  * channels:read, whether the bot can read it. A DM's members never change, so
- * a DM is looked up once; a channel again after a few minutes, or sooner
- * after a miss.
+ * a DM the bot reads is looked up once; a channel again after a few minutes.
+ * A miss or a refusal is looked up again after a short while.
  */
 export class BotConversations {
   private readonly known = new Map<string, { member: boolean; until: number }>();
@@ -421,7 +440,8 @@ export class BotConversations {
       if (!code || !OUTSIDE_ERRORS.has(code)) return "unknown";
       member = false;
     }
-    this.remember(key, member, dm);
+    // Only a DM the bot reads is known for good: a refusal may change with a reinstall.
+    this.remember(key, member, dm && member);
     return member ? "member" : "outside";
   }
 

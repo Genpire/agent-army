@@ -29,6 +29,7 @@ import type {
 import type { SlackInbox } from "./inbox.js";
 import {
   BotConversations,
+  type BotPresence,
   downloadSlackFile,
   fetchConversation,
   react,
@@ -60,7 +61,7 @@ function freshState() {
     postedThreads: new RecentSet(),
     conversations: new KeyedQueue(),
     brainSlots: new Semaphore(6),
-    /** The conversations Pointer's bot is in: the only ones that hold requests to it. */
+    /** The conversations Pointer's bot is in: the only ones that hold requests to it (asked while the owner's account is connected). */
     bots: new BotConversations(),
   };
 }
@@ -138,12 +139,15 @@ async function route(event: SlackMessageEvent, deps: DispatchDeps): Promise<void
     });
     if (decision === "no") return;
     const slack = deps.slack(botToken);
-    // Once the owner's account is connected, Slack also sends their own conversations (DMs and group DMs
+    // While the owner's account is connected, Slack also sends their own conversations (DMs and group DMs
     // with colleagues, channels Pointer is not in): never requests to Pointer. Checked before anything
-    // is said, reacted or asked; a conversation Slack cannot place is left alone too. `app_mention` is
-    // a bot event only, sent from conversations the app is in (and the one event older apps receive).
-    const ours = event.type === "app_mention" || (await state.bots.presence(slack, event.channel!, event.channel_type, bot)) === "member";
-    if (!ours) return;
+    // is said, reacted or asked; a conversation Slack cannot place is left alone too. Without the
+    // account Slack sends only the bot's conversations, so nothing is looked up. `app_mention` is a
+    // bot event only, sent from conversations the app is in (and the one event older apps receive).
+    if (config.slack.user && event.type !== "app_mention") {
+      const presence = await state.bots.presence(slack, event.channel!, event.channel_type, bot);
+      if (presence !== "member") return void logNotAnswered(event.channel!, presence);
+    }
     if (state.seen.has(dedupeKey(event))) return;
     state.seen.add(dedupeKey(event));
 
@@ -481,6 +485,13 @@ async function isExternalUser(slack: WebClient, botToken: string, userTeam: stri
   }
   const own = await teamIds.get(botToken);
   return Boolean(own && userTeam !== own);
+}
+
+/** One line per message the check above leaves unanswered: the conversation's id and why, never the text or the sender. */
+function logNotAnswered(channel: string, presence: Exclude<BotPresence, "member">): void {
+  const id = channel.replace(/[^A-Z0-9]/gi, "").slice(0, 20);
+  if (presence === "outside") console.info(`[slack] not answered in ${id}: not a conversation the bot is in`);
+  else console.warn(`[slack] not answered in ${id}: Slack could not say whose conversation it is`);
 }
 
 /** Every credential in the config, every GitHub connection's token included. */

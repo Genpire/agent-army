@@ -1,10 +1,10 @@
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { SlackMessageEvent } from "../../src/chat/pointer-types.js";
 import { type Config, ConfigSchema } from "../../src/core/config.js";
-import { deriveKey, encrypt } from "../../src/core/crypto.js";
+import { decrypt, deriveKey, encrypt } from "../../src/core/crypto.js";
 import { FsStore } from "../../src/core/store.js";
 import { INBOX_LIMITS, SlackInbox, inboxSignal, isAnswered, tsAfter } from "../../src/slack/inbox.js";
 import { makeRedactor } from "../../src/tasks/worker.js";
@@ -59,16 +59,30 @@ function config(patch: Partial<Config["slack"]["user"]> = {}): Config {
   });
 }
 
-async function setup(patch: Partial<Config["slack"]["user"]> = {}, conversations = CONVERSATIONS) {
-  const store = new FsStore(await mkdtemp(join(tmpdir(), "army-inbox-")));
+/** A store that counts writes and can fail the next ones. */
+class CountingStore extends FsStore {
+  puts = 0;
+  failNext = 0;
+  override async put(key: string, value: string | Buffer): Promise<void> {
+    this.puts++;
+    if (this.failNext > 0) {
+      this.failNext--;
+      throw new Error("HTTP 429 rate limited");
+    }
+    return super.put(key, value);
+  }
+}
+
+async function setup(patch: Partial<Config["slack"]["user"]> = {}, conversations = CONVERSATIONS, opts: { batchMs?: number; now?: () => Date } = {}) {
+  const store = new CountingStore(await mkdtemp(join(tmpdir(), "army-inbox-")));
   const key = deriveKey("k");
-  const inbox = new SlackInbox(store, key, () => NOW);
+  const inbox = new SlackInbox(store, key, { now: opts.now ?? (() => NOW), batchMs: opts.batchMs ?? 0 });
   const c = clients(conversations);
   const cfg = config(patch);
   const redact = makeRedactor(["xoxp-owner-token-secret", "sk-live-very-secret-value"]);
-  const send = (e: Partial<SlackMessageEvent>) =>
-    inbox.capture({ type: "message", user: "U2", ...e } as SlackMessageEvent, { config: cfg, client: (token) => (token.startsWith("xoxp-") ? c.user : c.bot) as never, redact });
-  const list = (openOnly = true) => inbox.list({ since: new Date(NOW.getTime() - 3 * 86_400_000), openOnly, ownerId: OWNER }).then((r) => r.entries);
+  const ctx = (config: Config) => ({ config, client: (token: string) => (token.startsWith("xoxp-") ? c.user : c.bot) as never, redact });
+  const send = (e: Partial<SlackMessageEvent>, as = cfg) => inbox.capture({ type: "message", user: "U2", ...e } as SlackMessageEvent, ctx(as));
+  const list = (openOnly = true, ownerId = OWNER) => inbox.list({ since: new Date(NOW.getTime() - 3 * 86_400_000), openOnly, ownerId }).then((r) => r.entries);
   return { store, key, inbox, send, list, ...c };
 }
 
@@ -237,5 +251,162 @@ describe("SlackInbox", () => {
     await t.inbox.clear();
     const after = await t.inbox.list({ since: new Date(0), openOnly: false, ownerId: OWNER });
     expect(after).toEqual({ entries: [] });
+  });
+});
+
+describe("SlackInbox: writes, clears and retention", () => {
+  const slackError = (code: string) => Object.assign(new Error(`An API error occurred: ${code}`), { data: { error: code } });
+  const event = (e: Partial<SlackMessageEvent>) => ({ type: "message", user: "U2", channel: "D2", channel_type: "im", ...e }) as SlackMessageEvent;
+
+  it("collects changes for about a second and writes them at once", async () => {
+    const t = await setup({}, CONVERSATIONS, { batchMs: 50 });
+    await Promise.all([
+      t.send({ channel: "D2", channel_type: "im", ts: ago(50), text: "one" }),
+      t.send({ channel: "D2", channel_type: "im", ts: ago(40), text: "two" }),
+      t.send({ channel: "G5", channel_type: "mpim", ts: ago(30), user: "U3", text: "three" }),
+      t.send({ channel: "D2", channel_type: "im", ts: ago(20), user: OWNER, text: "an answer" }),
+    ]);
+    expect(t.store.puts).toBe(1);
+    expect((await t.list(false)).map((e) => [e.text, e.answered])).toEqual([
+      ["one", true],
+      ["two", true],
+      ["three", false],
+    ]);
+    expect(t.store.puts).toBe(1);
+  });
+
+  it("writes nothing when nothing changed", async () => {
+    const t = await setup();
+    await t.send({ channel: "D2", channel_type: "im", ts: ago(100), text: "hi" });
+    await t.send({ channel: "D2", channel_type: "im", ts: ago(90), user: OWNER, text: "hello" });
+    expect(t.store.puts).toBe(2);
+    // The same message again, and the owner's same answer again.
+    await t.send({ channel: "D2", channel_type: "im", ts: ago(100), text: "hi" });
+    await t.send({ channel: "D2", channel_type: "im", ts: ago(90), user: OWNER, text: "hello" });
+    expect(t.store.puts).toBe(2);
+  });
+
+  it("keeps a reply in a thread the owner just wrote in, when both wait for the same write", async () => {
+    const t = await setup({}, CONVERSATIONS, { batchMs: 50 });
+    await Promise.all([
+      t.send({ channel: "C1", channel_type: "channel", ts: ago(30), user: OWNER, text: "who owns the flaky test?" }),
+      t.send({ channel: "C1", channel_type: "channel", ts: ago(20), thread_ts: ago(30), user: "U3", text: "I do" }),
+    ]);
+    expect(await t.list()).toMatchObject([{ text: "I do", followed: true }]);
+    expect(t.store.puts).toBe(1);
+  });
+
+  it("tries a failed write once more, and logs neither the text nor a token", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const t = await setup();
+      t.store.failNext = 1;
+      await t.send({ channel: "D2", channel_type: "im", ts: ago(100), text: "the secret plan" });
+      expect((await t.list()).map((e) => e.text)).toEqual(["the secret plan"]);
+      expect(t.store.puts).toBe(2);
+      expect(warn.mock.calls.map((a) => a.join(" "))).toEqual(["[slack] inbox write failed, trying once more: HTTP 429 rate limited"]);
+
+      // Failing twice: the change is lost, said once, and the capture still resolves.
+      t.store.failNext = 2;
+      await t.send({ channel: "D2", channel_type: "im", ts: ago(90), text: "another secret" });
+      expect(error.mock.calls.map((a) => a.join(" "))).toEqual(["[slack] inbox write failed, 1 change not kept: HTTP 429 rate limited"]);
+      expect((await t.list()).map((e) => e.text)).toEqual(["the secret plan"]);
+      expect([...warn.mock.calls, ...error.mock.calls].flat().join("\n")).not.toMatch(/secret|xoxp/);
+    } finally {
+      warn.mockRestore();
+      error.mockRestore();
+    }
+  });
+
+  it("drops expired messages when read, from the store too", async () => {
+    const t = await setup();
+    const item = (text: string, sec: number) => ({
+      id: `D2:${ago(sec)}`,
+      channel: "D2",
+      channelName: "Sam Lee",
+      where: "dm",
+      ts: ago(sec),
+      userId: "U2",
+      userName: "Sam Lee",
+      mentioned: false,
+      followed: false,
+      text,
+    });
+    const items = [item("old", 15 * 86_400), item("recent", 86_400)];
+    await t.store.put("slack/inbox.enc", encrypt(t.key, JSON.stringify({ version: 1, ownerId: OWNER, startedAt: NOW.toISOString(), items, answered: {} })));
+    const { entries } = await t.inbox.list({ since: new Date(0), openOnly: false, ownerId: OWNER });
+    expect(entries.map((e) => e.text)).toEqual(["recent"]);
+    const stored = JSON.parse(decrypt(t.key, (await t.store.get("slack/inbox.enc"))!)) as { items: { text: string }[] };
+    expect(stored.items.map((i) => i.text)).toEqual(["recent"]);
+  });
+
+  it("drops a capture still waiting on Slack when the inbox is cleared", async () => {
+    const t = await setup();
+    let answer: (() => void) | undefined;
+    const slow = {
+      users: t.user.users,
+      conversations: {
+        info: async () => {
+          await new Promise<void>((resolve) => (answer = resolve));
+          return { ok: true, channel: { id: "D2", is_im: true, user: "U2" } };
+        },
+      },
+    };
+    const capture = t.inbox.capture(event({ ts: ago(100), text: "hi" }), {
+      config: config(),
+      client: (token) => (token.startsWith("xoxp-") ? slow : t.bot) as never,
+      redact: (s) => s,
+    });
+    expect(answer).toBeDefined();
+    await t.inbox.clear();
+    answer!();
+    await capture;
+    expect(await t.list(false)).toEqual([]);
+    expect((await t.store.get("slack/inbox.enc"))?.length).toBe(0);
+  });
+
+  it("keeps what it knows of conversations per owner, and forgets it on clear", async () => {
+    const t = await setup();
+    await t.send({ channel: "D2", channel_type: "im", ts: ago(100), text: "for dana" });
+    expect(t.infoCalls).toEqual(["D2"]);
+
+    // Sam's account replaces Dana's in the same process: his token cannot see her DM.
+    const samCalls: string[] = [];
+    const samClient = {
+      users: t.user.users,
+      conversations: {
+        info: async ({ channel }: { channel: string }) => {
+          samCalls.push(channel);
+          throw slackError("channel_not_found");
+        },
+      },
+    };
+    const sam = config({ token: "xoxp-sam-token-secret", userId: "USAM", userName: "sam" });
+    await t.inbox.capture(event({ ts: ago(90), text: "dana's colleague again" }), {
+      config: sam,
+      client: (token) => (token === "xoxp-sam-token-secret" ? samClient : t.bot) as never,
+      redact: (s) => s,
+    });
+    expect(samCalls).toEqual(["D2"]);
+    expect(await t.list(false, "USAM")).toEqual([]);
+
+    // After a clear, Dana's conversations are looked up again.
+    await t.inbox.clear();
+    await t.send({ channel: "D2", channel_type: "im", ts: ago(80), text: "after the clear" });
+    expect(t.infoCalls).toEqual(["D2", "D2"]);
+  });
+
+  it("looks again soon at a conversation the owner's token was refused, a DM included", async () => {
+    let now = NOW;
+    const conversations: Record<string, Info> = { ...CONVERSATIONS, D2: "missing_scope" };
+    const t = await setup({}, conversations, { now: () => now });
+    await t.send({ channel: "D2", channel_type: "im", ts: ago(100), text: "first" });
+    expect(await t.list()).toEqual([]);
+    // Reconnected with im:read a minute later.
+    conversations.D2 = { is_im: true, user: "U2" };
+    now = new Date(NOW.getTime() + 61_000);
+    await t.send({ channel: "D2", channel_type: "im", ts: ago(50), text: "second" });
+    expect((await t.list()).map((e) => e.text)).toEqual(["second"]);
   });
 });

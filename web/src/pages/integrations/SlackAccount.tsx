@@ -2,7 +2,9 @@
  * The Slack pane's "Your Slack account" section: the owner connects their own
  * Slack account with the app's User OAuth Token, so Pointer can send as them
  * and read what reaches them; then the two switches, Disconnect, and the
- * attention report (a routine that DMs them what needs their reply).
+ * attention report (an owner-only routine that DMs them what needs their
+ * reply). Its steps use the account's own manifest (the bot's plus user
+ * scopes and events): the bot's manifest asks nothing of anyone's account.
  */
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
@@ -22,12 +24,21 @@ import { timeAgo } from "../../lib/format";
 import { href } from "../../lib/router";
 import { useConfig } from "../../lib/state";
 import { FormActions, FormError, PaneSection, StatusLine, Steps, Strong, useSave } from "./parts";
+import { ManifestCode, ScopeTable, useAccountManifest } from "./slackManifest";
 
 /** POST /api/slack/user */
 interface ConnectResponse {
   userName: string;
   /** User scopes the manifest asks for that Slack did not grant. */
   missingScopes: string[];
+  /** Only when it replaced another token: whether Slack revoked that one. */
+  previousRevoked?: boolean;
+}
+
+/** POST /api/slack/user/disconnect */
+interface DisconnectResponse {
+  /** Slack confirmed the token is revoked (or it no longer worked). */
+  revoked: boolean;
 }
 
 /** GET /api/slack/user/report */
@@ -36,6 +47,21 @@ interface ReportStatus {
   /** Why it cannot be created now. */
   blocked: string | null;
 }
+
+/** What each user scope (your own account) is for. */
+const USER_SCOPE_USES: Record<string, string> = {
+  "chat:write": "Send messages as you, when you ask and allow it",
+  "im:write": "Open a DM to send as you",
+  "im:history": "Read your direct messages",
+  "mpim:history": "Read your group DMs",
+  "channels:history": "Read replies in your threads and mentions of you in public channels",
+  "groups:history": "The same in private channels you are in",
+  "im:read": "Tell your DMs apart from its own",
+  "mpim:read": "Name your group DMs",
+  "channels:read": "Name the public channels you are in",
+  "groups:read": "Name the private channels you are in",
+  "users:read": "Check whose token it is",
+};
 
 /** The attention report's status, read again whenever `key` changes (the account, its switches, the routines). */
 function useReport(key: string) {
@@ -55,11 +81,14 @@ function useReport(key: string) {
   return { data, error, reload: load };
 }
 
-/** `requiredScopes`: the user scopes in this deployment's manifest, to name the ones Slack did not grant. */
-export function SlackAccountSection({ requiredScopes }: { requiredScopes: string[] }) {
+export function SlackAccountSection() {
   const { config } = useConfig();
   const name = config.team.pointer.name;
   const user = config.slack.user;
+  const manifest = useAccountManifest();
+  // Set when Slack did not confirm that a disconnected or replaced token was revoked; kept until the page reloads.
+  const [unrevoked, setUnrevoked] = useState(false);
+  const scopes = manifest.data?.manifest.oauth_config.scopes.user ?? Object.keys(USER_SCOPE_USES);
   return (
     <PaneSection
       title="Your Slack account"
@@ -71,16 +100,35 @@ export function SlackAccountSection({ requiredScopes }: { requiredScopes: string
       }>
       {!config.slack.connected ? (
         <Text color="secondary">Connect Slack above first: your account must be in the same workspace as {name}.</Text>
-      ) : user.connected ? (
-        <ConnectedAccount requiredScopes={requiredScopes} />
       ) : (
-        <ConnectAccount />
+        <VStack gap={4}>
+          {unrevoked && (
+            <Banner
+              status="warning"
+              title="Slack did not confirm that your token was revoked"
+              description={`Until it is, Slack may keep sending your conversations to ${name}. Remove the app's access to your account in Slack, or update the app with the manifest under Already have an app? Update it, which asks nothing of your account, and reinstall it.`}
+              collapsible={false}
+            />
+          )}
+          {user.connected ? (
+            <ConnectedAccount requiredScopes={manifest.data ? scopes : []} onRevoked={(revoked) => setUnrevoked(!revoked)} />
+          ) : (
+            <ConnectAccount
+              onRevoked={(revoked) => {
+                if (!revoked) setUnrevoked(true);
+              }}
+            />
+          )}
+          <Text color="secondary">Your account's scopes, in the manifest below and used only for you:</Text>
+          <ScopeTable scopes={scopes} uses={USER_SCOPE_USES} />
+          <ManifestCode label="Manifest with your account" manifest={manifest.data?.manifest} error={manifest.error} />
+        </VStack>
       )}
     </PaneSection>
   );
 }
 
-function ConnectAccount() {
+function ConnectAccount({ onRevoked }: { onRevoked: (revoked: boolean) => void }) {
   const { config } = useConfig();
   const name = config.team.pointer.name;
   const [token, setToken] = useState("");
@@ -89,7 +137,12 @@ function ConnectAccount() {
   const submit = async () => {
     const t = token.trim();
     const invalid = !t ? "Paste the User OAuth Token." : !t.startsWith("xoxp-") ? "User tokens start with xoxp-. Copy the User OAuth Token from OAuth & Permissions." : undefined;
-    const ok = await save(() => api.post<ConnectResponse>("/api/slack/user", { token: t }), {
+    const connect = async () => {
+      const r = await api.post<ConnectResponse>("/api/slack/user", { token: t });
+      if (r.previousRevoked !== undefined) onRevoked(r.previousRevoked);
+      return r;
+    };
+    const ok = await save(connect, {
       invalid,
       success: (r) =>
         r.missingScopes.length
@@ -105,7 +158,12 @@ function ConnectAccount() {
         label="To connect your account"
         steps={[
           <>
-            Update the app with the manifest under <Strong>Already have an app? Update it</Strong> below: it adds your account's scopes and the events for what reaches you.
+            Open{" "}
+            <Link href="https://api.slack.com/apps" isExternalLink>
+              api.slack.com/apps
+            </Link>
+            , choose your app, open <Strong>App Manifest</Strong>, replace the JSON with the <Strong>Manifest with your account</Strong> below and save. It is the bot's
+            manifest plus your account's scopes and the events for what reaches you.
           </>,
           <>
             Open <Strong>Install App</Strong>, choose <Strong>Reinstall to Workspace</Strong> and <Strong>Allow</Strong>. Slack asks for your own account's permissions too.
@@ -134,7 +192,7 @@ function ConnectAccount() {
   );
 }
 
-function ConnectedAccount({ requiredScopes }: { requiredScopes: string[] }) {
+function ConnectedAccount({ requiredScopes, onRevoked }: { requiredScopes: string[]; onRevoked: (revoked: boolean) => void }) {
   const { config } = useConfig();
   const name = config.team.pointer.name;
   const user = config.slack.user;
@@ -149,6 +207,20 @@ function ConnectedAccount({ requiredScopes }: { requiredScopes: string[] }) {
   const createReport = async () => {
     const ok = await save(() => api.post("/api/slack/user/report", {}), { success: `Created. ${name} will DM you on weekdays at 09:00, 13:00 and 17:00.` });
     if (ok) await report.reload();
+  };
+
+  const disconnect = async () => {
+    const run = async () => {
+      const r = await api.post<DisconnectResponse>("/api/slack/user/disconnect", {});
+      onRevoked(r.revoked);
+      return r;
+    };
+    await save(run, {
+      success: (r) =>
+        r.revoked
+          ? "Your Slack account is disconnected, its token revoked and its inbox emptied."
+          : "Your Slack account is disconnected and its inbox emptied, but Slack did not confirm that the token was revoked.",
+    });
   };
 
   return (
@@ -170,15 +242,17 @@ function ConnectedAccount({ requiredScopes }: { requiredScopes: string[] }) {
         <Banner
           status="warning"
           title={`Slack did not grant ${missing.join(", ")}`}
-          description="Update the app with the manifest below, reinstall it, and connect again with the new User OAuth Token."
+          description="Disconnect (which revokes this token), update the app with the manifest below, reinstall it, and connect with the new User OAuth Token."
           collapsible={false}
         />
       )}
       <Switch
         label="Read what reaches me"
-        description={`${name} keeps your DMs, group DMs, mentions and replies in your threads for 14 days, encrypted, to tell you what needs your reply. Off: nothing new is kept.`}
+        description={`${name} keeps your DMs, group DMs, mentions and replies in your threads for 14 days, encrypted, to tell you what needs your reply. Off: nothing is kept, and what was kept is deleted.`}
         value={user.listen ?? false}
-        changeAction={(on) => setSwitch("listen", on, on ? `${name} reads what reaches you.` : `${name} no longer reads what reaches you.`)}
+        changeAction={(on) =>
+          setSwitch("listen", on, on ? `${name} reads what reaches you.` : `${name} no longer reads what reaches you, and what it kept is deleted.`)
+        }
       />
       <Switch
         label="Send as me"
@@ -212,14 +286,7 @@ function ConnectedAccount({ requiredScopes }: { requiredScopes: string[] }) {
       </VStack>
 
       <FormActions>
-        <ConfirmButton
-          label="Disconnect"
-          confirmLabel="Click again to disconnect"
-          size="md"
-          onConfirm={async () => {
-            await save(() => api.post("/api/slack/user/disconnect", {}), { success: "Your Slack account is disconnected and its inbox emptied." });
-          }}
-        />
+        <ConfirmButton label="Disconnect" confirmLabel="Click again to disconnect" size="md" onConfirm={disconnect} />
       </FormActions>
     </VStack>
   );
