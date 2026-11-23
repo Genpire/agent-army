@@ -4,7 +4,7 @@ import { encodePath } from "../src/integrations/github/github.js";
 import { checkBashCommand } from "../src/tasks/guard.js";
 import { subagentReadOnlyGate } from "../src/chat/pointer.js";
 import { RESERVED_AGENT_IDS } from "../src/team/team.js";
-import { mergeConcurrentNotes } from "../src/tasks/worker.js";
+import { configSecrets, loadWorkerConfig, mergeConcurrentNotes } from "../src/tasks/worker.js";
 
 describe("security fixes from review", () => {
   it("refuses path traversal in GitHub file paths and repo names", () => {
@@ -29,6 +29,20 @@ describe("security fixes from review", () => {
     const denied = (await call("mcp__pointer__start_repo_task", "a1")) as { hookSpecificOutput?: { permissionDecision?: string } };
     expect(denied.hookSpecificOutput?.permissionDecision).toBe("deny");
     expect(RESERVED_AGENT_IDS).toContain("claude");
+  });
+
+  it("never lets a subagent read the owner's Slack inbox, even when it is in the read-only set", async () => {
+    const inbox = "mcp__slack_inbox__slack_my_inbox";
+    const gate = subagentReadOnlyGate(new Set(["WebSearch", inbox]));
+    const base = { hook_event_name: "PreToolUse", session_id: "s", transcript_path: "", cwd: "/tmp", tool_input: {}, tool_use_id: "t" };
+    const call = async (tool_name: string, agent_id?: string) =>
+      (await gate({ ...base, tool_name, ...(agent_id ? { agent_id, agent_type: "general-purpose" } : {}) } as never, "t", { signal: new AbortController().signal })) as {
+        hookSpecificOutput?: { permissionDecision?: string };
+      };
+    expect((await call(inbox, "a1")).hookSpecificOutput?.permissionDecision).toBe("deny");
+    expect(await call("WebSearch", "a1")).toEqual({});
+    // Pointer itself may read it.
+    expect(await call(inbox)).toEqual({});
   });
 
   it("blocks split /proc environ reads and the metadata server", () => {
@@ -108,5 +122,26 @@ describe("brain options", () => {
     expect(reply.isError).toBe(false);
     expect(seen.verbatimPrompts).toBe(true);
     expect((seen.hooks as { PreToolUse?: unknown[] }).PreToolUse).toHaveLength(1);
+  });
+});
+
+describe("repo tasks and the owner's own Slack account", () => {
+  it("never load the owner's user token: the worker drops it as it loads the config", async () => {
+    const store = new FsStore(await mkdtemp(join(tmpdir(), "army-sec-worker-")));
+    const key = deriveKey("k");
+    await new ConfigRepo(store, key, 0).update((c) => {
+      c.anthropic.apiKey = "sk-ant-worker-test-key";
+      c.slack.botToken = "xoxb-worker-bot-token";
+      c.slack.signingSecret = "signing";
+      c.slack.user = { token: "xoxp-owner-never-in-a-task-31337", userId: "U0OWNER01", userName: "sam", scopes: [], connectedAt: "2026-01-01T00:00:00.000Z", listen: true, sendAsMe: true };
+    });
+    const config = await loadWorkerConfig(store, key);
+    expect(config.slack.user).toBeUndefined();
+    expect(JSON.stringify(config)).not.toContain("xoxp-owner-never-in-a-task-31337");
+    expect(configSecrets(config)).not.toContain("xoxp-owner-never-in-a-task-31337");
+    // The rest of Slack stays: the worker posts progress with the bot's token.
+    expect(config.slack).toMatchObject({ botToken: "xoxb-worker-bot-token", signingSecret: "signing" });
+    // The stored config keeps the account: only the task's copy is without it.
+    expect((await new ConfigRepo(store, key, 0).load(true)).slack.user?.userId).toBe("U0OWNER01");
   });
 });

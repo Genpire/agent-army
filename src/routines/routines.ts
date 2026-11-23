@@ -77,6 +77,12 @@ export interface RoutineToolOptions {
   config: Config;
   requester: string;
   requesterSlackId?: string;
+  /**
+   * The owner's own conversation (the console, their DM with Pointer): what
+   * is created or changed here is marked ownerOnly. Anywhere else the mark is
+   * cleared, so nobody else's routine reads the owner's Slack account.
+   */
+  byOwner?: boolean;
 }
 
 /** "me" on Slack is the person asking, when they asked from Slack. */
@@ -124,7 +130,7 @@ export function routineTools(o: RoutineToolOptions): SdkMcpToolDefinition<any>[]
             ...(slack.value !== undefined ? { slack: slack.value } : {}),
             ...(args.console !== undefined ? { console: args.console } : {}),
           };
-          const res = await service.create(draft, o.requester);
+          const res = await service.create(draft, o.requester, { ownerOnly: o.byOwner === true });
           if (!res.ok) return fail(res.error);
           const r = res.routine;
           return ok(
@@ -168,7 +174,7 @@ export function routineTools(o: RoutineToolOptions): SdkMcpToolDefinition<any>[]
           const target = slackFor(slack, o);
           if (!target.ok) return fail(target.error);
           const draft: RoutineDraft = Object.fromEntries(Object.entries({ ...rest, slack: target.value }).filter(([, v]) => v !== undefined));
-          const res = await service.update(id, draft);
+          const res = await service.update(id, draft, { ownerOnly: o.byOwner === true });
           if (!res.ok) return fail(res.error);
           const r = res.routine;
           const state = r.enabled ? `Next runs: ${runTimes(r) || "none"}.` : "It is paused: it does not run until it is resumed.";
@@ -232,6 +238,7 @@ export function routinesChatIntegration(config: Config, ctx: ChatIntegrationCont
     config,
     requester: ctx.requester,
     ...(ctx.requesterSlackId ? { requesterSlackId: ctx.requesterSlackId } : {}),
+    byOwner: ctx.ownerConversation === true,
   });
   return {
     key: ROUTINES_SERVER_KEY,

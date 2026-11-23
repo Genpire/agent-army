@@ -6,7 +6,10 @@
  * here, never by the model, and only to the routine's own recipients: email
  * (sendEmail), Slack (a channel or user id, split into messages) and the
  * console (one conversation per routine, so reports read like a thread).
- * Secrets are redacted from the report before it goes anywhere.
+ * Secrets are redacted from the report before it goes anywhere. A run reads
+ * the owner's own Slack account only when the routine is the owner's and
+ * reports to them alone (ownerRoutine in slack/user-account.ts), checked on
+ * each run.
  */
 import { randomBytes } from "node:crypto";
 import type { WebClient } from "@slack/web-api";
@@ -16,6 +19,7 @@ import type { Config, ConfigRepo, Routine } from "../core/config.js";
 import type { EmailMessage, EmailResult } from "../integrations/email/email.js";
 import { toMrkdwn } from "../slack/slack.js";
 import { splitText } from "../slack/slack-tools.js";
+import { ownerRoutine } from "../slack/user-account.js";
 import type { Spending } from "../spending/budget.js";
 import type { UsageRepo } from "../spending/usage.js";
 import { configSecrets, makeRedactor } from "../tasks/worker.js";
@@ -53,6 +57,8 @@ export interface RoutineRequestInput {
   since?: string;
   trigger: RunTrigger;
   runId: string;
+  /** The routine is the owner's and reports to them alone (ownerRoutine): the run may read their Slack account. */
+  ownerRoutine?: boolean;
 }
 
 /** What Pointer is asked on each run: the routine's instruction with the date, timezone and window. */
@@ -85,6 +91,7 @@ export function routineRequest(routine: Routine, input: RoutineRequestInput): Po
     history: [],
     surface: "routine",
     budgetUsd: routine.budgetUsd,
+    ...(input.ownerRoutine ? { ownerRoutine: true } : {}),
   };
 }
 
@@ -269,7 +276,15 @@ export class RoutineRunner {
       if (!allowed.ok) return await finish({ status: "skipped", note: [run.note, `Skipped: ${allowed.error}`].filter(Boolean).join(" ") });
 
       const state = await this.deps.repo.state(routine.id);
-      const req = routineRequest(routine, { now: new Date(run.startedAt), ...(state?.lastSuccessAt ? { since: state.lastSuccessAt } : {}), trigger: run.trigger, runId: run.id });
+      // The owner's Slack account only for the owner's routine reporting to them alone, checked now
+      // against the current config and on the very routine whose recipients get the report.
+      const req = routineRequest(routine, {
+        now: new Date(run.startedAt),
+        ...(state?.lastSuccessAt ? { since: state.lastSuccessAt } : {}),
+        trigger: run.trigger,
+        runId: run.id,
+        ownerRoutine: ownerRoutine(config, routine),
+      });
       const slot = this.deps.brainSlot ?? (<T>(fn: () => Promise<T>) => fn());
       const reply = await slot(() => this.deps.brain.reply(req, { startRepoTask: NOT_HERE }));
       if (reply.costUsd !== undefined) run.costUsd = reply.costUsd;

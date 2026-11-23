@@ -13,7 +13,7 @@ import type { ContentBlockParam } from "@anthropic-ai/sdk/resources";
 import { defaultModel, fitContentBlocks, providerRuntime } from "../ai/ai-providers.js";
 import { type AttachmentInfo, type AttachmentRepo, type PromptFile, type ThreadRef, classify, toContentBlocks } from "./attachments.js";
 import { type ChatIntegration, chatIntegrations, subagentIntegrationTools } from "./chat-integrations.js";
-import { PendingActions, confirmGate, conversationKey, gatedTools } from "./confirm-gate.js";
+import { PendingActions, afterInboxGate, confirmGate, conversationKey, gatedTools } from "./confirm-gate.js";
 import type { Config } from "../core/config.js";
 import { GitHub } from "../integrations/github/github.js";
 import { isRepoAllowedOnHost } from "../integrations/code-hosts/code-host-access.js";
@@ -22,8 +22,9 @@ import { MondayClient } from "../integrations/monday/monday.js";
 import type { NotesRepo } from "./notes.js";
 import { ActivityMapper } from "./pointer-activity.js";
 import { createPointerToolServer, githubToolOptions } from "./pointer-tools.js";
+import { INBOX_TOOL_NAME } from "../slack/inbox-tools.js";
 import { requesterSlackId } from "../slack/slack-tools.js";
-import { ownSlackAccount } from "../slack/user-account.js";
+import { ownSlackAccount, ownerConversation } from "../slack/user-account.js";
 import type { PointerBrain, PointerBrainDeps, PointerContext, PointerReply, PointerRequest } from "./pointer-types.js";
 import { SKILL_TOOL, type TeamSkills, buildChatAgents, pluginSkillName, rosterText, skillQueryOptions } from "../team/team.js";
 import { configSecrets, makeRedactor } from "../tasks/worker.js";
@@ -306,11 +307,14 @@ async function* singleUserTurn(content: ContentBlockParam[]): AsyncGenerator<SDK
   yield { type: "user", message: { role: "user", content }, parent_tool_use_id: null };
 }
 
-/** PreToolUse hook: inside any subagent, deny every tool outside the read-only set. */
+/** Tools no subagent ever calls, whatever the read-only set says: the owner's Slack inbox (their private messages). */
+const NEVER_FOR_SUBAGENTS = new Set([INBOX_TOOL_NAME]);
+
+/** PreToolUse hook: inside any subagent, deny every tool outside the read-only set, and the owner's inbox always. */
 export function subagentReadOnlyGate(allowed: Set<string>): HookCallback {
   return async (input) => {
     if (input.hook_event_name !== "PreToolUse" || !("agent_id" in input) || !input.agent_id) return {};
-    if (allowed.has(input.tool_name)) return {};
+    if (allowed.has(input.tool_name) && !NEVER_FOR_SUBAGENTS.has(input.tool_name)) return {};
     return {
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
@@ -421,7 +425,7 @@ export function createPointerBrain(
 
       // The requester's Slack user id: "me" for Slack messages; none in the console.
       const slackSelf = requesterSlackId(req);
-      // The owner's own Slack account, for the owner's requests only.
+      // The owner's own Slack account, for the owner's requests only: the console, their DM with Pointer, their own routines.
       const slackAccount = ownSlackAccount(config, req);
       // GitLab, Bitbucket, Jira, Miro, Slack and apps: each one that cannot be built is left out (chat-integrations.ts).
       const integrations: ChatIntegration[] = await chatIntegrations(config, {
@@ -430,6 +434,7 @@ export function createPointerBrain(
         ...(slackSelf ? { requesterSlackId: slackSelf } : {}),
         addAttachment: ctx.addAttachment,
         ...(slackAccount ? { slackAccount } : {}),
+        ownerConversation: ownerConversation(config, req),
         redact,
       });
       const connected = integrations.filter((i) => i.server);
@@ -446,7 +451,9 @@ export function createPointerBrain(
         // Integrations given to some agents only (apps assigned to agents): their read-only tools, per agent.
         const scopedTools = (agentId: string) =>
           connected.filter((i) => i.agentIds?.includes(agentId)).flatMap((i) => i.readOnlyToolNames);
+        // The owner's inbox is read-only but never a subagent's: subagentReadOnlyGate refuses it whatever this set holds.
         const gateTools = new Set([...subagentTools, ...connected.flatMap((i) => i.readOnlyToolNames)]);
+        gateTools.delete(INBOX_TOOL_NAME);
         const allTools = [...builtins, ...tools.allToolNames, ...connected.flatMap((i) => i.allToolNames)];
         // A routine run is offered only the read-only tools; the rest are not loaded at all.
         const readOnlyTools = new Set([...builtins, ...tools.readOnlyToolNames, ...connected.flatMap((i) => i.readOnlyToolNames)]);
@@ -487,6 +494,7 @@ export function createPointerBrain(
           // is read-only: writes (memory, notes, tickets, repo tasks) only from Pointer itself.
           // Pointer's own memory, notes and app writes need the user's yes once this query
           // has read outside content (confirm-gate.ts); one gate per query holds its taint.
+          // Once it has read the owner's Slack inbox, nothing can carry it out (afterInboxGate).
           hooks: {
             PreToolUse: [
               {
@@ -500,6 +508,7 @@ export function createPointerBrain(
                     gated: gatedTools(connected),
                     ...(slackSelf ? { requesterSlackId: slackSelf } : {}),
                   }),
+                  afterInboxGate(),
                 ],
               },
             ],

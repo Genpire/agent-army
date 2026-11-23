@@ -112,7 +112,8 @@ export function routinesRoutes(deps: IntegrationRouteDeps & { routines: RoutineS
   router.post("/api/routines", requireAdmin, async (req, res) => {
     const input = body(ROUTINE_BODY, req, res);
     if (!input) return;
-    const result = await routines.create(toDraft(input), "Admin (console)");
+    // The console's only user is the owner: their routines may read their own Slack account (service.ts).
+    const result = await routines.create(toDraft(input), "Admin (console)", { ownerOnly: true });
     if (!result.ok) return void res.status(result.status).json({ error: result.error });
     res.json({ ok: true, routine: result.routine });
   });
@@ -147,7 +148,7 @@ export function routinesRoutes(deps: IntegrationRouteDeps & { routines: RoutineS
     if (!id) return;
     const input = body(ROUTINE_BODY, req, res);
     if (!input) return;
-    const result = await routines.update(id, toDraft(input));
+    const result = await routines.update(id, toDraft(input), { ownerOnly: true });
     if (!result.ok) return void res.status(result.status).json({ error: result.error });
     res.json({ ok: true, routine: result.routine });
   });

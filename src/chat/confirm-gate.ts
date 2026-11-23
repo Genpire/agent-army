@@ -2,8 +2,9 @@ import { createHash } from "node:crypto";
 import type { HookCallback, SyncHookJSONOutput } from "@anthropic-ai/claude-agent-sdk";
 import type { ChatIntegration } from "./chat-integrations.js";
 import { APP_ID_RE } from "../core/config.js";
-import { ROUTINE_RUN_TOOL, ROUTINE_WRITE_TOOLS } from "../routines/tool-names.js";
-import { SLACK_SEND_TOOL, isSelfTarget } from "../slack/slack-tools.js";
+import { ROUTINES_SERVER_KEY, ROUTINE_RUN_TOOL, ROUTINE_WRITE_TOOLS } from "../routines/tool-names.js";
+import { INBOX_SERVER_KEY, INBOX_TOOL_NAME } from "../slack/inbox-tools.js";
+import { SLACK_SEND_TOOL, SLACK_SERVER_KEY, isSelfTarget } from "../slack/slack-tools.js";
 import type { PointerRequest } from "./pointer-types.js";
 
 /**
@@ -20,7 +21,8 @@ import type { PointerRequest } from "./pointer-types.js";
  * a tool that returns outside content, those writes are denied and recorded
  * as pending. Pointer shows the user what it wants to do; when the user's
  * next message in the conversation is a short "yes", the same tool with the
- * same input goes through once.
+ * same input goes through once. A short "send it" alone lets only the held
+ * Slack messages through, and a question ("send it?") is never a yes.
  *
  * A Slack message from Pointer to the person asking ("me", or their own
  * Slack user id) is not held: it reaches nobody else. One sent as the owner
@@ -65,9 +67,9 @@ export const ROUTINE_GATED_TOOLS = ROUTINE_WRITE_TOOLS;
  * (subagents read outside content and report it back), and so does Slack's
  * member directory (names and titles are written by people). memory_save,
  * project_notes_add and slack_send_message only echo what Pointer wrote
- * (slack_send_message also, when a name matches several people, their ids,
- * @handles and real names, never titles): without them here, "remember A
- * and B" would need a confirmation for B.
+ * (slack_send_message also, when a name matches several people, their user
+ * ids and @handles, never real names or titles): without them here,
+ * "remember A and B" would need a confirmation for B.
  */
 export const TRUSTED_TOOLS: ReadonlySet<string> = new Set([
   "mcp__pointer__repo_task_status",
@@ -130,15 +132,21 @@ export const inputHash = (input: unknown): string =>
     .digest("hex");
 
 /**
- * Words that say yes, "send it" included (Pointer has just shown the message
- * it will send). Arabic is matched after the normalisation in
- * confirmationWords: أرسلها is written ارسلها here, نفّذ is نفذ.
+ * Words that say yes to whatever is held. Arabic is matched after the
+ * normalisation in confirmationWords: أرسلها is written ارسلها here, نفّذ is نفذ.
  */
 const YES_WORDS = new Set([
   "yes", "y", "yeah", "yep", "yup", "ok", "okay", "sure", "confirm", "confirmed", "approve", "approved", "proceed", "go", "do", "lgtm",
+  "نعم", "اه", "ايوه", "ايوا", "ايو", "تمام", "موافق", "موافقه", "اعمل", "اعملها", "اكيد", "ماشي", "نفذ",
+]);
+/**
+ * Words that say yes to a message only ("send it": Pointer has just shown the
+ * message it will send). Made of these alone, a confirmation lets the held
+ * Slack messages through, nothing else held in the conversation.
+ */
+const SEND_WORDS = new Set([
   "send", "post", "share",
-  "نعم", "اه", "ايوه", "ايوا", "ايو", "تمام", "موافق", "موافقه", "اعمل", "اعملها", "اكيد", "ماشي",
-  "ابعت", "ابعتها", "ابعته", "ابعث", "ابعثها", "ابعثه", "ارسل", "ارسلها", "ارسله", "نفذ",
+  "ابعت", "ابعتها", "ابعته", "ابعث", "ابعثها", "ابعثه", "ارسل", "ارسلها", "ارسله",
 ]);
 /**
  * Words that may go with a yes ("go ahead", "do it", "send it now"). Anything
@@ -164,12 +172,24 @@ function confirmationWords(text: string): string[] {
     .filter(Boolean);
 }
 
-/** A short yes in English or Arabic, and nothing else: "Yes!", "ok go ahead", "do it 👍", "send it", "نعم", "تمام، اعمل", "ابعتها". */
-export function isConfirmation(text: string): boolean {
+/**
+ * What a short yes in English or Arabic confirms, and nothing else in it:
+ * "all" for a yes ("Yes!", "ok go ahead", "do it 👍", "نعم", "تمام، اعمل",
+ * also "yes send it"), "send" for send words alone ("send it", "post it",
+ * "ابعتها": the held Slack messages only), undefined for anything else. A
+ * question is never a yes ("send it?", "ابعتها؟").
+ */
+export function confirmationKind(text: string): "all" | "send" | undefined {
+  if (/[?؟]/.test(text.normalize("NFKC"))) return undefined;
   const words = confirmationWords(text);
-  if (words.length === 0 || words.length > MAX_CONFIRMATION_WORDS) return false;
-  return words.every((w) => YES_WORDS.has(w) || FILLER_WORDS.has(w)) && words.some((w) => YES_WORDS.has(w));
+  if (words.length === 0 || words.length > MAX_CONFIRMATION_WORDS) return undefined;
+  if (!words.every((w) => YES_WORDS.has(w) || SEND_WORDS.has(w) || FILLER_WORDS.has(w))) return undefined;
+  if (words.some((w) => YES_WORDS.has(w))) return "all";
+  return words.some((w) => SEND_WORDS.has(w)) ? "send" : undefined;
 }
+
+/** A short yes, for anything held or for messages only (confirmationKind). */
+export const isConfirmation = (text: string): boolean => confirmationKind(text) !== undefined;
 
 /** A write waiting for the user's yes: the tool and a hash of its input. */
 export interface PendingAction {
@@ -257,7 +277,9 @@ const deny = (tool: string): SyncHookJSONOutput => ({
  */
 export function confirmGate({ pending, conversation, message, gated, requesterSlackId }: ConfirmGateOptions): HookCallback {
   const taken = pending.take(conversation);
-  const confirmed = isConfirmation(message) ? taken : [];
+  // "send it" confirms the held Slack messages only; a yes confirms everything held.
+  const kind = confirmationKind(message);
+  const confirmed = kind === "all" ? taken : kind === "send" ? taken.filter((a) => a.tool === SLACK_SEND_TOOL) : [];
   let tainted = false;
 
   /** A gated call: allowed when confirmed (once) or before any outside content, otherwise held. */
@@ -289,5 +311,72 @@ export function confirmGate({ pending, conversation, message, gated, requesterSl
     }
     if (!TRUSTED_TOOLS.has(tool)) tainted = true;
     return {};
+  };
+}
+
+// ---------- After the owner's Slack inbox ----------
+
+/**
+ * Servers whose tools stay on after the owner's inbox was read: Pointer's own
+ * (GitHub reads, memory and notes, held for a yes), Slack (a message is held
+ * for the owner's yes: the inbox taints), the inbox itself and routines.
+ */
+const SERVERS_AFTER_INBOX = ["pointer", SLACK_SERVER_KEY, INBOX_SERVER_KEY, ROUTINES_SERVER_KEY].map((key) => `mcp__${key}__`);
+/** Built-in tools that carry nothing out: loading a skill, the todo list. */
+const BUILTINS_AFTER_INBOX = new Set(["Skill", "TodoWrite"]);
+/** Pointer's own tools that hand what it knows to others without a yes: the team (it has the network) and monday.com writes. */
+const OWN_TOOLS_OFF_AFTER_INBOX = new Set([
+  "mcp__pointer__start_repo_task",
+  "mcp__pointer__monday_create_item",
+  "mcp__pointer__monday_update_item",
+  "mcp__pointer__monday_add_comment",
+]);
+
+/** Whether a tool can carry what Pointer read out of this reply, so it is off once the inbox was read. */
+export function offAfterInbox(tool: string): boolean {
+  if (OWN_TOOLS_OFF_AFTER_INBOX.has(tool)) return true;
+  if (BUILTINS_AFTER_INBOX.has(tool)) return false;
+  return !SERVERS_AFTER_INBOX.some((prefix) => tool.startsWith(prefix));
+}
+
+/** The tool in words, for the reason Pointer reads. */
+function offLabel(tool: string): string {
+  if (tool === "WebFetch" || tool === "WebSearch") return `the web (${tool})`;
+  if (tool === "Agent" || tool === "Task") return "asking a team member";
+  if (tool === "mcp__pointer__start_repo_task") return "starting a repo task";
+  return tool;
+}
+
+/**
+ * PreToolUse hook for one query (one reply()): once Pointer has called
+ * slack_my_inbox, what other people wrote to the owner is in its context, and
+ * a planted message there may try to send it out. So for the rest of the
+ * query every tool that can carry it out is denied: the web, subagents, every
+ * other MCP server (apps, Jira, Miro, code hosts, company data), repo tasks
+ * and monday.com writes (offAfterInbox). Slack messages stay, held for the
+ * owner's yes by confirmGate. Only Pointer's own calls count: subagents never
+ * get the inbox (subagentReadOnlyGate in pointer.ts), and none can be started
+ * after it.
+ */
+export function afterInboxGate(): HookCallback {
+  let inboxRead = false;
+  return async (input) => {
+    if (input.hook_event_name !== "PreToolUse" || input.agent_id) return {};
+    const tool = input.tool_name;
+    if (tool === INBOX_TOOL_NAME) {
+      inboxRead = true;
+      return {};
+    }
+    if (!inboxRead || !offAfterInbox(tool)) return {};
+    console.info(`[pointer] ${tool}: off after reading the owner's Slack inbox`);
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason:
+          `After reading your Slack inbox, ${offLabel(tool)} is off for the rest of this reply, so that what other people wrote there cannot leave through it. ` +
+          "Do not try it again now: answer with what you have, and say it can be done in a new message that does not read the inbox.",
+      },
+    };
   };
 }

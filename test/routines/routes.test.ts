@@ -103,6 +103,17 @@ describe("routines admin API", () => {
     expect((await get("/api/routines/rt-daily-github-digest")).status).toBe(404);
   });
 
+  it("marks what the console creates or changes as the owner's (ownerOnly)", async () => {
+    const { routine } = await json(post("/api/routines", { ...body, name: "Owner digest" }));
+    expect(routine).toMatchObject({ id: "rt-owner-digest", ownerOnly: true });
+    // A change by anyone else clears the mark; the owner's next change in the console sets it again.
+    const elsewhere = await routines.update(routine.id, { name: "Changed elsewhere" });
+    expect(elsewhere.ok && elsewhere.routine.ownerOnly).toBe(false);
+    const changed = await json(post(`/api/routines/${routine.id}`, { enabled: false }));
+    expect(changed.routine).toMatchObject({ ownerOnly: true, enabled: false });
+    expect((await post(`/api/routines/${routine.id}/delete`)).status).toBe(200);
+  });
+
   it("previews a schedule", async () => {
     const ok = await json(post("/api/routines/preview", { cron: "0 9 * * 1-5", timezone: "America/New_York" }));
     expect(ok).toMatchObject({ ok: true, timezone: "America/New_York", scheduleText: "Weekdays at 09:00" });

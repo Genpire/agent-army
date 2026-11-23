@@ -56,7 +56,7 @@ import { ScreenshotRepo } from "./screenshots.js";
 import { HISTORY_SCAN, routeRepoTask } from "./sizing.js";
 import { SkillLibrary, materializeSkills } from "../skills/skills.js";
 import { slackClient, slackErrorCode, toMrkdwn, truncate, uploadThreadFiles } from "../slack/slack.js";
-import { createStore } from "../core/store.js";
+import { type Store, createStore } from "../core/store.js";
 import { TimelineRecorder, checkItems, plainLine } from "./task-events.js";
 import { type Task, type TaskPhase, type TaskReport, TaskRepo, type ThreadState, decodeTaskPayload, isWebTask } from "./tasks.js";
 import { type RepoAgentOptions, type Team, type TeamSkills, agentLabel, buildRepoAgents, repoAllowedTools, skillQueryOptions } from "../team/team.js";
@@ -1312,6 +1312,17 @@ export async function commitTeamWork(git: GitRun, o: { message: string; since: s
   return { ahead: Number(await git(["rev-list", "--count", `${o.since}..HEAD`])), unstashed };
 }
 
+/**
+ * The config as a repo task loads it: without the owner's own Slack account
+ * (config.slack.user, their user token). Nothing in a repo task needs it, so
+ * the worker never holds it and cannot hand it to the team.
+ */
+export async function loadWorkerConfig(store: Store, masterKey: Buffer): Promise<Config> {
+  const config = await new ConfigRepo(store, masterKey).load(true);
+  delete config.slack.user;
+  return config;
+}
+
 /** Runs the task in TASK_B64 to the end. The entry point (src/worker.ts) calls it. */
 export async function main(): Promise<void> {
   const payload = process.env.TASK_B64;
@@ -1320,14 +1331,15 @@ export async function main(): Promise<void> {
 
   const store = createStore();
   const masterKey = await resolveMasterKey(store);
-  const config = await new ConfigRepo(store, masterKey).load(true);
+  // The owner's own Slack token is left out right away (loadWorkerConfig).
+  const config = await loadWorkerConfig(store, masterKey);
   // Kept in the store, never in the checkout: the worker commits the whole tree.
   const notes = new NotesRepo(store, masterKey);
   const tasks = new TaskRepo(store);
   const task = await tasks.get(taskId);
   if (!task) throw new Error(`Task ${taskId} not found`);
   // The monthly and per-repo caps (budget.ts): this task's budget before it runs, the Slack alerts after.
-  const spending = new Spending({ store, usage: new UsageRepo(store, tasks), config: () => new ConfigRepo(store, masterKey).load(true), slack: slackClient });
+  const spending = new Spending({ store, usage: new UsageRepo(store, tasks), config: () => loadWorkerConfig(store, masterKey), slack: slackClient });
 
   const notReady = onboardingError(task, config);
   if (notReady) throw new Error(notReady);
