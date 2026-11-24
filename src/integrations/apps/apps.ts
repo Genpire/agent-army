@@ -25,6 +25,7 @@ import { AppSignInError, type FreshTokenDeps, freshAccessToken } from "./apps-oa
 import { type AppProxy, type ProxyScope, type ProxySource, appProxy, listAllTools, openUpstream } from "./apps-proxy.js";
 import type { ChatIntegration, ChatIntegrationContext } from "../../chat/chat-integrations.js";
 import type { AppConnection, AppTool, Config, ConfigRepo } from "../../core/config.js";
+import { workspaceMcpRefusal } from "../google/workspace-mcp.js";
 import { type AgentSpec, enabledAgents } from "../../team/team.js";
 
 /** Listing an app's tools gives up after this. */
@@ -117,6 +118,9 @@ function toolListProblem(app: AppConnection, err: unknown, timeoutMs: number): s
   // The transports put the HTTP status in `code` (StreamableHTTPError, SseError).
   const code = (err as { code?: unknown } | undefined)?.code;
   if (code === 401 || code === 403 || err instanceof UnauthorizedError || /\b(401|403)\b|unauthori[sz]ed|forbidden/i.test(message)) {
+    // Google's Workspace MCP servers refuse a good sign-in when the project lacks the product's API or MCP service.
+    const workspace = workspaceMcpRefusal(app);
+    if (workspace) return workspace;
     return `${app.name} refused the sign-in. ${app.auth.type === "oauth" ? "Sign in again." : "Check the key, and that it may use the MCP server."}`;
   }
   if (/abort|timeout|timed out/i.test(message)) {
