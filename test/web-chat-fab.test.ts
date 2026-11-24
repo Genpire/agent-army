@@ -3,7 +3,7 @@ import { hasChatFab, shouldShowChatFab } from "../web/src/pages/chat/fab.js";
 import { PAGES } from "../web/src/lib/router.js";
 
 describe("the floating chat button", () => {
-  const elsewhere = ["overview", "office", "team", "skills", "integrations", "projects", "activity", "routines", "memory", "settings"] as const;
+  const elsewhere = ["overview", "office", "followups", "team", "skills", "integrations", "projects", "activity", "routines", "memory", "settings"] as const;
 
   it.each(elsewhere)("shows on %s", (page) => {
     expect(shouldShowChatFab(page, false)).toBe(true);
