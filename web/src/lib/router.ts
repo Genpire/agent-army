@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
  * `#/integrations/github`, `#/activity/<taskId>`… The first segment is the
  * page, the rest is the page's own (a tab, a selected item).
  */
-export const PAGES = ["overview", "office", "chat", "team", "skills", "integrations", "projects", "activity", "routines", "memory", "settings"] as const;
+export const PAGES = ["overview", "office", "chat", "followups", "team", "skills", "integrations", "projects", "activity", "routines", "memory", "settings"] as const;
 export type Page = (typeof PAGES)[number];
 
 export interface Route {

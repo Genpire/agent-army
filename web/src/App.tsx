@@ -9,6 +9,7 @@ import { Spinner } from "@astryxdesign/core/Spinner";
 import { StatusDot } from "@astryxdesign/core/StatusDot";
 import {
   ArrowRightStartOnRectangleIcon,
+  BellAlertIcon,
   BoltIcon,
   ChartBarSquareIcon,
   ChatBubbleLeftRightIcon,
@@ -34,6 +35,7 @@ import { LoginScreen, SetupScreen } from "./pages/auth";
 import ChatPage from "./pages/chat";
 import { ChatLauncher } from "./pages/chat/ChatLauncher";
 import { ChatSessionProvider } from "./pages/chat/ChatSession";
+import FollowupsPage from "./pages/followups";
 import IntegrationsPage from "./pages/integrations";
 import MemoryPage from "./pages/memory";
 import OfficePage from "./pages/office";
@@ -49,6 +51,7 @@ const PAGE_COMPONENTS: Record<Page, ComponentType> = {
   skills: SkillsPage,
   overview: OverviewPage,
   chat: ChatPage,
+  followups: FollowupsPage,
   team: TeamPage,
   integrations: IntegrationsPage,
   projects: ProjectsPage,
@@ -62,6 +65,7 @@ const NAV: { page: Page; label: string; icon: typeof Squares2X2Icon }[] = [
   { page: "overview", label: "Overview", icon: Squares2X2Icon },
   { page: "office", label: "Office", icon: BuildingOffice2Icon },
   { page: "chat", label: "Chat", icon: ChatBubbleLeftRightIcon },
+  { page: "followups", label: "Follow-ups", icon: BellAlertIcon },
   { page: "team", label: "Team", icon: UserGroupIcon },
   { page: "skills", label: "Skills", icon: AcademicCapIcon },
   { page: "integrations", label: "Integrations", icon: PuzzlePieceIcon },
