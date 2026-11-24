@@ -294,10 +294,12 @@ export const MORE_APPS: CatalogApp[] = [
     auth: "oauth",
     clientRegistration: "manual",
     docsUrl: "https://developers.google.com/workspace/guides/configure-mcp-servers",
-    keyHelp: "Google Cloud console OAuth client (Gmail API enabled, 'Use this client for an AI-powered agent' selected).",
+    keyHelp:
+      "Google Cloud console, in one project: enable the Gmail API (gmail.googleapis.com) and the Gmail MCP API (gmailmcp.googleapis.com), configure the OAuth consent screen, then create an OAuth client (Web application) with the redirect address shown here and 'Use this client for an AI-powered agent' selected.",
     description: "Search, read and draft Gmail messages.",
     examples: ["Summarize unread emails from customers today", "Draft a reply to the latest email from Acme"],
-    notes: "Pre-created Google OAuth client required; DCR not documented.",
+    notes:
+      "Needs a Google OAuth client you create, with 'Use this client for an AI-powered agent' selected, in a Google Cloud project with both gmail.googleapis.com and gmailmcp.googleapis.com enabled: without them the sign-in works but Gmail refuses every call.",
     urlHint: "Other addresses: {'chat': 'https://chatmcp.googleapis.com/mcp/v1'}",
   },
   {
@@ -821,9 +823,12 @@ export const MORE_APPS: CatalogApp[] = [
     auth: "oauth",
     clientRegistration: "manual",
     docsUrl: "https://developers.google.com/workspace/guides/configure-mcp-servers",
-    keyHelp: "Same Google Cloud OAuth client as the other Workspace servers, with the Calendar API enabled.",
+    keyHelp:
+      "Google Cloud console, in the project of your OAuth client (the same one as the other Workspace servers): enable the Calendar API (calendar-json.googleapis.com) and the Calendar MCP API (calendarmcp.googleapis.com). The client must have 'Use this client for an AI-powered agent' selected.",
     description: "Read calendars and find, create or update events in Google Calendar.",
     examples: ["What meetings do I have tomorrow?", "Find a free 30-minute slot with Sam on Thursday"],
+    notes:
+      "Needs a Google OAuth client you create, with 'Use this client for an AI-powered agent' selected, in a Google Cloud project with both calendar-json.googleapis.com and calendarmcp.googleapis.com enabled: without them the sign-in works but Calendar refuses every call.",
   },
   {
     id: "google-drive",
@@ -834,10 +839,12 @@ export const MORE_APPS: CatalogApp[] = [
     auth: "oauth",
     clientRegistration: "manual",
     docsUrl: "https://developers.google.com/workspace/guides/configure-mcp-servers",
-    keyHelp: "Google Cloud console: enable the Drive API, configure the OAuth consent screen, then Google Auth Platform > Clients > create an OAuth client ID/secret with 'Use this client for an AI-powered agent' selected.",
+    keyHelp:
+      "Google Cloud console: enable the Drive API (drive.googleapis.com) and the Drive MCP API (drivemcp.googleapis.com), configure the OAuth consent screen, then Google Auth Platform > Clients > create an OAuth client ID/secret with 'Use this client for an AI-powered agent' selected.",
     description: "Search and read Google Drive files.",
     examples: ["Find the Q4 board deck in Drive", "What does the 'Hiring plan' doc say about engineering headcount?"],
-    notes: "Official Google Workspace MCP servers; DCR not documented, a pre-created OAuth client is the documented path.",
+    notes:
+      "Official Google Workspace MCP server: needs a Google OAuth client you create, with 'Use this client for an AI-powered agent' selected, in a project with both drive.googleapis.com and drivemcp.googleapis.com enabled (Docs, Sheets and Slides each need their API and MCP service too, e.g. docs.googleapis.com and docsmcp.googleapis.com).",
     urlHint: "Other addresses: {'docs': 'https://docsmcp.googleapis.com/mcp/v1', 'sheets': 'https://sheetsmcp.googleapis.com/mcp/v1', 'slides': 'https://slidesmcp.googleapis.com/mcp/v1', 'workspace_search': 'https://workspacemcp.googleapis.com/mcp/v1'}",
   },
   {

@@ -81,6 +81,8 @@ const UPDATE = z.object({
   disabledTools: z.array(z.string().max(128)).max(500).optional(),
   agentIds: AGENT_IDS.optional(),
   enabled: z.boolean().optional(),
+  /** "Only for me": only the owner may use it, in their own conversations; never team members or repo tasks. */
+  ownerOnly: z.boolean().optional(),
   auth: AUTH_INPUT.optional(),
 });
 
@@ -310,7 +312,7 @@ export function appsRoutes(deps: IntegrationRouteDeps): Router {
     res.json({ ok: true, app: appView(await configRepo.load(true), id), ...(signInUrl ? { signInUrl } : {}) });
   });
 
-  // Updates an app: name, access, disabled tools, agents, on/off, credentials. New credentials
+  // Updates an app: name, access, disabled tools, agents, on/off, "Only for me", credentials. New credentials
   // (a key or headers) are checked by listing the tools again, unless SKIP_VALIDATION=1.
   router.post("/api/apps/:id", requireAdmin, async (req, res) => {
     const id = appParam(req, res);
@@ -344,6 +346,7 @@ export function appsRoutes(deps: IntegrationRouteDeps): Router {
       if (input.access !== undefined) app.access = input.access;
       if (input.disabledTools !== undefined) app.disabledTools = [...new Set(input.disabledTools)];
       if (input.enabled !== undefined) app.enabled = input.enabled;
+      if (input.ownerOnly !== undefined) app.ownerOnly = input.ownerOnly;
       if (changed) app.auth = auth;
       if (tools) Object.assign(app, tools);
       if (input.agentIds) setAppAgents(c, id, input.agentIds);
