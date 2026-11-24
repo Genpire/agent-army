@@ -45,8 +45,15 @@ function colorOf(icon: BrandIcon): string {
   return `light-dark(${fits.light ? brand : text}, ${fits.dark ? brand : text})`;
 }
 
-export default function BrandLogoGlyph({ id, name, size = "md" }: BrandLogoProps) {
+export default function BrandLogoGlyph({ id, name, size = "md", icon: fallback }: BrandLogoProps) {
   const icon = id ? logoFor(id) : undefined;
+  if (!icon && fallback) {
+    return (
+      <Center width={TILE[size]} height={TILE[size]} xstyle={styles.tile}>
+        <Icon icon={fallback} size={GLYPH[size]} color="secondary" label={name} />
+      </Center>
+    );
+  }
   if (!icon) return <InitialsTile name={name} size={size} />;
   return (
     <Center width={TILE[size]} height={TILE[size]} xstyle={styles.tile}>

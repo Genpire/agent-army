@@ -1,5 +1,5 @@
 import { Avatar } from "@astryxdesign/core/Avatar";
-import { Suspense, lazy } from "react";
+import { type ComponentType, type SVGProps, Suspense, lazy } from "react";
 
 /** The logo glyphs live in their own chunk (lib/logos.ts), fetched when the first logo is shown. */
 const BrandLogoGlyph = lazy(() => import("./BrandLogoGlyph"));
@@ -13,6 +13,8 @@ export interface BrandLogoProps {
   name: string;
   /** sm 24, md 36, lg 48: the sizes of the initials tile it replaces. */
   size?: BrandLogoSize;
+  /** Drawn on the same tile instead of the initials when there is no logo, for marks that are not brands (a person, the console). */
+  icon?: ComponentType<SVGProps<SVGSVGElement>>;
 }
 
 /** The initials tile shown without a logo, and while the logos load. */
@@ -21,14 +23,14 @@ export function InitialsTile({ name, size = "md" }: Pick<BrandLogoProps, "name" 
 }
 
 /**
- * A brand's logo (Simple Icons) in its colour on a neutral tile, or the
- * name's initials when there is no logo for the id.
+ * A brand's logo (Simple Icons) in its colour on a neutral tile, else the
+ * given icon on the same tile, else the name's initials.
  */
-export function BrandLogo({ id, name, size = "md" }: BrandLogoProps) {
-  if (!id) return <InitialsTile name={name} size={size} />;
+export function BrandLogo({ id, name, size = "md", icon }: BrandLogoProps) {
+  if (!id && !icon) return <InitialsTile name={name} size={size} />;
   return (
     <Suspense fallback={<InitialsTile name={name} size={size} />}>
-      <BrandLogoGlyph id={id} name={name} size={size} />
+      <BrandLogoGlyph id={id} name={name} size={size} icon={icon} />
     </Suspense>
   );
 }

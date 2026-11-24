@@ -17,7 +17,6 @@ import { Text } from "@astryxdesign/core/Text";
 import { TextArea } from "@astryxdesign/core/TextArea";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { type ISOTimeString, TimeInput } from "@astryxdesign/core/TimeInput";
-import { ToggleButton, ToggleButtonGroup } from "@astryxdesign/core/ToggleButton";
 import { Tokenizer } from "@astryxdesign/core/Tokenizer";
 import type { SearchSource, SearchableItem } from "@astryxdesign/core/Typeahead";
 import { VStack } from "@astryxdesign/core/VStack";
@@ -25,12 +24,13 @@ import { PlayIcon } from "@heroicons/react/24/outline";
 import { useEffect, useState } from "react";
 import { ConfirmButton } from "../../components/ConfirmButton";
 import { TimezoneSelector } from "../../components/TimezoneSelector";
+import { WeekdayPicker } from "../../components/WeekdayPicker";
 import { api, errorMessage } from "../../lib/api";
 import { href } from "../../lib/router";
 import { useAction } from "../../lib/useAction";
 import { type RoutineBody, type RoutineView, type SchedulePreview, ROUTINES_PATH, routinePath, runTime } from "./model";
 import { RunHistory } from "./RunHistory";
-import { DEFAULT_FORM, PRESET_OPTIONS, type PresetKind, type ScheduleForm, WEEKDAYS, cronFor, formFor } from "./schedule";
+import { DEFAULT_FORM, PRESET_OPTIONS, type PresetKind, type ScheduleForm, cronFor, formFor } from "./schedule";
 
 export type DrawerTab = "routine" | "runs";
 
@@ -158,24 +158,7 @@ function ScheduleFields({ form, onChange }: { form: ScheduleForm; onChange: (for
           )}
         </HStack>
       )}
-      {form.kind === "weekly" && (
-        <VStack gap={2}>
-          <Text type="label">On</Text>
-          <ToggleButtonGroup
-            label="Days of the week"
-            type="multiple"
-            size="sm"
-            value={form.weekdays.map(String)}
-            onChange={(v: string | string[] | null) => {
-              const days = (Array.isArray(v) ? v : []).map(Number);
-              if (days.length) set({ weekdays: days });
-            }}>
-            {WEEKDAYS.map((d) => (
-              <ToggleButton key={d.value} value={String(d.value)} label={d.short} tooltip={d.label} />
-            ))}
-          </ToggleButtonGroup>
-        </VStack>
-      )}
+      {form.kind === "weekly" && <WeekdayPicker label="On" groupLabel="Days of the week" value={form.weekdays} onChange={(weekdays) => set({ weekdays })} />}
     </VStack>
   );
 }
