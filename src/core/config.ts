@@ -576,6 +576,30 @@ export const OfficeTalkSchema = z
 export type OfficeTalkSettings = z.infer<typeof OfficeTalkSchema>;
 export const DEFAULT_OFFICE_TALK = (): OfficeTalkSettings => ({ enabled: true, provider: "auto", model: "", dailyMax: 40 });
 
+/**
+ * Follow-ups and reminders (src/followups/types.ts): the owner's morning
+ * brief, a reminder before calendar events, and following Gmail for threads
+ * that need a reply. Times are in config.timezone.
+ */
+export const FollowupSettingsSchema = z
+  .object({
+    morningBrief: z
+      .object({
+        enabled: z.boolean().default(true),
+        /** "HH:MM", 24-hour. */
+        time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Use HH:MM, like 08:30").default("08:30"),
+        /** Days it is sent: 0 = Sunday … 6 = Saturday. */
+        days: z.array(z.number().int().min(0).max(6)).max(7).default(() => [1, 2, 3, 4, 5]),
+      })
+      .default(() => ({ enabled: true, time: "08:30", days: [1, 2, 3, 4, 5] })),
+    /** Minutes before a calendar event to remind the owner; 0 = no reminder. */
+    meetingReminderMin: z.number().int().min(0).max(240).default(10),
+    /** Follow the connected Gmail for threads that need the owner's reply. */
+    trackGmail: z.boolean().default(true),
+  })
+  .default(() => ({ morningBrief: { enabled: true, time: "08:30", days: [1, 2, 3, 4, 5] }, meetingReminderMin: 10, trackGmail: true }));
+export type FollowupSettings = z.infer<typeof FollowupSettingsSchema>;
+
 export const ConfigSchema = z.object({
   orgName: z.string().default(""),
   adminPasswordHash: z.string().optional(),
@@ -675,6 +699,8 @@ export const ConfigSchema = z.object({
     .default(() => ({ codex: { model: "", allowUnsandboxed: false }, gemini: { model: "", allowUnsandboxed: false } })),
   /** The organisation's timezone (IANA), the default for routines and "today". */
   timezone: z.string().trim().max(64).default("UTC"),
+  /** The owner's follow-ups: morning brief, meeting reminders, Gmail tracking. */
+  followups: FollowupSettingsSchema,
   email: EmailConfigSchema,
   /** Company systems Pointer may read (APIs, databases), read-only. */
   dataSources: z.array(DataSourceSchema).max(30).default(() => []),
