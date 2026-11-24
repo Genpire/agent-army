@@ -203,7 +203,7 @@ export interface PointerReply {
   providerCosts?: Record<string, number>;
   /** Providers that failed before this one answered (routing.ts), in order; absent when the first answered. */
   fallback?: FallbackNote[];
-  /** The reply read the owner's Slack inbox (slack_my_inbox): it may quote what people wrote there, so it is posted as outside content. */
+  /** The reply read the owner's Slack inbox or Gmail (slack_my_inbox, gmail_my_inbox): it may quote what people wrote there, so it is posted as outside content. */
   readInbox?: boolean;
   /**
    * The reply held a call for the user's confirmation (confirm-gate.ts), so it

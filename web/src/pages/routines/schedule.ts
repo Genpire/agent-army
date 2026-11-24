@@ -9,7 +9,7 @@ export interface ScheduleForm {
   kind: PresetKind;
   /** "HH:MM", 24-hour. */
   time: string;
-  /** Weekly: day numbers, 0 = Sunday. */
+  /** Weekly: day numbers, 0 = Sunday (components/WeekdayPicker). */
   weekdays: number[];
   /** Monthly: 1-28, so every month has it. */
   dayOfMonth: number;
@@ -23,16 +23,6 @@ export const PRESET_OPTIONS: { value: PresetKind; label: string; description: st
   { value: "weekly", label: "Weekly on…", description: "On the days you pick" },
   { value: "monthly", label: "Monthly on…", description: "On one day of the month" },
   { value: "custom", label: "Custom cron", description: "minute hour day month weekday" },
-];
-
-export const WEEKDAYS = [
-  { value: 1, short: "Mon", label: "Monday" },
-  { value: 2, short: "Tue", label: "Tuesday" },
-  { value: 3, short: "Wed", label: "Wednesday" },
-  { value: 4, short: "Thu", label: "Thursday" },
-  { value: 5, short: "Fri", label: "Friday" },
-  { value: 6, short: "Sat", label: "Saturday" },
-  { value: 0, short: "Sun", label: "Sunday" },
 ];
 
 export const DEFAULT_FORM: ScheduleForm = { kind: "daily", time: "08:00", weekdays: [1], dayOfMonth: 1, cron: "0 8 * * *" };

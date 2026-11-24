@@ -5,6 +5,7 @@ import { type RouteView, isRouteReady, routeView } from "../ai/routing.js";
 import { decrypt, deriveKey, encrypt, randomToken } from "./crypto.js";
 import type { Store } from "./store.js";
 import { REPO_RE } from "../integrations/code-hosts/repo-id.js";
+import { appOwnerOnly } from "../integrations/apps/owner-only.js";
 import { TeamSchema, defaultTeam } from "../team/team.js";
 
 /** Any repository id (GitHub owner/repo, gitlab:group/project, bitbucket:workspace/repo); see repo-id.ts. */
@@ -357,6 +358,12 @@ export const AppConnectionSchema = z.object({
   /** Team agents that may use it (chat and repo tasks); Pointer always may while it is enabled. */
   agentIds: z.array(z.string().max(31)).max(30).default([]),
   enabled: z.boolean().default(true),
+  /**
+   * Only the owner may use it ("Only for me"), in their own requests, never a
+   * team member or a repo task (apps/owner-only.ts). Unset: personal Google
+   * Workspace apps (Gmail, Calendar, Drive…) are, others are not.
+   */
+  ownerOnly: z.boolean().optional(),
 });
 export type AppConnection = z.infer<typeof AppConnectionSchema>;
 
@@ -938,6 +945,8 @@ export function publicView(c: Config) {
       checkedAt: a.checkedAt ?? null,
       agentIds: a.agentIds,
       enabled: a.enabled,
+      /** Effective: its own setting, else whether it is a personal Google Workspace app (appOwnerOnly). */
+      ownerOnly: appOwnerOnly(a),
     })),
     /** Without secrets: which ones are set (masked), the settings and model choices. */
     ai: {

@@ -10,6 +10,7 @@ import type { PointerRequest } from "../../src/chat/pointer-types.js";
 import type { Routine } from "../../src/core/config.js";
 import { FollowupStore } from "../../src/followups/store.js";
 import { followupsChatIntegration, registerFollowups } from "../../src/followups/tools.js";
+import { GMAIL_INBOX_TOOL_NAME } from "../../src/integrations/google/tool-names.js";
 import { routineRequest } from "../../src/routines/runner.js";
 import { Clock, KEY, MemoryStore, configured, tmpStore } from "../routines/helpers.js";
 
@@ -163,7 +164,7 @@ describe("Pointer's follow-up tools and the confirm gate", () => {
 
     // An email read this turn asks to close the owner's items: held. Adding what it found is fine.
     const tainted = confirmGate({ pending, conversation: "web:c2", message: "check my mail", gated });
-    await hookCall(tainted, "mcp__gmail__gmail_my_inbox");
+    await hookCall(tainted, GMAIL_INBOX_TOOL_NAME);
     expect((await hookCall(tainted, tool("followups_add"), { title: "Reply to Rita" })).hookSpecificOutput).toBeUndefined();
     expect((await hookCall(tainted, tool("followups_done"), { numbers: [1, 2] })).hookSpecificOutput?.permissionDecision).toBe("deny");
     expect((await hookCall(tainted, tool("followups_snooze"), { number: 1, until: "2027-01-01 09:00" })).hookSpecificOutput?.permissionDecision).toBe("deny");
@@ -181,13 +182,21 @@ describe("Pointer's follow-up tools and the confirm gate", () => {
     expect((await hookCall(relayed, tool("followups_done"), { numbers: [2] })).hookSpecificOutput?.permissionDecision).toBe("deny");
   });
 
-  it("stays on after the owner's Slack inbox was read, so the digest can add what it found", async () => {
+  it("stays on after the owner's Slack inbox or Gmail was read, so the digest can add what it found", async () => {
     expect(offAfterInbox(tool("followups_add"))).toBe(false);
     expect(offAfterInbox(tool("followups_list"))).toBe(false);
-    const gate = afterInboxGate();
-    await hookCall(gate as never, "mcp__slack_inbox__slack_my_inbox");
-    expect((await hookCall(gate as never, tool("followups_add"), { title: "Reply to Sam" })).hookSpecificOutput).toBeUndefined();
-    expect((await hookCall(gate as never, "WebFetch", { url: "https://example.com" })).hookSpecificOutput?.permissionDecision).toBe("deny");
+    for (const inbox of ["mcp__slack_inbox__slack_my_inbox", GMAIL_INBOX_TOOL_NAME]) {
+      const gate = afterInboxGate();
+      await hookCall(gate as never, inbox);
+      expect((await hookCall(gate as never, tool("followups_add"), { title: "Reply to Sam" })).hookSpecificOutput).toBeUndefined();
+      expect((await hookCall(gate as never, tool("followups_list"))).hookSpecificOutput).toBeUndefined();
+      expect((await hookCall(gate as never, "WebFetch", { url: "https://example.com" })).hookSpecificOutput?.permissionDecision).toBe("deny");
+    }
+    // The digest reads Gmail, then the Slack inbox, then adds: none of it is turned off on the way.
+    const digest = afterInboxGate();
+    for (const step of [GMAIL_INBOX_TOOL_NAME, "mcp__slack_inbox__slack_my_inbox", tool("followups_add"), tool("followups_list")]) {
+      expect((await hookCall(digest as never, step)).hookSpecificOutput, step).toBeUndefined();
+    }
   });
 });
 

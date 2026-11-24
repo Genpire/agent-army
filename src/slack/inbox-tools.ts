@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { ChatIntegration, ChatIntegrationContext } from "../chat/chat-integrations.js";
 import type { Config, ConfigRepo, Routine } from "../core/config.js";
 import { FOLLOWUPS_ADD_TOOL, FOLLOWUPS_LIST_TOOL } from "../followups/tool-names.js";
+import { GMAIL_INBOX_TOOL } from "../integrations/google/tool-names.js";
 import type { CallToolResult } from "../integrations/monday/monday.js";
 import { formatRunTime } from "../routines/cron.js";
 import type { RoutineDraft } from "../routines/service.js";
@@ -56,14 +57,24 @@ export function slackInboxFor(configRepo: ConfigRepo): SlackInbox | undefined {
 const ok = (text: string): CallToolResult => ({ content: [{ type: "text", text }] });
 const fail = (text: string): CallToolResult => ({ content: [{ type: "text", text }], isError: true });
 
+/** A window's default and its oldest start: the inbox's are 72 hours and 14 days. */
+export interface SinceLimits {
+  defaultHours: number;
+  maxDays: number;
+}
+
 /**
  * The start of the window: an ISO time, or hours back ("24", "24h", 24).
- * Never before the inbox's 14 days.
+ * Never before `limits.maxDays` (the inbox's 14 days by default).
  */
-export function parseSince(since: string | number | undefined, now: Date): { ok: true; since: Date } | { ok: false; error: string } {
-  const oldest = now.getTime() - INBOX_LIMITS.days * 24 * 60 * 60_000;
+export function parseSince(
+  since: string | number | undefined,
+  now: Date,
+  limits: SinceLimits = { defaultHours: DEFAULT_HOURS, maxDays: INBOX_LIMITS.days },
+): { ok: true; since: Date } | { ok: false; error: string } {
+  const oldest = now.getTime() - limits.maxDays * 24 * 60 * 60_000;
   const hoursBack = (h: number) => ({ ok: true as const, since: new Date(Math.max(oldest, now.getTime() - h * 60 * 60_000)) });
-  if (since === undefined || since === "") return hoursBack(DEFAULT_HOURS);
+  if (since === undefined || since === "") return hoursBack(limits.defaultHours);
   if (typeof since === "number") return Number.isFinite(since) && since > 0 ? hoursBack(since) : { ok: false, error: "since in hours must be a positive number." };
   const hours = since.trim().match(/^(\d+(?:\.\d+)?)\s*h?$/i);
   if (hours) return Number(hours[1]) > 0 ? hoursBack(Number(hours[1])) : { ok: false, error: "since in hours must be a positive number." };
@@ -315,8 +326,6 @@ export function inboxChatIntegration(
 export const ATTENTION_REPORT_NAME = "Follow-ups digest";
 /** Weekdays at 09:00, 13:00 and 17:00. */
 export const ATTENTION_REPORT_CRON = "0 9,13,17 * * 1-5";
-/** The owner's Gmail, as Pointer's tool (integrations/google): read first when it is there. */
-export const GMAIL_INBOX_TOOL = "gmail_my_inbox";
 
 const toolOf = (fullName: string) => fullName.split("__").at(-1)!;
 

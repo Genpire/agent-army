@@ -3,7 +3,7 @@
  * imports: nothing from the server ends up in the browser bundle), so the
  * page and the API cannot drift apart.
  */
-import type { AiProviderId, ROUTE_MAX as SERVER_ROUTE_MAX, WorkKind, publicView } from "../../../src/core/config.js";
+import type { AiProviderId, FollowupSettings, ROUTE_MAX as SERVER_ROUTE_MAX, WorkKind, publicView } from "../../../src/core/config.js";
 import type { MemoryFact } from "../../../src/chat/memory.js";
 import type { NotesRepo, ProjectNotes } from "../../../src/chat/notes.js";
 import type { MondayBoardSummary } from "../../../src/integrations/monday/monday.js";
@@ -55,8 +55,10 @@ type ServerConfig = ReturnType<typeof publicView>;
  * The configuration as the browser sees it: secrets are never included, only
  * whether they are set. `ai.routes` is optional for a server that does not
  * send it yet: the page then shows each kind's default (aiRoutes.ts routesOf).
+ * `followups` (the reminder settings, config.followups) is optional for the
+ * same reason: the Follow-ups page then uses the list's own copy, else the defaults.
  */
-export type PublicConfig = Omit<ServerConfig, "ai"> & { ai: ServerConfig["ai"] & { routes?: RoutesView } };
+export type PublicConfig = Omit<ServerConfig, "ai"> & { ai: ServerConfig["ai"] & { routes?: RoutesView }; followups?: FollowupSettings };
 export type RepoSetupView = PublicConfig["repoSetup"][string];
 export type GitHubConnectionView = PublicConfig["github"]["extra"][number];
 export type Limits = PublicConfig["limits"];

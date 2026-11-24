@@ -2,7 +2,9 @@
  * Apps connected through their remote MCP servers (config.apps): Linear,
  * Notion, Sentry, Stripe, Zapier… Pointer uses every enabled app in chat;
  * the team agents an app is assigned to (AgentSpec.apps) use it in chat
- * (read-only tools) and in repo tasks.
+ * (read-only tools) and in repo tasks. An owner-only app (owner-only.ts:
+ * the owner's Gmail, calendar, files) is Pointer's in the owner's own
+ * requests only, and never an agent's or a repo task's.
  *
  * What a connection may use is decided here, from the tools listed when it
  * was last checked: "read" access offers only the tools the server marks
@@ -25,6 +27,9 @@ import { AppSignInError, type FreshTokenDeps, freshAccessToken } from "./apps-oa
 import { type AppProxy, type ProxyScope, type ProxySource, appProxy, listAllTools, openUpstream } from "./apps-proxy.js";
 import type { ChatIntegration, ChatIntegrationContext } from "../../chat/chat-integrations.js";
 import type { AppConnection, AppTool, Config, ConfigRepo } from "../../core/config.js";
+import { workspaceMcpRefusal } from "../google/workspace-mcp.js";
+import { ownerRequest } from "../../slack/user-account.js";
+import { appOwnerOnly, appReadsInbox } from "./owner-only.js";
 import { type AgentSpec, enabledAgents } from "../../team/team.js";
 
 /** Listing an app's tools gives up after this. */
@@ -117,6 +122,9 @@ function toolListProblem(app: AppConnection, err: unknown, timeoutMs: number): s
   // The transports put the HTTP status in `code` (StreamableHTTPError, SseError).
   const code = (err as { code?: unknown } | undefined)?.code;
   if (code === 401 || code === 403 || err instanceof UnauthorizedError || /\b(401|403)\b|unauthori[sz]ed|forbidden/i.test(message)) {
+    // Google's Workspace MCP servers refuse a good sign-in when the project lacks the product's API or MCP service.
+    const workspace = workspaceMcpRefusal(app);
+    if (workspace) return workspace;
     return `${app.name} refused the sign-in. ${app.auth.type === "oauth" ? "Sign in again." : "Check the key, and that it may use the MCP server."}`;
   }
   if (/abort|timeout|timed out/i.test(message)) {
@@ -199,8 +207,22 @@ export async function mcpServerConfig(app: AppConnection, deps: AppDeps & { scop
   return { ...route, alwaysLoad: true, ...(denied.length ? { tools: denied } : {}) };
 }
 
-/** Enabled agents an app is assigned to (their `apps` list it). */
-export const appAgents = (config: Config, appId: string): AgentSpec[] => enabledAgents(config.team).filter((a) => a.apps.includes(appId));
+/**
+ * Enabled agents that may use an app: those it is assigned to (their `apps`
+ * list it), and none for an owner-only app, whatever its assignments.
+ */
+export const appAgents = (config: Config, appId: string): AgentSpec[] => {
+  const app = config.apps.find((a) => a.id === appId);
+  if (app && appOwnerOnly(app)) return [];
+  return enabledAgents(config.team).filter((a) => a.apps.includes(appId));
+};
+
+/** The server keys of the enabled owner-only apps: their tools are never a subagent's (pointer.ts). */
+export const ownerOnlyAppKeys = (config: Pick<Config, "apps">): string[] => config.apps.filter((a) => a.enabled && appOwnerOnly(a)).map(appServerKey);
+
+/** The enabled apps that read the owner's inbox (Gmail, Google Chat), by server key and name: gated like the Slack inbox (afterInboxGate). */
+export const inboxApps = (config: Pick<Config, "apps">): { key: string; name: string }[] =>
+  config.apps.filter((a) => a.enabled && appReadsInbox(a)).map((a) => ({ key: appServerKey(a), name: a.name }));
 
 /** Every agent (enabled or not) an app is assigned to. */
 export const appAgentIds = (config: Config, appId: string): string[] => config.team.agents.filter((a) => a.apps.includes(appId)).map((a) => a.id);
@@ -240,7 +262,11 @@ function chatRule(app: AppConnection, agents: AgentSpec[]): string {
     app.access === "write"
       ? `You may change things in ${app.name} with its tools when someone asks for it; say what you changed.`
       : `It is read-only: you can look things up in ${app.name} but not change anything there.`;
-  const who = agents.length ? `Agents that can also look things up in it: ${agents.map((a) => a.id).join(", ")}.` : "No agent has it, only you.";
+  const who = appOwnerOnly(app)
+    ? "It is the owner's own account, only for them: no agent has it, and you never use it for anyone else or tell anyone else what is in it."
+    : agents.length
+      ? `Agents that can also look things up in it: ${agents.map((a) => a.id).join(", ")}.`
+      : "No agent has it, only you.";
   return `- ${app.name} is connected (tools mcp__${appServerKey(app)}__*).${purpose ? ` ${purpose}` : ""} ${access} ${who} ${UNTRUSTED}`;
 }
 
@@ -250,13 +276,17 @@ const unavailableRule = (app: AppConnection, reason: string) =>
 /**
  * One chat integration per enabled app: its server and tool names when it
  * can be used now, otherwise only a rule saying why not. Read-only tools go
- * to the agents the app is assigned to (agentIds, possibly none). Runs in
- * the web service: OAuth tokens are renewed shortly before they expire.
+ * to the agents the app is assigned to (agentIds, possibly none). An
+ * owner-only app is offered only in the owner's own requests (ownerRequest:
+ * the console, their DM with Pointer, their own routine), to no agent, and
+ * is not even mentioned anywhere else. Runs in the web service: OAuth tokens
+ * are renewed shortly before they expire.
  */
 export async function appChatIntegrations(config: Config, ctx: ChatIntegrationContext, deps: AppDeps = {}): Promise<ChatIntegration[]> {
+  const owners = ownerRequest(ctx);
   return Promise.all(
     config.apps
-      .filter((a) => a.enabled)
+      .filter((a) => a.enabled && (owners || !appOwnerOnly(a)))
       .map(async (app): Promise<ChatIntegration> => {
         const agents = appAgents(config, app.id);
         const base = { key: appServerKey(app), agentIds: agents.map((a) => a.id) };
@@ -283,10 +313,10 @@ export async function appChatIntegrations(config: Config, ctx: ChatIntegrationCo
   );
 }
 
-/** The enabled apps assigned to enabled agents: those a repo task can use. */
+/** The enabled apps assigned to enabled agents: those a repo task can use. Never an owner-only app. */
 const taskApps = (config: Config) => {
   const wanted = new Set(enabledAgents(config.team).flatMap((a) => a.apps));
-  return config.apps.filter((a) => a.enabled && wanted.has(a.id));
+  return config.apps.filter((a) => a.enabled && wanted.has(a.id) && !appOwnerOnly(a));
 };
 
 export interface RepoTaskAppsDeps extends NetGuardOptions {

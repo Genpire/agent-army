@@ -25,6 +25,8 @@ import { ActivityMapper } from "./pointer-activity.js";
 import { createPointerToolServer, githubToolOptions } from "./pointer-tools.js";
 import { FOLLOWUP_TOOL_NAMES } from "../followups/tool-names.js";
 import { INBOX_TOOL_NAME } from "../slack/inbox-tools.js";
+import { GOOGLE_OWNER_TOOL_NAMES } from "../integrations/google/tool-names.js";
+import { inboxApps, ownerOnlyAppKeys } from "../integrations/apps/apps.js";
 import { OUTREACH_LIMITS } from "../slack/outreach.js";
 import { requesterSlackId } from "../slack/slack-tools.js";
 import { tsDate } from "../slack/slack.js";
@@ -439,8 +441,22 @@ async function* singleUserTurn(content: ContentBlockParam[]): AsyncGenerator<SDK
   yield { type: "user", message: { role: "user", content }, parent_tool_use_id: null };
 }
 
-/** Tools no subagent ever calls, whatever the read-only set says: the owner's Slack inbox (their private messages) and follow-ups. */
-const NEVER_FOR_SUBAGENTS = new Set([INBOX_TOOL_NAME, ...FOLLOWUP_TOOL_NAMES]);
+/**
+ * Tools no subagent ever calls, whatever the read-only set says: the owner's
+ * Slack inbox, Gmail and calendar (their private messages and meetings), and
+ * their follow-ups.
+ */
+const NEVER_FOR_SUBAGENTS: ReadonlySet<string> = new Set([INBOX_TOOL_NAME, ...GOOGLE_OWNER_TOOL_NAMES, ...FOLLOWUP_TOOL_NAMES]);
+
+/**
+ * The tools a subagent may call (subagentReadOnlyGate's set): these, without
+ * the owner's inbox, Gmail, calendar and follow-up tools, and without any
+ * tool of an owner-only app (by server key: apps.ts ownerOnlyAppKeys).
+ */
+export function subagentAllowedTools(tools: Iterable<string>, ownerOnlyKeys: readonly string[]): Set<string> {
+  const ownerOnly = ownerOnlyKeys.map((key) => `mcp__${key}__`);
+  return new Set([...tools].filter((t) => !NEVER_FOR_SUBAGENTS.has(t) && !ownerOnly.some((prefix) => t.startsWith(prefix))));
+}
 
 /** PreToolUse hook: inside any subagent, deny every tool outside the read-only set, and the owner's inbox always. */
 export function subagentReadOnlyGate(allowed: Set<string>): HookCallback {
@@ -624,9 +640,8 @@ export function createPointerBrain(
           // Integrations given to some agents only (apps assigned to agents): their read-only tools, per agent.
           const scopedTools = (agentId: string) =>
             connected.filter((i) => i.agentIds?.includes(agentId)).flatMap((i) => i.readOnlyToolNames);
-          // The owner's inbox is read-only but never a subagent's: subagentReadOnlyGate refuses it whatever this set holds.
-          const gateTools = new Set([...subagentTools, ...connected.flatMap((i) => i.readOnlyToolNames)]);
-          for (const never of NEVER_FOR_SUBAGENTS) gateTools.delete(never);
+          // The owner's inbox, Gmail, calendar, follow-ups and owner-only apps are never a subagent's, read-only or not.
+          const gateTools = subagentAllowedTools([...subagentTools, ...connected.flatMap((i) => i.readOnlyToolNames)], ownerOnlyAppKeys(config));
           const allTools = [...builtins, ...tools.allToolNames, ...connected.flatMap((i) => i.allToolNames)];
           // A routine run is offered only the read-only tools, and the writes that only add to the owner's own list
           // (followups_add in their routine); the rest are not loaded at all.
@@ -669,7 +684,7 @@ export function createPointerBrain(
             // is read-only: writes (memory, notes, tickets, repo tasks) only from Pointer itself.
             // Pointer's own memory, notes and app writes need the user's yes once this query
             // has read outside content (confirm-gate.ts); one gate per query holds its taint.
-            // Once it has read the owner's Slack inbox, nothing can carry it out (afterInboxGate).
+            // Once it has read the owner's Slack inbox or Gmail, nothing can carry it out (afterInboxGate).
             hooks: {
               PreToolUse: [
                 {
@@ -687,7 +702,12 @@ export function createPointerBrain(
                       ...(slackSelf ? { requesterSlackId: slackSelf } : {}),
                       ...(relayed ? { tainted: true } : {}),
                     }),
-                    afterInboxGate({ ...(relayed === "inbox" ? { relayed: true } : {}), onInboxRead: () => void (readInbox = true) }),
+                    afterInboxGate({
+                      ...(relayed === "inbox" ? { relayed: true } : {}),
+                      onInboxRead: () => void (readInbox = true),
+                      // Gmail's own MCP server (an app) reads the inbox too.
+                      inboxApps: inboxApps(config).filter((a) => connected.some((i) => i.key === a.key)),
+                    }),
                   ],
                 },
               ],
