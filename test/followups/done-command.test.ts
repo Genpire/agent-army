@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../../src/chat/conversations.js";
 import { deriveKey } from "../../src/core/crypto.js";
-import { doneReply, followupQuickReplies, handleDoneCommand, parseDoneCommand } from "../../src/followups/done-command.js";
+import { doneReply, followupQuickReplies, handleDoneCommand, maybeDoneList, parseDoneCommand } from "../../src/followups/done-command.js";
 import { FollowupStore } from "../../src/followups/store.js";
 import { MemoryStore } from "../routines/helpers.js";
 
@@ -173,6 +173,33 @@ describe("the done command", () => {
     expect(parseDoneCommand("3 تم", shown)).toEqual([3]);
     expect(parseDoneCommand("done 3 and 5", shown)).toEqual([3, 5]);
     expect(parseDoneCommand("4 منتهي", shown)).toEqual([4]);
+  });
+
+  it("reads a slash between numbers as a fraction or a range, never as two items", async () => {
+    const shown = { pointerText: `${LISTED}\n• *#3* Call the bank\n• *#4* Pay rent`, items: new Map([...ITEMS, [4, { title: "Pay rent" }]]) };
+    const followups = new FollowupStore(new MemoryStore(), deriveKey("k"), { batchMs: 0 });
+    for (const title of ["one", "two", "Call the bank", "Pay rent", "five"]) await followups.add({ title, source: "owner" });
+    for (const text of ["3/4 done", "1/2 done", "#3 3/4 done", "done 3/5", "done 3 / 4", "3/4 تم"]) {
+      expect(parseDoneCommand(text), text).toBeUndefined();
+      expect(parseDoneCommand(text, shown), text).toBeUndefined();
+      expect(await handleDoneCommand(followups, text, async () => shown.pointerText, "slack"), text).toBeUndefined();
+    }
+    expect((await followups.list()).length).toBe(5);
+    // Commas, "and", "&" and "+" still list several.
+    expect(parseDoneCommand("done 3, 4 & 5 + 1")).toEqual([3, 4, 5, 1]);
+  });
+
+  it("hands a very long message to Pointer at once, and trims long runs of separators in linear time", async () => {
+    const long = [`done 3${",".repeat(40_000)}x`, `done 3${"-".repeat(40_000)}x`, `3 done${" !".repeat(20_000)}a`, `done 3${" ".repeat(2_000)}please`];
+    const started = performance.now();
+    for (const text of long) {
+      expect(parseDoneCommand(text), text.slice(0, 12)).toBeUndefined();
+      expect(maybeDoneList(text)).toBe(false);
+    }
+    expect(performance.now() - started).toBeLessThan(300);
+    // Under the limit, runs of separators and polite words around a command are still trimmed.
+    expect(parseDoneCommand(`done 3${" ,".repeat(300)} please`)).toEqual([3]);
+    expect(parseDoneCommand(`thanks!!! close 9${".".repeat(500)}`)).toEqual([9]);
   });
 
   it("closes the items and says what was closed, already closed, or not found", async () => {

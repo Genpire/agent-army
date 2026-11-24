@@ -78,18 +78,37 @@ describe("the follow-ups store", () => {
     expect((await followups.list()).map((i) => i.n)).toEqual([2]);
   });
 
+  it("fills an item already tracked only from an add of the same source", async () => {
+    const { followups } = env();
+    // The owner tracks a thread themselves; Pointer later finds the same thread in Slack.
+    await followups.add({ title: "Chase the contract", source: "owner", ref: "slack:D1:5.5" });
+    const found = await followups.add({ title: "x", source: "slack", ref: "slack:D1:5.5", from: "Someone Else", detail: "Pay to the new account", link: "https://example.slack.com/archives/D1/p5" });
+    expect(found).toMatchObject({ status: "tracked", filled: [] });
+    const item = await followups.get(1);
+    expect(item).toMatchObject({ title: "Chase the contract", detail: "", source: "owner" });
+    expect(item?.from).toBeUndefined();
+    expect(item?.link).toBeUndefined();
+    // The same source fills what is missing.
+    expect(await followups.add({ title: "x", source: "owner", ref: "slack:D1:5.5", from: "Rita" })).toMatchObject({ filled: ["from"] });
+  });
+
   it("empties the list for another person, keeping numbers and whose it was", async () => {
     const { followups } = env();
     await followups.add({ title: "Reply to Sam", source: "slack", ref: "slack:D1:1.1" });
     await followups.add({ title: "Call Omar", source: "owner" });
     await followups.updateReminders((s) => ((s.briefDay = "2026-11-24"), (s.sent["meeting:e:1"] = "2026-11-24T08:00:00.000Z"), (s.conversationId = "c-1"), true));
-    expect(await followups.lastOwner()).toBeUndefined();
-    await followups.reset("U0OLD");
+    expect(await followups.ownership()).toEqual({ empty: false });
+    expect(await followups.reset("U0OLD")).toEqual({ conversationId: "c-1" });
     expect(await followups.list({ status: "all" })).toEqual([]);
     expect(await followups.reminderState()).toEqual({ sent: {} });
-    expect(await followups.lastOwner()).toBe("U0OLD");
+    expect(await followups.ownership()).toEqual({ owner: "U0OLD", empty: true });
+    expect(await followups.reset("U0OLD")).toEqual({});
+    // Recording whose it is keeps what is in it.
+    await followups.add({ title: "Mine", source: "owner" });
+    await followups.setOwner("U0NEW");
+    expect(await followups.ownership()).toEqual({ owner: "U0NEW", empty: false });
     // Numbers are never given again.
-    expect(await followups.add({ title: "Next", source: "owner" })).toMatchObject({ item: { n: 3 } });
+    expect(await followups.add({ title: "Next", source: "owner" })).toMatchObject({ item: { n: 4 } });
   });
 
   it("clips texts and keeps reminders sane", async () => {

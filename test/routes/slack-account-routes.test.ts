@@ -60,6 +60,7 @@ describe("the owner's Slack account API", () => {
   let cookie = "";
   let store: Store;
   let followups: FollowupStore;
+  let app: Awaited<ReturnType<typeof createApp>>;
   const post = (path: string, body: unknown, withCookie = true) =>
     fetch(base + path, { method: "POST", headers: { "content-type": "application/json", ...(withCookie ? { cookie } : {}) }, body: JSON.stringify(body) });
   const get = (path: string, withCookie = true) => fetch(base + path, { headers: withCookie ? { cookie } : {} });
@@ -73,7 +74,7 @@ describe("the owner's Slack account API", () => {
 
   beforeAll(async () => {
     const dir = await mkdtemp(join(tmpdir(), "army-slack-user-"));
-    const app = await createApp({ DATA_DIR: dir, MASTER_KEY: "m", SETUP_TOKEN: "setup-123", RUNNER: "local" }, { slack: fakeSlack as never });
+    app = await createApp({ DATA_DIR: dir, MASTER_KEY: "m", SETUP_TOKEN: "setup-123", RUNNER: "local" }, { slack: fakeSlack as never });
     store = app.store;
     followups = app.followups;
     const server = app.app.listen(0);
@@ -224,7 +225,7 @@ describe("the owner's Slack account API", () => {
     await post("/api/slack/user/disconnect", {});
     expect(await followups.list({ status: "all" })).toEqual([]);
     expect(await followups.reminderState()).toEqual({ sent: {} });
-    expect(await followups.lastOwner()).toBe("UNEW");
+    expect((await followups.ownership()).owner).toBe("UNEW");
     // The same person back: their settings stay.
     await followups.add({ title: "Call the bank", source: "owner" });
     expect((await connect("xoxp-second-person-6666")).body).not.toHaveProperty("followupsReset");
@@ -236,6 +237,59 @@ describe("the owner's Slack account API", () => {
     expect((await connect("xoxp-good-token-1111")).body).toMatchObject({ userId: "UOWN", followupsReset: true });
     expect(await followups.list({ status: "all" })).toEqual([]);
     expect(await settings()).toMatchObject({ morningBrief: { enabled: false }, meetingReminderMin: 0 });
+    await post("/api/slack/user/disconnect", {});
+    revoked.length = 0;
+  });
+
+  it("empties the follow-ups before the new account is saved, records whose they are on every connect, and fails closed", async () => {
+    revoked.length = 0;
+    expect((await connect("xoxp-good-token-1111")).status).toBe(200);
+    expect((await followups.ownership()).owner).toBe("UOWN");
+    await followups.add({ title: "Reply to Omar", source: "slack" });
+    // The console conversation the reminders were kept in: the person before's copies.
+    const created = await app.conversations.create("old reminders");
+    if (!created.ok) throw new Error(created.error);
+    const id = created.conversation.id;
+    await app.conversations.idle();
+    await followups.updateReminders((r) => ((r.conversationId = id), true));
+
+    // While the follow-ups are emptied, the old account is still the one saved: no reminder can reach the new one with them.
+    const real = followups.reset.bind(followups);
+    const seen: (string | undefined)[] = [];
+    let fail = true;
+    followups.reset = async (owner) => {
+      seen.push((await account()).userId);
+      if (fail) {
+        fail = false;
+        throw new Error("storage unavailable");
+      }
+      return real(owner);
+    };
+    const quiet = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      // The reset fails: nothing is switched, the old account stays, and the follow-ups are untouched.
+      expect((await connect("xoxp-second-person-6666")).status).toBe(500);
+      expect(await account()).toMatchObject({ userId: "UOWN" });
+      expect(await followups.list()).toHaveLength(1);
+      // Tried again: still a switch.
+      expect((await connect("xoxp-second-person-6666")).body).toMatchObject({ userId: "UNEW", followupsReset: true });
+    } finally {
+      quiet.mockRestore();
+      followups.reset = real;
+    }
+    expect(seen).toEqual(["UOWN", "UOWN"]);
+    expect(await followups.list()).toEqual([]);
+    expect(await followups.ownership()).toEqual({ owner: "UNEW", empty: true });
+    // The old Follow-ups conversation went with them.
+    expect(await app.conversations.view(id)).toBeFalsy();
+
+    // A list kept before whose it is was recorded: connecting the same account again adopts it.
+    await followups.add({ title: "Answer Rita", source: "owner" });
+    const data = followups as unknown as { write: (change: (d: { owner?: string }) => { changed: boolean; result: undefined }) => Promise<void> };
+    await data.write((d) => (delete d.owner, { changed: true, result: undefined }));
+    expect(await followups.ownership()).toEqual({ empty: false });
+    expect((await connect("xoxp-second-person-6666")).body).not.toHaveProperty("followupsReset");
+    expect(await followups.ownership()).toEqual({ owner: "UNEW", empty: false });
     await post("/api/slack/user/disconnect", {});
     revoked.length = 0;
   });

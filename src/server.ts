@@ -1510,7 +1510,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
   // The Routines page's API, and POST /routines/tick for external schedulers (outside /api: its own secret header, no session).
   app.use(routinesRoutes({ ...routeDeps, routines }));
   // The owner's own Slack account: connect, switches, disconnect, the attention report.
-  app.use(slackAccountRoutes({ ...routeDeps, routines, inbox, followups, slack: slackFactory }));
+  app.use(slackAccountRoutes({ ...routeDeps, routines, inbox, followups, conversations, slack: slackFactory }));
   // The owner's follow-ups: the list, add, done, reopen, snooze, and the reminders' settings.
   app.use(followupsRoutes({ ...routeDeps, followups }));
   app.use(chatRoutes({ ...routeDeps, conversations }));

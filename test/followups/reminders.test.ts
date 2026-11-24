@@ -105,6 +105,8 @@ async function setup(opts: { account?: boolean; calendar?: CalendarSource; email
   });
   const clock = new Clock(Date.parse("2026-11-24T06:00:00Z"));
   const followups = new FollowupStore(new MemoryStore(), KEY, { now: clock.now, batchMs: 0 });
+  // Recorded when the owner connected their account (routes/slack-account.ts): the list is theirs.
+  if (opts.account !== false) await followups.setOwner(OWNER);
   const slack = fakeSlack();
   const threads = fakeThreads();
   const make = () =>
@@ -236,6 +238,37 @@ describe("the reminders", () => {
     });
     expect((await failing.tick(new Date("2026-11-24T13:00:00Z"))).items).toEqual([]);
     expect((await t.tick("2026-11-24T13:01:00Z")).items).toEqual([1]);
+  });
+
+  it("send nothing while the list is not the connected account's, and say why once", async () => {
+    const t = await setup({ calendar: fakeCalendar(EVENTS).calendar });
+    await t.followups.add({ title: "Answer the old owner's boss", source: "slack", remindAt: "2026-11-24T06:00:00Z" });
+    // A switch that stopped half-way: the list was emptied for someone else, or kept for the person before.
+    await t.followups.setOwner("U0SOMEONEELSE");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      for (const at of ["2026-11-24T06:30:00Z", "2026-11-24T06:31:00Z", "2026-11-24T06:50:00Z"]) {
+        expect(await t.tick(at), at).toMatchObject({ brief: false, items: [], meetings: [], skipped: expect.stringContaining("belong to another Slack account") });
+      }
+      expect(t.slack.messages).toEqual([]);
+      expect(warn.mock.calls.filter((c) => String(c[0]).includes("paused"))).toHaveLength(1);
+
+      // Items whose owner was never recorded: unknown, so nothing either.
+      const unknown = await setup();
+      const bare = new FollowupStore(new MemoryStore(), KEY, { batchMs: 0 });
+      await bare.add({ title: "Someone's item", source: "slack", remindAt: "2026-11-24T06:00:00Z" });
+      const r = new FollowupReminders({ configRepo: unknown.configRepo, followups: bare, slack: unknown.slack.slack });
+      expect(await r.tick(new Date("2026-11-24T06:30:00Z"))).toMatchObject({ brief: false, items: [], skipped: expect.stringContaining("do not say which Slack account") });
+      expect(unknown.slack.messages).toEqual([]);
+      // An empty list without an owner holds nothing of anyone's: the brief goes.
+      const empty = new FollowupReminders({ configRepo: unknown.configRepo, followups: new FollowupStore(new MemoryStore(), KEY, { batchMs: 0 }), slack: unknown.slack.slack });
+      expect((await empty.tick(new Date("2026-11-24T06:30:00Z"))).brief).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+    // Once the list is theirs again, the reminders go.
+    await t.followups.setOwner(OWNER);
+    expect((await t.tick("2026-11-24T06:32:00Z")).brief).toBe(true);
   });
 
   it("never post twice: a tick that starts while the one before still runs is skipped", async () => {

@@ -31,6 +31,11 @@
  * (done-command.ts, without the model). Nothing of an item or an event is
  * logged.
  *
+ * Only the connected account's own list is reminded: while the list says it
+ * is someone else's (a switch of the owner's Slack account that did not
+ * finish), or a list with items does not say whose it is, nothing is sent
+ * (remindersPaused) until the owner connects their account again.
+ *
  * Nothing goes twice: a tick that starts while the one before it still runs
  * (a slow calendar, Google's retries) is skipped, and what was posted is
  * remembered in this process at once, before it is recorded in the store,
@@ -202,6 +207,21 @@ export function meetingText(events: CalendarEvent[], now: Date, timeZone: string
 
 // ---------- The reminders ----------
 
+/**
+ * Why nothing may be sent to the Slack account connected now (`userId`), or
+ * undefined: the list is another account's (store.ts owner: a switch that
+ * did not finish), or it has items and does not say whose they are (kept
+ * before that was recorded). Connecting the account again settles it: the
+ * list is emptied for another person or kept as theirs (routes/slack-account.ts).
+ */
+export async function remindersPaused(store: Pick<FollowupStore, "ownership">, userId: string): Promise<string | undefined> {
+  const { owner, empty } = await store.ownership();
+  if (owner === userId || (owner === undefined && empty)) return undefined;
+  return owner === undefined
+    ? "Reminders are paused: your follow-ups do not say which Slack account they belong to (they were kept before this was recorded). Connect your Slack account again on the Integrations page to keep them as yours."
+    : "Reminders are paused: your follow-ups belong to another Slack account than the one connected. Connect your Slack account again on the Integrations page.";
+}
+
 export interface ReminderDeps {
   configRepo: Pick<ConfigRepo, "load">;
   followups: FollowupStore;
@@ -231,6 +251,8 @@ export class FollowupReminders {
   private upcoming: { at: number; from: number; to: number; events: CalendarEvent[] } | undefined;
   /** A tick is under way: one that starts meanwhile is skipped. */
   private running = false;
+  /** Why the reminders are paused (remindersPaused), so it is logged once, not every minute. */
+  private paused: string | undefined;
   /**
    * What this process posted, kept the moment the DM went: the brief's local
    * day, each item with when it was reminded, each meeting reminder's key
@@ -266,9 +288,16 @@ export class FollowupReminders {
     const owner = config.slack.user?.userId;
     const token = config.slack.botToken;
     if (!owner || !token) return { ...out, skipped: "No Slack account of the owner's is connected." };
+    const store = this.deps.followups;
+    // Only the connected account's own list: never someone else's items, whatever happened half-way through a switch.
+    const paused = await remindersPaused(store, owner);
+    if (paused !== this.paused) {
+      if (paused) console.warn(`[followups] ${paused.replace(/your /g, "the owner's ").replace(/ on the Integrations page.*$/, "")}`);
+      this.paused = paused;
+    }
+    if (paused) return { ...out, skipped: paused };
     const tz = zoneOf(config.timezone);
     const settings = config.followups;
-    const store = this.deps.followups;
     const state = await store.reminderState();
     const open = await store.list({ status: "open" });
     this.forget(open, now);

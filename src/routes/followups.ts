@@ -9,6 +9,7 @@
 import { type Request, type Response, Router } from "express";
 import { z } from "zod";
 import { type FollowupSettings, FollowupSettingsSchema } from "../core/config.js";
+import { remindersPaused } from "../followups/reminders.js";
 import { FOLLOWUP_LIMITS, type FollowupStore } from "../followups/store.js";
 import { parseWhen, zoneOf } from "../followups/time.js";
 import type { IntegrationRouteDeps } from "./types.js";
@@ -69,7 +70,10 @@ export function followupsRoutes(deps: Pick<IntegrationRouteDeps, "configRepo" | 
     const query = parse(LIST, req.query, res);
     if (!query) return;
     const [items, config] = await Promise.all([followups.list({ status: query.status ?? "open" }), configRepo.load()]);
-    res.json({ items, settings: config.followups });
+    const user = config.slack.user?.userId;
+    // Why no reminder goes out now although an account is connected (the list is not that account's), for the page.
+    const paused = user ? await remindersPaused(followups, user) : undefined;
+    res.json({ items, settings: config.followups, ...(paused ? { paused } : {}) });
   });
 
   router.post("/api/followups", requireAdmin, async (req, res) => {

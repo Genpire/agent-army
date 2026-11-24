@@ -21,7 +21,7 @@ import { type Polled, usePolled } from "../activity/usePolled";
 import { AddFollowupDialog } from "./AddFollowupDialog";
 import { FollowupList as ItemList } from "./FollowupList";
 import { type FollowupItem, type FollowupList, type FollowupSaved, atText, isSnoozed, itemPath, listPath } from "./model";
-import { SlackDmNote } from "./ReadinessNotes";
+import { PausedNote, SlackDmNote } from "./ReadinessNotes";
 import { ReminderSettings } from "./ReminderSettings";
 import { SnoozeDialog } from "./SnoozeDialog";
 import { useOptimisticItems } from "./useOptimisticItems";
@@ -178,6 +178,7 @@ export default function FollowupsPage() {
       }>
       <VStack gap={6}>
         {tab !== "done" && <SlackDmNote />}
+        {tab !== "done" && <PausedNote reason={open.data?.paused} />}
 
         {tab === "open" &&
           (open.error && !open.data ? (

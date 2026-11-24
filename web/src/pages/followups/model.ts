@@ -15,6 +15,8 @@ export type { FollowupItem, FollowupSettings, FollowupSource, FollowupStatus };
 export interface FollowupList {
   items: FollowupItem[];
   settings: FollowupSettings;
+  /** Why no reminder goes out although a Slack account is connected: the follow-ups are not that account's. */
+  paused?: string;
 }
 
 /** POST /api/followups, /:n/done, /:n/reopen, /:n/snooze */

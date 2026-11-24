@@ -8,7 +8,8 @@
  *   pruned: "done 12" always means the same item.
  * - One thing is one item: adding an open item's `ref` again changes nothing
  *   the item already says (its title, link, reminder, snooze stay), at most
- *   fills in a detail or a sender it lacked; a closed one stays closed. Only
+ *   fills in a detail, a sender or a link it lacked when the add names the
+ *   same source as the item; a closed one stays closed. Only
  *   the owner reopens an item (the console: reopen), never an add, whatever
  *   time it claims the thing happened again: what Pointer adds comes from
  *   what it read, and that may be someone's planted message.
@@ -16,6 +17,11 @@
  *   closed, then dropped, the oldest first when the list is full. Open items
  *   are never dropped: a new one is refused while 2 000 are open.
  * - Texts are clipped; a source's text is outside content (detail).
+ *
+ * - The list is one person's: the Slack user it belongs to (`owner`) is
+ *   recorded on every connect of the owner's account, and the list is
+ *   emptied for another person (routes/slack-account.ts). The reminders
+ *   send nothing while it is not the account connected (reminders.ts).
  *
  * Changes are written at most about once a second (Cloud Storage takes about
  * one write per second per object): the first after a quiet second at once,
@@ -68,9 +74,11 @@ interface FollowupData {
   items: FollowupItem[];
   reminders: ReminderState;
   /**
-   * The Slack user the list was last emptied for (reset): kept so that
-   * connecting another person after a disconnect is still seen as a switch
-   * (routes/slack-account.ts).
+   * The Slack user whose list this is (config.slack.user.userId): recorded
+   * on every connect (setOwner) and when the list is emptied for someone
+   * (reset), and kept across a disconnect, so that connecting another person
+   * later is still seen as a switch (routes/slack-account.ts). Absent on a
+   * list kept before it was recorded: whose it is is then unknown.
    */
   owner?: string;
 }
@@ -339,22 +347,34 @@ export class FollowupStore {
    * Empties the list for another person (routes/slack-account.ts: their
    * Slack account was switched or disconnected): every item and what the
    * reminders remember go; numbers are still never reused. `owner` is the
-   * Slack user it was emptied for (FollowupData.owner).
+   * Slack user it is emptied for (FollowupData.owner). Resolves with the
+   * console conversation the reminders were kept in, for the caller to
+   * delete (its copies were the person before's).
    */
-  reset(owner: string | undefined): Promise<void> {
+  reset(owner: string): Promise<{ conversationId?: string }> {
     return this.write((data) => {
+      const { conversationId } = data.reminders;
       const changed = data.items.length > 0 || JSON.stringify(data.reminders) !== JSON.stringify({ sent: {} }) || data.owner !== owner;
       data.items = [];
       data.reminders = { sent: {} };
-      if (owner) data.owner = owner;
-      else delete data.owner;
-      return { changed, result: undefined };
+      data.owner = owner;
+      return { changed, result: conversationId ? { conversationId } : {} };
     });
   }
 
-  /** The Slack user the list was last emptied for, if any (reset). */
-  async lastOwner(): Promise<string | undefined> {
-    return (await this.current()).owner;
+  /** Records whose list this is (the account connected now), keeping what is in it. */
+  setOwner(owner: string): Promise<void> {
+    return this.write((data) => {
+      if (data.owner === owner) return { changed: false, result: undefined };
+      data.owner = owner;
+      return { changed: true, result: undefined };
+    });
+  }
+
+  /** The Slack user whose list this is, if recorded (FollowupData.owner), and whether it holds any item, open or closed. */
+  async ownership(): Promise<{ owner?: string; empty: boolean }> {
+    const data = await this.current();
+    return { ...(data.owner ? { owner: data.owner } : {}), empty: data.items.length === 0 };
   }
 
   /** Changes what the reminders remember; `change` returns false when it changes nothing. */
@@ -502,14 +522,16 @@ function cleanFields(input: NewFollowup): Fields {
 export type FillableField = "detail" | "from" | "link";
 
 /**
- * Fills in what an item already tracked lacks: a detail and a sender, and
- * a link when the add says the same source (whose links tools.ts checks).
- * Never its title, link, reminder, repeat or snooze: changing those is
+ * Fills in what an item already tracked lacks (a detail, a sender, a link),
+ * only when the add names the same source as the item: what Pointer found in
+ * Slack never fills in the owner's own item, nor one from Gmail. Never its
+ * title, link, reminder, repeat or snooze: changing those is
  * followups_update's, which needs the owner's yes after outside content.
  * Returns the fields filled.
  */
 function fillEmpty(item: FollowupItem, fields: Fields, source: FollowupSource): FillableField[] {
   const filled: FillableField[] = [];
+  if (source !== item.source) return filled;
   if (fields.detail && !item.detail) {
     item.detail = fields.detail;
     filled.push("detail");
@@ -518,7 +540,7 @@ function fillEmpty(item: FollowupItem, fields: Fields, source: FollowupSource): 
     item.from = fields.from;
     filled.push("from");
   }
-  if (fields.link && !item.link && source === item.source) {
+  if (fields.link && !item.link) {
     item.link = fields.link;
     filled.push("link");
   }

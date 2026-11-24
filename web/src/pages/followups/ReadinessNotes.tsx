@@ -34,6 +34,20 @@ export function SlackDmNote() {
   );
 }
 
+/** A warning when reminders are paused because the follow-ups are not the connected account's (the server says why); nothing otherwise. */
+export function PausedNote({ reason }: { reason: string | undefined }) {
+  if (!reason) return null;
+  return (
+    <Banner
+      status="warning"
+      title="Reminders are paused"
+      description={reason}
+      collapsible={false}
+      endContent={<Button label="Connect your account" size="sm" href={href("integrations", "slack")} />}
+    />
+  );
+}
+
 /** Whether a Google app (Calendar, Gmail) can be read, and the way to fix it when it cannot. */
 export function AppNote({ readiness, name, without }: { readiness: AppReadiness; name: string; /** What is missing until it is connected. */ without: string }) {
   if (readiness.state === "ready") return <StatusLine tone="success" text={`Using your ${name}`} />;

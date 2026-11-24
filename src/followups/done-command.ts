@@ -19,9 +19,10 @@
  * Polite words around it are fine ("done 3 please", "thanks, close 9").
  * A close word counts only as a whole word ("undone" is not "done"). Any
  * line with a negation ("3 not done", "3 isn't done", "3 ما تم", "4 مش
- * منتهي") or a range between numbers ("3-5 done", "3 to 5 done", "3 الى 5")
- * makes the whole message Pointer's, as does anything else (a question,
- * words in between, a list whose numbers Pointer did not show).
+ * منتهي") or a range or fraction between numbers ("3-5 done", "3 to 5
+ * done", "3 الى 5", "3/4 done") makes the whole message Pointer's, as does
+ * anything else (a question, words in between, a list whose numbers Pointer
+ * did not show, a message longer than a command ever is).
  */
 import type { QuickReplies } from "../chat/conversations.js";
 import { type Target, shortLabel } from "./format.js";
@@ -30,22 +31,31 @@ import type { FollowupItem } from "./types.js";
 
 /** Items closed by one message at most. */
 const MAX_NUMBERS = 30;
+/**
+ * The longest message read as a command: anything longer goes to Pointer
+ * unparsed (a list of the brief's 15 items with their names fits easily),
+ * so no message, however long, costs the parsing more than a moment.
+ */
+const MAX_COMMAND_CHARS = 1_000;
 
 const DONE_WORDS = "done|closed|close|complete|completed|finished|finish|تم|تمت|خلص|خلصت|خلصنا|انتهى|انتهي|انتهت|اغلق|اغلقت|سكر|سكرت|منتهي";
 /** A close word, whole: nothing of a word before it ("undone", "ماتم") or letters after it ("doneish"). */
 const DONE = `(?<![\\p{L}\\p{N}])(?:${DONE_WORDS})(?!\\p{L})`;
 const FILLER = "please|pls|plz|thanks|thank you|thx|ok|okay|شكرا|لو سمحت|من فضلك";
 const NUM = "#?\\d{1,6}";
-/** Between numbers: a comma (Arabic too), &, +, /, "and", "و" (Arabic "and", also written on the number), or a space. */
-const SEP = "(?:\\s*[,،&+/]\\s*(?:and\\s+|و\\s*)?|\\s+and\\s+|\\s*و\\s*|\\s+)";
+/** Between numbers: a comma (Arabic too), &, +, "and", "و" (Arabic "and", also written on the number), or a space. Not "/": "3/4" reads as a fraction. */
+const SEP = "(?:\\s*[,،&+]\\s*(?:and\\s+|و\\s*)?|\\s+and\\s+|\\s*و\\s*|\\s+)";
 const NUMLIST = `${NUM}(?:${SEP}${NUM}){0,${MAX_NUMBERS - 1}}`;
 
 const WORD_FIRST = new RegExp(`^(?:mark\\s+)?(?:${DONE})\\s*[:\\-–—]?\\s*(${NUMLIST})$`, "u");
 const NUMBERS_FIRST = new RegExp(`^(?:mark\\s+)?(${NUMLIST})\\s*[:\\-–—]?\\s*(?:(?:is|are|as|all)\\s+)*(?:${DONE})$`, "u");
 /** One line of a list: "1. Omar (DM) - done", "- #3 Reply to Sam: done", "2) تم". */
 const LIST_LINE = new RegExp(`^[-•]?\\s*#?(\\d{1,6})\\s*[.):\\-–—]?\\s*(.*?)\\s*[-–—:,(]?\\s*(?:(?:is|are)\\s+)?(?:${DONE})\\s*\\)?$`, "u");
+const FILLER_WORDS = FILLER.split("|");
+/** A polite word at the start and the separators after it: anchored, so linear. */
 const LEADING_FILLER = new RegExp(`^(?:${FILLER})(?:[\\s,،.!:-]+|$)`, "u");
-const TRAILING_FILLER = new RegExp(`(?:^|[\\s,،.!:-]+)(?:${FILLER})$`, "u");
+const isSeparator = (c: string) => /[\s,،.!:-]/u.test(c);
+const isEndPunctuation = (c: string) => /[\s.!،,]/u.test(c);
 
 /**
  * A negation anywhere in a line: "not", "no", "never", "yet", "isn't",
@@ -60,8 +70,8 @@ const NEGATION = new RegExp(
   ].join("|"),
   "u",
 );
-/** A range between two numbers: "3-5", "3 – 5", "3 to 5", "3 through 5", "3 الى 5", "3 لـ 5", "3 حتى 5". */
-const RANGE = /\d\s*(?:[-–—~]|\.\.|(?:to|through|thru|till|until|ال[ىي]|حت[ىي]|ل)(?![\p{L}]))\s*#?\d/u;
+/** A range or a fraction between two numbers: "3-5", "3 – 5", "3 to 5", "3 through 5", "3 الى 5", "3 لـ 5", "3 حتى 5", "3/4". */
+const RANGE = /\d\s*(?:[-–—~/]|\.\.|(?:to|through|thru|till|until|ال[ىي]|حت[ىي]|ل)(?![\p{L}]))\s*#?\d/u;
 
 /** Words too common to tell two items apart, and the source names Pointer's lines carry. */
 const STOP_WORDS = new Set(["the", "and", "for", "with", "from", "about", "reply", "via", "you", "your", "dm", "in", "to", "re", "slack", "gmail", "email", "mail", "calendar"]);
@@ -80,12 +90,34 @@ export function normalizeCommand(text: string): string {
     .toLowerCase();
 }
 
+/**
+ * `s` without the characters at its end that `drop` matches. A loop, not a
+ * regex ending in `[…]+$`, which retries from every character of a long run
+ * of separators and takes seconds on one.
+ */
+function trimEnd(s: string, drop: (c: string) => boolean): string {
+  let end = s.length;
+  while (end > 0 && drop(s[end - 1]!)) end -= 1;
+  return s.slice(0, end);
+}
+
+/** `s` without a polite word at its end and the separators before it ("done 3, please"); `s` when it ends in none. */
+function dropTrailingFiller(s: string): string {
+  for (const word of FILLER_WORDS) {
+    if (!s.endsWith(word)) continue;
+    const before = s.slice(0, s.length - word.length);
+    if (before === "") return "";
+    if (isSeparator(before.at(-1)!)) return trimEnd(before, isSeparator);
+  }
+  return s;
+}
+
 /** A line without polite words around it and the punctuation that ends it. */
 function trimLine(line: string): string {
   let s = line.replace(/\s+/g, " ").trim();
   for (let i = 0; i < 3; i++) {
     const before = s;
-    s = s.replace(LEADING_FILLER, "").replace(TRAILING_FILLER, "").replace(/[\s.!،,]+$/u, "").trim();
+    s = trimEnd(dropTrailingFiller(s.replace(LEADING_FILLER, "")), isEndPunctuation).trim();
     if (s === before) break;
   }
   return s;
@@ -118,6 +150,7 @@ export interface DoneListContext {
  * items, for the list form; without it a list is not a command.
  */
 export function parseDoneCommand(text: string, list?: DoneListContext): number[] | undefined {
+  if (text.length > MAX_COMMAND_CHARS) return undefined;
   const normalized = normalizeCommand(text);
   if (/[?؟]/.test(normalized)) return undefined;
   const lines = normalized
@@ -151,6 +184,7 @@ export function parseDoneCommand(text: string, list?: DoneListContext): number[]
 
 /** Whether a message could be a list that needs Pointer's last message to be read: lines that start with a number and end with a close word. */
 export function maybeDoneList(text: string): boolean {
+  if (text.length > MAX_COMMAND_CHARS) return false;
   const normalized = normalizeCommand(text);
   return normalized
     .split(/\r?\n/)

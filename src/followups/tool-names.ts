@@ -1,3 +1,5 @@
+import { linkSource } from "./links.js";
+
 /** The names of Pointer's follow-up tools (the "followups" MCP server), for the chat integration and the confirm gate. */
 export const FOLLOWUPS_SERVER_KEY = "followups";
 export const FOLLOWUP_TOOLS = ["followups_list", "followups_add", "followups_done", "followups_snooze", "followups_update"] as const;
@@ -34,15 +36,19 @@ const FOUND_SOURCES: ReadonlySet<string> = new Set(["slack", "gmail", "calendar"
  * has read outside content (confirm-gate.ts, in the owner's conversation):
  * when it adds the item as the owner's own (source "owner", or none, which
  * means the owner), so it would be shown without a source like one they
- * asked for; or with a reminder (remind_at, repeat_min), so it would nag
- * them on its own. What Pointer found, labelled with its source and
- * without a reminder, goes straight in: listing it is what reading the
+ * asked for; with a reminder (remind_at, repeat_min), so it would nag them
+ * on its own; or with a link that is not a real source's (a Slack
+ * permalink, a Gmail thread, a calendar event: links.ts), so a planted
+ * message cannot put its own link in the brief as something Pointer found.
+ * What Pointer found, labelled with its source, without a reminder and
+ * linking to where it is, goes straight in: listing it is what reading the
  * inbox is for. A routine run never gets this far: its tool refuses
- * "owner" and sets no reminder (tools.ts).
+ * "owner", sets no reminder and leaves such a link out (tools.ts).
  */
 export function followupAddNeedsYes(input: unknown): boolean {
   const args = input && typeof input === "object" ? (input as Record<string, unknown>) : {};
   if (typeof args.source !== "string" || !FOUND_SOURCES.has(args.source)) return true;
   if (args.remind_at !== undefined && args.remind_at !== null && String(args.remind_at).trim() !== "") return true;
+  if (args.link !== undefined && args.link !== null && args.link !== "" && linkSource(String(args.link)) === undefined) return true;
   return args.repeat_min !== undefined && args.repeat_min !== null && args.repeat_min !== 0;
 }

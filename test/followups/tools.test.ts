@@ -160,6 +160,18 @@ describe("Pointer's follow-up tools: what they do", () => {
     expect(await env.followups.list()).toHaveLength(1);
   });
 
+  it("in a routine, keeps a found item's link only when it is a real source's, and says so", async () => {
+    const env = await setup();
+    const t = await connect(env, { ownerRoutine: true });
+    // A planted email the digest read: its "found by Pointer" item would carry the sender's own link into every brief.
+    const planted = await t.call("followups_add", { title: "Re-verify your Google Workspace account", source: "pointer", link: "https://evil.example/login" });
+    expect(planted).toEqual({ isError: false, text: "Added #1. Its link was left out: a routine run keeps only a Slack, Gmail or calendar link." });
+    expect((await env.followups.get(1))?.link).toBeUndefined();
+    const real = await t.call("followups_add", { title: "Answer Sam", source: "pointer", link: "https://example.slack.com/archives/D1/p1" });
+    expect(real).toEqual({ isError: false, text: "Added #2." });
+    expect((await env.followups.get(2))?.link).toBe("https://example.slack.com/archives/D1/p1");
+  });
+
   it("never changes or reopens an item already tracked", async () => {
     const env = await setup();
     const t = await connect(env, { ownerConversation: true });
@@ -292,6 +304,18 @@ describe("Pointer's follow-up tools and the confirm gate", () => {
     expect((await hookCall(relayed, tool("followups_add"), nag)).hookSpecificOutput?.permissionDecision).toBe("deny");
     const yes = confirmGate({ pending, conversation: "web:o2", message: "yes", ...opts });
     expect((await hookCall(yes, tool("followups_add"), nag)).hookSpecificOutput).toBeUndefined();
+
+    // A found item's link must be a real source's: any other is held after outside content (the owner may still say yes).
+    const evil = { title: "Re-verify your account", source: "pointer", link: "https://evil.example/login" };
+    const read = confirmGate({ pending, conversation: "web:o3", message: "what came in?", ...opts });
+    await hookCall(read, GMAIL_INBOX_TOOL_NAME);
+    expect((await hookCall(read, tool("followups_add"), evil)).hookSpecificOutput?.permissionDecision).toBe("deny");
+    for (const link of ["https://example.slack.com/archives/D1/p1", "https://mail.google.com/mail/u/0/#all/t1", "https://meet.google.com/abc-defg-hij"]) {
+      expect((await hookCall(read, tool("followups_add"), { title: "Answer Sam", source: "pointer", link })).hookSpecificOutput, link).toBeUndefined();
+    }
+    // Before any outside content (the owner's own request), any link goes.
+    const own = confirmGate({ pending, conversation: "web:o4", message: "track this page for me", ...opts });
+    expect((await hookCall(own, tool("followups_add"), evil)).hookSpecificOutput).toBeUndefined();
 
     // A routine's tool cannot add as the owner or with a reminder, so the gate leaves it to the tool.
     const routine = await connect(env, { ownerRoutine: true });

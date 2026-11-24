@@ -11,14 +11,20 @@
  *
  * The follow-ups and their reminders go to whoever this account is, so they
  * go with the account: connecting another person's account (than the one
- * connected, or the one disconnected last) starts them with an empty inbox,
- * no follow-ups, and the morning brief and the meeting reminders off (both
- * show the calendar connected for the person before; the owner turns them on
- * again on the Follow-ups page once the calendar is theirs).
+ * connected, or the one the follow-ups belong to) starts them with an empty
+ * inbox, no follow-ups, a new console Follow-ups conversation, and the
+ * morning brief and the meeting reminders off (both show the calendar
+ * connected for the person before; the owner turns them on again on the
+ * Follow-ups page once the calendar is theirs). The follow-ups are emptied
+ * before the new account is saved, so no reminder can reach it with the
+ * person before's items, and a connect that fails half-way is still a switch
+ * when tried again. Every connect records whose the follow-ups are (store.ts
+ * owner); the reminders send nothing while it is not the account connected.
  */
 import { type Request, type Response, Router } from "express";
 import { z } from "zod";
 import type { Config } from "../core/config.js";
+import type { ConversationService } from "../chat/conversations.js";
 import type { FollowupStore } from "../followups/store.js";
 import type { RoutineService } from "../routines/service.js";
 import type { SlackInbox } from "../slack/inbox.js";
@@ -126,11 +132,24 @@ export function slackAccountRoutes(
   deps: IntegrationRouteDeps & {
     routines: RoutineService;
     inbox: SlackInbox;
-    followups: Pick<FollowupStore, "reset" | "lastOwner">;
+    followups: Pick<FollowupStore, "reset" | "setOwner" | "ownership">;
+    /** The console, where the reminders' copies of the person before are deleted. */
+    conversations?: Pick<ConversationService, "remove">;
     slack: (token: string) => SlackAuthClient;
   },
 ): Router {
   const { configRepo, requireAdmin, routines, inbox, followups } = deps;
+
+  /** Empties the follow-ups for `owner`, and deletes the console conversation that kept the reminders of the person before. */
+  const resetFollowups = async (owner: string) => {
+    const { conversationId } = await followups.reset(owner);
+    if (conversationId) {
+      await deps.conversations?.remove(conversationId).catch((err: unknown) => {
+        console.error("[slack] the previous account's Follow-ups conversation was not deleted:", (err instanceof Error ? err.message : String(err)).slice(0, 200));
+        return false;
+      });
+    }
+  };
   const router = Router();
   // With SKIP_VALIDATION=1 (tests) a token was never checked with Slack, so nothing is sent to it.
   const revoke = (token: string) => (process.env.SKIP_VALIDATION === "1" ? Promise.resolve(true) : revokeSlackToken(deps.slack(token)));
@@ -160,16 +179,25 @@ export function slackAccountRoutes(
         return void res.status(400).json({ error: redact((err as Error).message) });
       }
     }
-    // Whose the follow-ups are: the account connected now, else the one they were emptied for at its disconnect.
-    const lastOwner = await followups.lastOwner();
-    const replaced: { user?: SlackUser; switched?: boolean } = {};
+    // Another person than the account connected now, or than the one the follow-ups belong to (kept across a
+    // disconnect, and set before a switch is saved): a switch.
+    const { owner: listOwner } = await followups.ownership();
+    const switched = [config.slack.user?.userId, listOwner].some((id) => id !== undefined && id !== info.userId);
+    if (switched) {
+      // Emptied before the new account is saved: a reminder in between finds no account of theirs or an empty list,
+      // and a failure here leaves the old account connected, so trying again is still a switch.
+      await inbox.clear();
+      await resetFollowups(info.userId);
+    } else {
+      // Their own list (also one kept before whose it is was recorded).
+      await followups.setOwner(info.userId);
+    }
+    const replaced: { user?: SlackUser } = {};
     await configRepo.update((c) => {
       const previous = c.slack.user;
       replaced.user = previous;
-      const before = previous?.userId ?? lastOwner;
-      replaced.switched = before !== undefined && before !== info.userId;
       // Another person: the brief and the meeting reminders would show them the calendar connected for the one before.
-      if (replaced.switched) {
+      if (switched) {
         c.followups.morningBrief.enabled = false;
         c.followups.meetingReminderMin = 0;
       }
@@ -183,12 +211,6 @@ export function slackAccountRoutes(
       };
     });
     const previous = replaced.user;
-    // Another person's account starts with an empty inbox (what was still on its way to the old one is dropped), and
-    // without the follow-ups and reminders of the one before.
-    if (replaced.switched) {
-      await inbox.clear();
-      await followups.reset(info.userId);
-    }
     // The token it replaces is revoked: it stops working, and Slack stops sending that account's conversations.
     const previousRevoked = previous && previous.token !== input.token ? await revoke(previous.token) : undefined;
     const missingScopes = SLACK_USER_SCOPES.filter((s) => !info.scopes.includes(s));
@@ -198,7 +220,7 @@ export function slackAccountRoutes(
       userName: info.userName,
       missingScopes,
       ...(previousRevoked === undefined ? {} : { previousRevoked }),
-      ...(replaced.switched ? { followupsReset: true } : {}),
+      ...(switched ? { followupsReset: true } : {}),
     });
   });
 
@@ -223,15 +245,16 @@ export function slackAccountRoutes(
   // conversations. `revoked` false: Slack did not confirm it, and the page says to remove the app's access in Slack.
   // The disconnect stands either way. The attention report stays: it says the inbox is not there.
   router.post("/api/slack/user/disconnect", requireAdmin, async (_req, res) => {
-    const removed: { token?: string; userId?: string } = {};
+    // The follow-ups go with the account, emptied first (a failure leaves it connected); whose they were is kept, so
+    // connecting someone else later is seen as a switch.
+    const connected = (await configRepo.load(true)).slack.user?.userId;
+    if (connected) await resetFollowups(connected);
+    const removed: { token?: string } = {};
     await configRepo.update((c) => {
       removed.token = c.slack.user?.token;
-      removed.userId = c.slack.user?.userId;
       delete c.slack.user;
     });
     await inbox.clear();
-    // The follow-ups go with the account; whose they were is kept, so connecting someone else later is seen as a switch.
-    if (removed.userId) await followups.reset(removed.userId);
     res.json({ ok: true, revoked: removed.token ? await revoke(removed.token) : true });
   });
 

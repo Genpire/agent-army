@@ -2,10 +2,12 @@ import { mkdtemp } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import express from "express";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { ConfigRepo } from "../../src/core/config.js";
 import { deriveKey } from "../../src/core/crypto.js";
 import { FsStore } from "../../src/core/store.js";
+import { followupsRoutes } from "../../src/routes/followups.js";
 import type { CalendarSource } from "../../src/followups/types.js";
 import { createApp } from "../../src/server.js";
 
@@ -124,6 +126,24 @@ describe("the server's reminders", () => {
     };
     const app = await createApp({ DATA_DIR: dir, MASTER_KEY: "m", SETUP_TOKEN: "setup-123", RUNNER: "local" }, { slack: slack as never, followups: { batchMs: 0 }, google: { calendar } });
     await app.followups.add({ title: "Call Omar", source: "owner", remindAt: new Date(Date.now() - 60_000).toISOString() });
+    // The follow-ups API as the page reads it (the admin's session stubbed).
+    const api = express()
+      .use(followupsRoutes({ configRepo, requireAdmin: (_req, _res, next) => next(), followups: app.followups }))
+      .listen(0);
+    const paused = async () => ((await (await fetch(`http://127.0.0.1:${(api.address() as AddressInfo).port}/api/followups`)).json()) as { paused?: string }).paused;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      // A list kept before whose it is was recorded: nothing goes out, and the page says why.
+      expect(await paused()).toContain("do not say which Slack account they belong to");
+      await app.routines.scheduler.tick();
+      expect(posts).toEqual([]);
+      // Whose the list is, as connecting the account records it: the reminders go.
+      await app.followups.setOwner("U0OWNER01");
+      expect(await paused()).toBeUndefined();
+    } finally {
+      warn.mockRestore();
+      api.close();
+    }
     const tick = await app.routines.scheduler.tick();
     expect(tick.leader).toBe(true);
     expect(posts.map((p) => p.channel)).toEqual(["U0OWNER01", "U0OWNER01"]);
