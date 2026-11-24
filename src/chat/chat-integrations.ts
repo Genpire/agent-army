@@ -18,6 +18,8 @@ import type { Config, ConfigRepo } from "../core/config.js";
 import { jiraChatIntegration } from "../integrations/jira/jira.js";
 import { miroChatIntegration } from "../integrations/miro/miro.js";
 import { inboxChatIntegration } from "../slack/inbox-tools.js";
+import { followupsChatIntegration } from "../followups/tools.js";
+import { googleChatIntegrations } from "../integrations/google/index.js";
 import { slackChatIntegration } from "../slack/slack-tools.js";
 import type { AddAttachment } from "./pointer-types.js";
 
@@ -75,6 +77,8 @@ export async function chatIntegrations(config: Config, ctx: ChatIntegrationConte
   await add("Miro", () => miroChatIntegration(config, ctx));
   await add("Slack", () => slackChatIntegration(config, ctx));
   await add("Slack inbox", () => inboxChatIntegration(config, ctx));
+  await add("follow-ups", () => followupsChatIntegration(config, ctx));
+  await add("Gmail and Calendar", () => googleChatIntegrations(config, ctx));
   await add("apps", () => appChatIntegrations(config, ctx));
   await add("company data", () => dataSourcesChatIntegration(config, ctx));
   await add("routines", () => routinesChatIntegration(config, ctx));
