@@ -190,6 +190,13 @@ export function googleCalendarSource(deps: GoogleDeps): GoogleCalendarSource {
       readyCache = { value, at: nowMs() };
       return value;
     },
+    async connected() {
+      try {
+        return connectedApp(await deps.configRepo.load(), CALENDAR) !== undefined;
+      } catch {
+        return false;
+      }
+    },
     async eventsBetween(from: Date, to: Date) {
       if (!(to > from)) return [];
       return (await read(from, to, MAX_EVENTS)).events;

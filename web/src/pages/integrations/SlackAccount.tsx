@@ -34,6 +34,8 @@ interface ConnectResponse {
   missingScopes: string[];
   /** Only when it replaced another token: whether Slack revoked that one. */
   previousRevoked?: boolean;
+  /** Another person's account: the follow-ups were emptied, and the morning brief and meeting reminders turned off. */
+  followupsReset?: boolean;
 }
 
 /** POST /api/slack/user/disconnect */
@@ -146,9 +148,15 @@ function ConnectAccount({ onRevoked }: { onRevoked: (revoked: boolean) => void }
     const ok = await save(connect, {
       invalid,
       success: (r) =>
-        r.missingScopes.length
-          ? `Connected as @${r.userName}. Slack did not grant ${r.missingScopes.join(", ")}: update the app with the manifest below and reinstall it.`
-          : `Connected as @${r.userName}.`,
+        [
+          `Connected as @${r.userName}.`,
+          r.missingScopes.length ? `Slack did not grant ${r.missingScopes.join(", ")}: update the app with the manifest below and reinstall it.` : "",
+          r.followupsReset
+            ? "This is another person's account: the follow-ups were emptied, and the morning brief and meeting reminders are off. Connect their own Google Calendar, then turn them on again on the Follow-ups page."
+            : "",
+        ]
+          .filter(Boolean)
+          .join(" "),
     });
     if (ok) setToken("");
   };
@@ -219,8 +227,8 @@ function ConnectedAccount({ requiredScopes, onRevoked }: { requiredScopes: strin
     await save(run, {
       success: (r) =>
         r.revoked
-          ? "Your Slack account is disconnected, its token revoked and its inbox emptied."
-          : "Your Slack account is disconnected and its inbox emptied, but Slack did not confirm that the token was revoked.",
+          ? "Your Slack account is disconnected, its token revoked, and its inbox and follow-ups emptied."
+          : "Your Slack account is disconnected and its inbox and follow-ups emptied, but Slack did not confirm that the token was revoked.",
     });
   };
 
@@ -299,8 +307,12 @@ function ConnectedAccount({ requiredScopes, onRevoked }: { requiredScopes: strin
         </FormActions>
       </VStack>
 
+      <Text color="secondary">
+        Your follow-ups and their reminders go with this account: disconnecting it, or connecting another person's, empties them. Another person's account also starts
+        with the morning brief and meeting reminders off, since they show the calendar connected for you.
+      </Text>
       <FormActions>
-        <ConfirmButton label="Disconnect" confirmLabel="Click again to disconnect" size="md" onConfirm={disconnect} />
+        <ConfirmButton label="Disconnect" confirmLabel="Click again to disconnect and empty your follow-ups" size="md" onConfirm={disconnect} />
       </FormActions>
     </VStack>
   );

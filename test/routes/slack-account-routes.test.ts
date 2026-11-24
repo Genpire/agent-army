@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Store } from "../../src/core/store.js";
+import type { FollowupStore } from "../../src/followups/store.js";
 import { createApp } from "../../src/server.js";
 import { SLACK_USER_SCOPES } from "../../src/slack/user-account.js";
 
@@ -58,6 +59,7 @@ describe("the owner's Slack account API", () => {
   let close: () => void;
   let cookie = "";
   let store: Store;
+  let followups: FollowupStore;
   const post = (path: string, body: unknown, withCookie = true) =>
     fetch(base + path, { method: "POST", headers: { "content-type": "application/json", ...(withCookie ? { cookie } : {}) }, body: JSON.stringify(body) });
   const get = (path: string, withCookie = true) => fetch(base + path, { headers: withCookie ? { cookie } : {} });
@@ -73,6 +75,7 @@ describe("the owner's Slack account API", () => {
     const dir = await mkdtemp(join(tmpdir(), "army-slack-user-"));
     const app = await createApp({ DATA_DIR: dir, MASTER_KEY: "m", SETUP_TOKEN: "setup-123", RUNNER: "local" }, { slack: fakeSlack as never });
     store = app.store;
+    followups = app.followups;
     const server = app.app.listen(0);
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
     close = () => server.close();
@@ -191,6 +194,50 @@ describe("the owner's Slack account API", () => {
     expect(await account()).toEqual({ connected: false });
     expect((await post("/api/slack/user/settings", { listen: true })).status).toBe(404);
     expect((await (await get("/api/slack/user/report")).json()).blocked).toBe("Connect your Slack account first.");
+  });
+
+  it("takes the follow-ups and what the reminders remember with the account: another person starts without them, and without the calendar", async () => {
+    const settings = async () => (await state()).config.followups;
+    const remember = () =>
+      followups.updateReminders((r) => ((r.briefDay = "2026-11-24"), (r.sent["meeting:ev:1"] = new Date().toISOString()), (r.conversationId = "c-old"), true));
+    // The test before disconnected the second person: connecting the first one again is a switch.
+    expect((await connect("xoxp-good-token-1111")).body).toMatchObject({ userId: "UOWN", followupsReset: true });
+    await post("/api/followups/settings", { morningBrief: { enabled: true }, meetingReminderMin: 10 });
+    await followups.add({ title: "Reply to Omar about the invoice", source: "slack", ref: "slack:D1:1.1" });
+    await remember();
+
+    // The same person again: nothing changes.
+    expect((await connect("xoxp-good-token-1111")).body).not.toHaveProperty("followupsReset");
+    expect(await followups.list()).toHaveLength(1);
+    expect(await settings()).toMatchObject({ morningBrief: { enabled: true }, meetingReminderMin: 10 });
+
+    // Another person: no follow-ups, nothing remembered, and the brief and meeting reminders (the calendar) off.
+    expect((await connect("xoxp-second-person-6666")).body).toMatchObject({ userId: "UNEW", followupsReset: true });
+    expect(await followups.list({ status: "all" })).toEqual([]);
+    expect(await followups.reminderState()).toEqual({ sent: {} });
+    expect(await settings()).toMatchObject({ morningBrief: { enabled: false }, meetingReminderMin: 0 });
+
+    // Disconnecting empties them too, and remembers whose they were.
+    await post("/api/followups/settings", { morningBrief: { enabled: true }, meetingReminderMin: 10 });
+    await followups.add({ title: "Answer Rita", source: "owner" });
+    await remember();
+    await post("/api/slack/user/disconnect", {});
+    expect(await followups.list({ status: "all" })).toEqual([]);
+    expect(await followups.reminderState()).toEqual({ sent: {} });
+    expect(await followups.lastOwner()).toBe("UNEW");
+    // The same person back: their settings stay.
+    await followups.add({ title: "Call the bank", source: "owner" });
+    expect((await connect("xoxp-second-person-6666")).body).not.toHaveProperty("followupsReset");
+    expect(await followups.list()).toHaveLength(1);
+    expect(await settings()).toMatchObject({ morningBrief: { enabled: true }, meetingReminderMin: 10 });
+    // Disconnected, then someone else connects: still another person.
+    await post("/api/slack/user/disconnect", {});
+    await followups.add({ title: "Added in the console meanwhile", source: "owner" });
+    expect((await connect("xoxp-good-token-1111")).body).toMatchObject({ userId: "UOWN", followupsReset: true });
+    expect(await followups.list({ status: "all" })).toEqual([]);
+    expect(await settings()).toMatchObject({ morningBrief: { enabled: false }, meetingReminderMin: 0 });
+    await post("/api/slack/user/disconnect", {});
+    revoked.length = 0;
   });
 
   it("disconnects even when Slack does not confirm the revoke, and says so without the token", async () => {

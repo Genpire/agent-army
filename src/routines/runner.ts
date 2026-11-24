@@ -103,8 +103,8 @@ export function routineRequest(routine: Routine, input: RoutineRequestInput): Po
  * conversation starts as if it had read it.
  */
 export interface ConsoleThreads {
-  /** Adds Pointer's message to a conversation; false when it no longer exists. */
-  post(conversationId: string, markdown: string, isError?: boolean, relayed?: OutsideContent): Promise<boolean>;
+  /** Adds Pointer's message to a conversation; false when it no longer exists. `keepLast`: keep only that many latest messages. */
+  post(conversationId: string, markdown: string, isError?: boolean, relayed?: OutsideContent, keepLast?: number): Promise<boolean>;
   /** Starts a conversation titled `title` whose first message is Pointer's; returns its id. */
   start(title: string, markdown: string, isError?: boolean, relayed?: OutsideContent): Promise<string>;
 }
@@ -113,12 +113,12 @@ export interface ConsoleThreads {
 export function consoleThreads(
   conversations: {
     repo: Pick<ConversationRepo, "save">;
-    post(conversationId: string, markdown: string, isError?: boolean, relayed?: OutsideContent): Promise<boolean>;
+    post(conversationId: string, markdown: string, isError?: boolean, relayed?: OutsideContent, keepLast?: number): Promise<boolean>;
   },
   now: () => Date = () => new Date(),
 ): ConsoleThreads {
   return {
-    post: (id, markdown, isError, relayed) => conversations.post(id, markdown, isError, relayed),
+    post: (id, markdown, isError, relayed, keepLast) => conversations.post(id, markdown, isError, relayed, keepLast),
     async start(title, markdown, isError, relayed) {
       const at = now();
       const message: ChatMessage = {

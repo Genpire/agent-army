@@ -2,9 +2,9 @@ import { createHash } from "node:crypto";
 import type { HookCallback, SyncHookJSONOutput } from "@anthropic-ai/claude-agent-sdk";
 import type { ChatIntegration } from "./chat-integrations.js";
 import { APP_ID_RE } from "../core/config.js";
-import { FOLLOWUPS_SERVER_KEY, FOLLOWUP_GATED_TOOLS, FOLLOWUP_TRUSTED_TOOLS } from "../followups/tool-names.js";
+import { FOLLOWUPS_LIST_TOOL, FOLLOWUPS_SERVER_KEY, FOLLOWUP_GATED_TOOLS, FOLLOWUP_TRUSTED_TOOLS } from "../followups/tool-names.js";
 import { ROUTINES_SERVER_KEY, ROUTINE_RUN_TOOL, ROUTINE_WRITE_TOOLS } from "../routines/tool-names.js";
-import { CALENDAR_SERVER_KEY, GMAIL_INBOX_TOOL_NAME, GMAIL_SERVER_KEY } from "../integrations/google/tool-names.js";
+import { CALENDAR_AGENDA_TOOL_NAME, CALENDAR_SERVER_KEY, GMAIL_INBOX_TOOL_NAME, GMAIL_SERVER_KEY } from "../integrations/google/tool-names.js";
 import { INBOX_SERVER_KEY, INBOX_TOOL_NAME } from "../slack/inbox-tools.js";
 import { SLACK_SEND_TOOL, SLACK_SERVER_KEY, isSelfTarget } from "../slack/slack-tools.js";
 import type { PointerRequest } from "./pointer-types.js";
@@ -38,8 +38,10 @@ import type { PointerRequest } from "./pointer-types.js";
  *
  * Closing, snoozing and changing the owner's follow-ups are gated too, so that
  * an email or a message Pointer read cannot close or hide the owner's items.
- * Adding one is not: it only adds to the owner's own list, and says where
- * it came from.
+ * Adding one is gated only for some inputs (ChatIntegration.gatedWhen): as
+ * the owner's own item or with a reminder (followupAddNeedsYes). What
+ * Pointer found, labelled with its source and without a reminder, only adds
+ * to the owner's own list and says where it came from.
  *
  * Not gated: Jira, monday.com and Miro writes, and start_repo_task. They are
  * bounded by allow lists, visible where they land (the issue, item or board
@@ -122,6 +124,19 @@ export function gatedTools(integrations: ChatIntegration[]): Set<string> {
   const routines = offered.filter((t) => ROUTINE_GATED_TOOLS.includes(t));
   const followups = offered.filter((t) => FOLLOWUP_GATED.includes(t));
   return new Set([...PERSISTENT_WRITE_TOOLS, ...appWrites, ...outbound, ...routines, ...followups]);
+}
+
+/**
+ * Tools gated only for some inputs (ChatIntegration.gatedWhen), by full
+ * name, for the tools offered: the predicate says whether this input needs
+ * the user's confirmation after outside content.
+ */
+export function gatedInputs(integrations: ChatIntegration[]): ReadonlyMap<string, (input: unknown) => boolean> {
+  const out = new Map<string, (input: unknown) => boolean>();
+  for (const i of integrations) {
+    for (const [tool, needsYes] of Object.entries(i.gatedWhen ?? {})) if (i.allToolNames.includes(tool)) out.set(tool, needsYes);
+  }
+  return out;
 }
 
 /**
@@ -302,6 +317,8 @@ export interface ConfirmGateOptions {
   onHeld?: () => void;
   /** Tools that need a confirmation once the query has read outside content (gatedTools). */
   gated: ReadonlySet<string>;
+  /** Tools that need one only for some inputs (gatedInputs): followups_add as the owner's own item or with a reminder. */
+  gatedWhen?: ReadonlyMap<string, (input: unknown) => boolean>;
   /** The requester's Slack user id (requesterSlackId); absent in the console. A Slack message to them is never held. */
   requesterSlackId?: string;
   /**
@@ -359,6 +376,7 @@ export function confirmGate({
   answersHeld = false,
   onHeld,
   gated,
+  gatedWhen,
   requesterSlackId,
   tainted: relayed = false,
 }: ConfirmGateOptions): HookCallback {
@@ -388,30 +406,37 @@ export function confirmGate({
   return async (input) => {
     if (input.hook_event_name !== "PreToolUse" || input.agent_id) return {};
     const tool = input.tool_name;
+    const conditional = gatedWhen?.get(tool);
     try {
       // Pointer's Slack message to the person asking reaches nobody else: never held, and no confirmation used up.
       const toSelf = tool === SLACK_SEND_TOOL && isSelfTarget(input.tool_input, requesterSlackId);
-      const denied = gated.has(tool) && !toSelf ? check(tool, input.tool_input) : undefined;
+      const needsYes = (gated.has(tool) && !toSelf) || (conditional !== undefined && conditional(input.tool_input));
+      const denied = needsYes ? check(tool, input.tool_input) : undefined;
       if (denied) return denied;
     } catch {
       // A failing hook lets the call through, so a gated call is denied here instead.
-      if (gated.has(tool)) return deny(tool, readThisTurn ? "turn" : (startedBy ?? "turn"));
+      if (gated.has(tool) || conditional) return deny(tool, readThisTurn ? "turn" : (startedBy ?? "turn"));
     }
     if (!TRUSTED_TOOLS.has(tool)) tainted = readThisTurn = true;
     return {};
   };
 }
 
-// ---------- After the owner's Slack inbox or Gmail ----------
+// ---------- After the owner's Slack inbox, Gmail, calendar or follow-ups ----------
 
 /**
- * The owner's inboxes, and how the reason names each: their Slack inbox
- * (slack_my_inbox) and their Gmail (gmail_my_inbox). Reading either is
- * treated the same.
+ * The tools that read what reaches the owner, and how the reason names
+ * each: their Slack inbox (slack_my_inbox), their Gmail (gmail_my_inbox),
+ * their calendar (calendar_agenda: meeting links with passcodes, invites
+ * written by outsiders) and their follow-ups (followups_list: stored copies
+ * of what other people wrote them, with senders and links). Reading any of
+ * them is treated the same.
  */
 const OWNER_INBOXES: ReadonlyMap<string, string> = new Map([
   [INBOX_TOOL_NAME, "your Slack inbox"],
   [GMAIL_INBOX_TOOL_NAME, "your Gmail"],
+  [CALENDAR_AGENDA_TOOL_NAME, "your calendar"],
+  [FOLLOWUPS_LIST_TOOL, "your follow-ups"],
 ]);
 /** The tools that read one of the owner's inboxes. */
 export const OWNER_INBOX_TOOLS: ReadonlySet<string> = new Set(OWNER_INBOXES.keys());
@@ -439,9 +464,10 @@ const OWN_TOOLS_OFF_AFTER_INBOX = new Set([
 
 /**
  * Whether a tool can carry what Pointer read out of this reply, so it is off
- * once the inbox was read. `inboxApps`: the server keys of apps that read the
- * owner's inbox (Gmail's MCP server): they stay on like the inboxes, their
- * writes (a draft, a send) held for the owner's yes by confirmGate.
+ * once the inbox was read. `inboxApps`: the server keys of the owner's own
+ * apps (apps.ts inboxApps: Gmail's MCP server, their calendar, their
+ * files): they stay on like the inboxes, their writes (a draft, a send)
+ * held for the owner's yes by confirmGate.
  */
 export function offAfterInbox(tool: string, inboxApps: readonly string[] = []): boolean {
   if (OWN_TOOLS_OFF_AFTER_INBOX.has(tool)) return true;
@@ -450,10 +476,16 @@ export function offAfterInbox(tool: string, inboxApps: readonly string[] = []): 
   return !SERVERS_AFTER_INBOX.some((prefix) => tool.startsWith(prefix));
 }
 
-/** An app whose tools read the owner's inbox (apps.ts inboxApps): its server key and name. */
+/**
+ * An app whose tools read what reaches the owner (apps.ts inboxApps): its
+ * server key and name; `inbox` when it reads their messages (Gmail, Google
+ * Chat), else it is their own account only for them (their calendar, their
+ * files).
+ */
 export interface InboxApp {
   key: string;
   name: string;
+  inbox?: boolean;
 }
 
 /** The tool in words, for the reason Pointer reads. */
@@ -466,8 +498,9 @@ function offLabel(tool: string): string {
 
 /**
  * PreToolUse hook for one query (one reply()): once Pointer has called
- * slack_my_inbox or gmail_my_inbox, what other people wrote to the owner is in
- * its context, and a planted message there may try to send it out. So for the rest of the
+ * slack_my_inbox, gmail_my_inbox, calendar_agenda or followups_list (or a
+ * tool of one of the owner's own apps), what other people wrote to the owner
+ * is in its context, and a planted message there may try to send it out. So for the rest of the
  * query every tool that can carry it out is denied: the web, subagents, every
  * other MCP server (apps, Jira, Miro, code hosts, company data), repo tasks
  * and monday.com writes (offAfterInbox). Slack messages stay, held for the
@@ -481,12 +514,12 @@ function offLabel(tool: string): string {
  * ConversationMessage.outsideContent "inbox"; relayedLevel in pointer.ts). It
  * is in the prompt, so the query is gated from its start, as if it had read
  * the inbox; the reply to their message after this one is not. `onInboxRead`
- * is told when Pointer calls slack_my_inbox or gmail_my_inbox: its reply then
- * carries the inbox (PointerReply.readInbox).
+ * is told when Pointer calls one of those: its reply then carries the inbox
+ * (PointerReply.readInbox).
  *
- * `inboxApps`: connected apps that read the owner's inbox (Gmail's own MCP
- * server): any of their tools counts as reading the inbox, exactly like
- * slack_my_inbox, and they stay on after it.
+ * `inboxApps`: the owner's own connected apps (Gmail's or Google Chat's MCP
+ * server, their calendar, their files): any of their tools counts as reading
+ * the inbox, exactly like slack_my_inbox, and they stay on after it.
  */
 export function afterInboxGate(opts: { relayed?: boolean; onInboxRead?: () => void; inboxApps?: readonly InboxApp[] } = {}): HookCallback {
   /** The inbox Pointer read first in this query ("your Slack inbox", "your Gmail"), if any. */
@@ -497,7 +530,8 @@ export function afterInboxGate(opts: { relayed?: boolean; onInboxRead?: () => vo
     const own = OWNER_INBOXES.get(tool);
     if (own) return own;
     const app = apps.find((a) => tool.startsWith(`mcp__${a.key}__`));
-    return app ? `your ${app.name.replace(/\s+/g, " ").trim().slice(0, 60)} (an app that reads your inbox)` : undefined;
+    if (!app) return undefined;
+    return `your ${app.name.replace(/\s+/g, " ").trim().slice(0, 60)} (${app.inbox === false ? "your own account, an app only for you" : "an app that reads your inbox"})`;
   };
   return async (input) => {
     if (input.hook_event_name !== "PreToolUse" || input.agent_id) return {};

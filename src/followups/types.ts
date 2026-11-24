@@ -80,6 +80,12 @@ export interface CalendarEvent {
 export interface CalendarSource {
   /** Whether a calendar is connected and readable now. */
   ready(): Promise<boolean>;
+  /**
+   * Whether a calendar is connected at all, readable or not: one that is
+   * connected but not ready is failing (the brief says it could not be
+   * read, not that none is connected). Absent: the same as ready().
+   */
+  connected?(): Promise<boolean>;
   /** Events overlapping [from, to), sorted by start. Throws when the calendar cannot be read. */
   eventsBetween(from: Date, to: Date): Promise<CalendarEvent[]>;
 }

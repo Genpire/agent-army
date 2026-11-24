@@ -40,6 +40,16 @@ export function atLocal(timeZone: string, year: number, month: number, day: numb
   return new Date(momentsFor(timeZone, Date.UTC(year, month - 1, day, hour, minute)).moments[0]!);
 }
 
+/**
+ * The same local wall-clock time `days` days after `at` in `timeZone` (the
+ * first one when clocks go back; shifted when skipped): "every day at 9"
+ * stays at 9 across a daylight saving change, where adding 24 hours would
+ * move it an hour.
+ */
+export function sameTimeDaysLater(at: Date, days: number, timeZone: string): Date {
+  return new Date(momentsFor(timeZone, wallClock(timeZone, at.getTime()) + days * DAY).moments[0]!);
+}
+
 /** The local calendar day `days` after the one `now` is in (0: today), as year, month, day. */
 function localDate(now: Date, timeZone: string, days = 0): [number, number, number] {
   const wall = new Date(wallClock(timeZone, now.getTime()));

@@ -340,7 +340,7 @@ export const ATTENTION_REPORT_INSTRUCTION = [
   `First, when the ${GMAIL_INBOX_TOOL} tool is available, read my Gmail with it for what arrived since the start of this run's window.`,
   `Then read my Slack inbox with ${INBOX_TOOL}, with since set to the start of this run's window (the last digest) and open_only true.`,
   `For each new thing that needs my reply or action, add a follow-up with ${toolOf(FOLLOWUPS_ADD_TOOL)}: a one-line title (what I need to do, for whom), from, the link, ` +
-    'source "slack" or "gmail", at (the message\'s time) and ref: the message\'s Follow-up ref ("slack:<channel>:<ts>") or "gmail:<threadId>", so nothing is added twice. ' +
+    'source "slack" or "gmail" (never a reminder: I set those) and ref: the message\'s Follow-up ref ("slack:<channel>:<ts>") or "gmail:<threadId>", so nothing is added twice. ' +
     "Skip FYI, newsletters, automated mail and what I already answered.",
   `Then list my open follow-ups with ${toolOf(FOLLOWUPS_LIST_TOOL)} and write the digest:`,
   "1. New: the follow-ups added in this run, most urgent first.",

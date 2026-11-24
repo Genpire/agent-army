@@ -33,12 +33,12 @@ export function fakeBrain(reply: (req: PointerRequest) => PointerReply | Promise
 
 export function fakeThreads() {
   const started: { id: string; title: string; markdown: string; isError?: boolean; relayed?: string }[] = [];
-  const posted: { id: string; markdown: string; isError?: boolean; relayed?: string }[] = [];
+  const posted: { id: string; markdown: string; isError?: boolean; relayed?: string; keepLast?: number }[] = [];
   let n = 0;
   const threads: ConsoleThreads = {
-    async post(id, markdown, isError, relayed) {
+    async post(id, markdown, isError, relayed, keepLast) {
       if (!started.some((s) => s.id === id)) return false;
-      posted.push({ id, markdown, ...(isError ? { isError } : {}), ...(relayed ? { relayed } : {}) });
+      posted.push({ id, markdown, ...(isError ? { isError } : {}), ...(relayed ? { relayed } : {}), ...(keepLast ? { keepLast } : {}) });
       return true;
     },
     async start(title, markdown, isError, relayed) {

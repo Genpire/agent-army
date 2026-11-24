@@ -4,14 +4,22 @@
  * workspace), its switches (read what reaches them, send as them, tell them
  * right away when someone answers a message Pointer sent for them; turning
  * reading off empties their inbox), disconnect (which empties their inbox and
- * revokes the token, so Slack stops sending their conversations), and the
- * attention report: an owner-only routine that DMs them what needs their
- * reply. A token replaced by another is revoked too. Tokens are never
- * returned or logged.
+ * their follow-ups and revokes the token, so Slack stops sending their
+ * conversations), and the attention report: an owner-only routine that DMs
+ * them what needs their reply. A token replaced by another is revoked too.
+ * Tokens are never returned or logged.
+ *
+ * The follow-ups and their reminders go to whoever this account is, so they
+ * go with the account: connecting another person's account (than the one
+ * connected, or the one disconnected last) starts them with an empty inbox,
+ * no follow-ups, and the morning brief and the meeting reminders off (both
+ * show the calendar connected for the person before; the owner turns them on
+ * again on the Follow-ups page once the calendar is theirs).
  */
 import { type Request, type Response, Router } from "express";
 import { z } from "zod";
 import type { Config } from "../core/config.js";
+import type { FollowupStore } from "../followups/store.js";
 import type { RoutineService } from "../routines/service.js";
 import type { SlackInbox } from "../slack/inbox.js";
 import { attentionReportBlocker, attentionReportDraft, findAttentionReport } from "../slack/inbox-tools.js";
@@ -115,9 +123,14 @@ const NOT_CONNECTED = "Your Slack account is not connected.";
 type SlackUser = NonNullable<Config["slack"]["user"]>;
 
 export function slackAccountRoutes(
-  deps: IntegrationRouteDeps & { routines: RoutineService; inbox: SlackInbox; slack: (token: string) => SlackAuthClient },
+  deps: IntegrationRouteDeps & {
+    routines: RoutineService;
+    inbox: SlackInbox;
+    followups: Pick<FollowupStore, "reset" | "lastOwner">;
+    slack: (token: string) => SlackAuthClient;
+  },
 ): Router {
-  const { configRepo, requireAdmin, routines, inbox } = deps;
+  const { configRepo, requireAdmin, routines, inbox, followups } = deps;
   const router = Router();
   // With SKIP_VALIDATION=1 (tests) a token was never checked with Slack, so nothing is sent to it.
   const revoke = (token: string) => (process.env.SKIP_VALIDATION === "1" ? Promise.resolve(true) : revokeSlackToken(deps.slack(token)));
@@ -147,10 +160,19 @@ export function slackAccountRoutes(
         return void res.status(400).json({ error: redact((err as Error).message) });
       }
     }
-    const replaced: { user?: SlackUser } = {};
+    // Whose the follow-ups are: the account connected now, else the one they were emptied for at its disconnect.
+    const lastOwner = await followups.lastOwner();
+    const replaced: { user?: SlackUser; switched?: boolean } = {};
     await configRepo.update((c) => {
       const previous = c.slack.user;
       replaced.user = previous;
+      const before = previous?.userId ?? lastOwner;
+      replaced.switched = before !== undefined && before !== info.userId;
+      // Another person: the brief and the meeting reminders would show them the calendar connected for the one before.
+      if (replaced.switched) {
+        c.followups.morningBrief.enabled = false;
+        c.followups.meetingReminderMin = 0;
+      }
       c.slack.user = {
         token: input.token,
         ...info,
@@ -161,12 +183,23 @@ export function slackAccountRoutes(
       };
     });
     const previous = replaced.user;
-    // Another person's account starts with an empty inbox (what was still on its way to the old one is dropped).
-    if (previous && previous.userId !== info.userId) await inbox.clear();
+    // Another person's account starts with an empty inbox (what was still on its way to the old one is dropped), and
+    // without the follow-ups and reminders of the one before.
+    if (replaced.switched) {
+      await inbox.clear();
+      await followups.reset(info.userId);
+    }
     // The token it replaces is revoked: it stops working, and Slack stops sending that account's conversations.
     const previousRevoked = previous && previous.token !== input.token ? await revoke(previous.token) : undefined;
     const missingScopes = SLACK_USER_SCOPES.filter((s) => !info.scopes.includes(s));
-    res.json({ ok: true, userId: info.userId, userName: info.userName, missingScopes, ...(previousRevoked === undefined ? {} : { previousRevoked }) });
+    res.json({
+      ok: true,
+      userId: info.userId,
+      userName: info.userName,
+      missingScopes,
+      ...(previousRevoked === undefined ? {} : { previousRevoked }),
+      ...(replaced.switched ? { followupsReset: true } : {}),
+    });
   });
 
   router.post("/api/slack/user/settings", requireAdmin, async (req, res) => {
@@ -186,16 +219,19 @@ export function slackAccountRoutes(
     res.json({ ok: true });
   });
 
-  // Forgets the token, empties the inbox and revokes the token, so Slack stops sending the owner's conversations.
-  // `revoked` false: Slack did not confirm it, and the page says to remove the app's access in Slack. The
-  // disconnect stands either way. The attention report stays: it says the inbox is not there.
+  // Forgets the token, empties the inbox and the follow-ups, and revokes the token, so Slack stops sending the owner's
+  // conversations. `revoked` false: Slack did not confirm it, and the page says to remove the app's access in Slack.
+  // The disconnect stands either way. The attention report stays: it says the inbox is not there.
   router.post("/api/slack/user/disconnect", requireAdmin, async (_req, res) => {
-    const removed: { token?: string } = {};
+    const removed: { token?: string; userId?: string } = {};
     await configRepo.update((c) => {
       removed.token = c.slack.user?.token;
+      removed.userId = c.slack.user?.userId;
       delete c.slack.user;
     });
     await inbox.clear();
+    // The follow-ups go with the account; whose they were is kept, so connecting someone else later is seen as a switch.
+    if (removed.userId) await followups.reset(removed.userId);
     res.json({ ok: true, revoked: removed.token ? await revoke(removed.token) : true });
   });
 

@@ -38,6 +38,12 @@ export interface ChatIntegration {
    * (readOnlyRunGate in pointer.ts).
    */
   routineToolNames?: string[];
+  /**
+   * Tools that need the user's confirmation after outside content only for
+   * some inputs, by full name: the predicate says whether this input does
+   * (followups_add as the owner's own item or with a reminder: confirm-gate.ts).
+   */
+  gatedWhen?: Record<string, (input: unknown) => boolean>;
   /** One or more "- …" lines for the Rules section of Pointer's instructions. */
   promptRule: string;
   /**

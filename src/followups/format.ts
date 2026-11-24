@@ -9,8 +9,18 @@
 import type { FollowupItem, FollowupSource } from "./types.js";
 import { age, everyText, shortTime } from "./time.js";
 
-/** Where the text goes: Slack mrkdwn, the console's Markdown, or plain text for Pointer. */
-export type Target = "slack" | "markdown" | "text";
+/**
+ * Where the text goes: Slack mrkdwn, the console's Markdown, plain text for
+ * Pointer, or "console": the copy of a reminder kept in the console's
+ * Follow-ups conversation, Markdown with short titles and no links,
+ * locations or other details. Console conversations are stored as plain
+ * text (unlike the follow-ups themselves), so that copy keeps no more than
+ * the owner needs to recognise an item; the Follow-ups page has the rest.
+ */
+export type Target = "slack" | "markdown" | "text" | "console";
+
+/** Characters of a title in the console's copy of a reminder. */
+export const CONSOLE_TITLE_MAX = 60;
 
 const SOURCE_LABEL: Record<FollowupSource, string> = { owner: "", slack: "Slack", gmail: "Gmail", calendar: "Calendar", pointer: "found by Pointer" };
 
@@ -20,11 +30,11 @@ export function safe(text: string, target: Target): string {
   return target === "slack" ? line.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") : line;
 }
 
-export const bold = (text: string, target: Target) => (target === "slack" ? `*${text}*` : target === "markdown" ? `**${text}**` : text);
+export const bold = (text: string, target: Target) => (target === "slack" ? `*${text}*` : target === "markdown" || target === "console" ? `**${text}**` : text);
 
-/** A link to an http(s) address, or nothing. */
+/** A link to an http(s) address, or nothing (never in the console's copy). */
 export function linkTo(url: string | undefined, label: string, target: Target): string {
-  if (!url || !/^https?:\/\/\S+$/i.test(url)) return "";
+  if (target === "console" || !url || !/^https?:\/\/\S+$/i.test(url)) return "";
   if (target === "slack") return `<${url.replace(/[<>|]/g, "")}|${label}>`;
   if (target === "markdown") return `[${label}](${url.replace(/\(/g, "%28").replace(/\)/g, "%29")})`;
   return url;
@@ -64,7 +74,7 @@ export function itemLine(item: FollowupItem, o: LineOptions): string {
     item.answeredAt && item.status === "open" ? "you replied" : "",
     o.target === "text" ? "" : linkTo(item.link, "open", o.target),
   ].filter(Boolean);
-  const head = `${bold(`#${item.n}`, o.target)} ${safe(clip(item.title, o.titleMax ?? 140), o.target)}`;
+  const head = `${bold(`#${item.n}`, o.target)} ${safe(clip(item.title, o.titleMax ?? (o.target === "console" ? CONSOLE_TITLE_MAX : 140)), o.target)}`;
   const tail = o.target === "text" && item.link && /^https?:\/\//i.test(item.link) ? ` · ${item.link}` : "";
   return `${head}${meta.length ? ` · ${meta.join(" · ")}` : ""}${tail}`;
 }

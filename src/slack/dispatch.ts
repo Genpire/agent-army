@@ -94,7 +94,7 @@ export type DispatchDeps = SlackDeps & {
   /** Tells the owner when someone answers a message Pointer sent for them (outreach.ts). Absent = nobody is told. */
   answers?: Pick<AnswerNotifier, "add" | "revise">;
   /** The owner's follow-ups: "done 3 5" in their DM closes them without the model (followups/done-command.ts). Absent = Pointer answers it. */
-  followups?: Pick<FollowupStore, "done">;
+  followups?: Pick<FollowupStore, "done" | "list">;
 };
 
 /** What the conversation gets back for a message. */
@@ -282,7 +282,8 @@ async function handleMessage(ctx: Ctx, decision: RespondDecision): Promise<void>
  * owner's own command is not outside content, so no confirmation, also right
  * after a reminder. Undefined for anything else, and anywhere else: it goes
  * to Pointer. The reply quotes the items' titles (maybe other people's
- * words), so it is marked as relayed outside content.
+ * words, copied from the owner's inbox), so it is marked as relayed at level
+ * "inbox", like the reminders and the brief it answers.
  */
 async function ownerDoneCommand(ctx: Ctx, raw: string, history: ConversationMessage[] | undefined): Promise<Reply | undefined> {
   const { e, config, deps } = ctx;
@@ -293,7 +294,7 @@ async function ownerDoneCommand(ctx: Ctx, raw: string, history: ConversationMess
   const done = await handleDoneCommand(store, text, lastPointer, "slack");
   if (!done) return undefined;
   console.info(`[followups] closed ${done.result.closed.length} by the owner's command in Slack`);
-  return { text: done.text, isError: false, outside: { level: "read", source: "followups" } };
+  return { text: done.text, isError: false, outside: { level: "inbox", source: "followups" } };
 }
 
 async function askPointer(

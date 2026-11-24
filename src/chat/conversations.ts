@@ -846,8 +846,13 @@ export class ConversationService implements WebThreads {
 
   // ---------- WebThreads (also used by the webhook) ----------
 
-  /** `relayed`: the message relays outside content (ChatMessage.relayed), a routine's report. */
-  post(conversationId: string, markdown: string, isError = false, relayed?: OutsideContent): Promise<boolean> {
+  /**
+   * `relayed`: the message relays outside content (ChatMessage.relayed), a
+   * routine's report. `keepLast`: the conversation keeps only its latest
+   * messages, this many (the reminders' Follow-ups conversation, which would
+   * otherwise grow forever).
+   */
+  post(conversationId: string, markdown: string, isError = false, relayed?: OutsideContent, keepLast?: number): Promise<boolean> {
     return this.queue.run(conversationId, async () => {
       const c = await this.repo.get(conversationId);
       if (!c) return false;
@@ -859,6 +864,7 @@ export class ConversationService implements WebThreads {
         ...(isError ? { isError } : {}),
         ...(relayed ? { relayed } : {}),
       });
+      if (keepLast !== undefined && keepLast > 0 && c.messages.length > keepLast) c.messages = c.messages.slice(-keepLast);
       await this.repo.save(c, this.now());
       return true;
     });

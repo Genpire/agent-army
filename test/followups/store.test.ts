@@ -36,24 +36,60 @@ describe("the follow-ups store", () => {
     expect((await followups.list()).map((i) => i.n)).toEqual([3]);
   });
 
-  it("dedupes by ref: an open item is updated, a closed one stays closed unless it happened again", async () => {
+  it("dedupes by ref: an open item is left as it is but for its empty fields, a closed one stays closed", async () => {
     const { followups, clock } = env();
     const ref = "slack:D123:1700000000.000100";
-    const first = await followups.add({ title: "Reply to Sam", source: "slack", ref, from: "Sam Lee" });
+    const first = await followups.add({ title: "Reply to Sam", source: "slack", ref, from: "Sam Lee", link: "https://example.slack.com/archives/D123/p1" });
     expect(first.status).toBe("added");
-    const again = await followups.add({ title: "Reply to Sam about the budget", source: "slack", ref, link: "https://example.slack.com/archives/D123/p1" });
-    expect(again).toMatchObject({ status: "updated", item: { n: 1, title: "Reply to Sam about the budget", from: "Sam Lee", link: "https://example.slack.com/archives/D123/p1" } });
-    expect(await followups.list()).toHaveLength(1);
+    await followups.snooze(1, new Date(clock.ms + 60 * 60_000));
+    const before = await followups.get(1);
+    // A second add (what a planted message would make Pointer do) changes nothing the item says.
+    const again = await followups.add({
+      title: "Pay the new invoice today",
+      source: "slack",
+      ref,
+      from: "Someone Else",
+      link: "https://evil.slack.com/archives/X/p2",
+      remindAt: new Date(clock.ms + 60_000).toISOString(),
+      repeatMin: 10,
+      detail: "The thread's latest message",
+    });
+    expect(again).toMatchObject({ status: "tracked", filled: ["detail"], item: { n: 1, title: "Reply to Sam", from: "Sam Lee", link: "https://example.slack.com/archives/D123/p1" } });
+    const after = await followups.get(1);
+    expect(after).toEqual({ ...before, detail: "The thread's latest message" });
+    expect(after?.remindAt).toBe(before?.snoozedUntil);
+    expect(after?.repeatMin).toBeUndefined();
+    // Nothing left to fill: nothing written.
+    expect(await followups.add({ title: "x", source: "slack", ref, detail: "other" })).toMatchObject({ status: "tracked", filled: [] });
+    // A link is filled only from the same source as the item's.
+    await followups.add({ title: "Answer Rita", source: "gmail", ref: "gmail:t-1" });
+    expect(await followups.add({ title: "x", source: "pointer", ref: "gmail:t-1", link: "https://example.com/elsewhere" })).toMatchObject({ status: "tracked", filled: [] });
+    expect(await followups.add({ title: "x", source: "gmail", ref: "gmail:t-1", link: "https://mail.google.com/mail/u/0/#all/t-1" })).toMatchObject({ status: "tracked", filled: ["link"] });
+    expect(await followups.list()).toHaveLength(2);
 
     clock.ms += 60_000;
     await followups.done([1]);
-    const closed = await followups.add({ title: "Reply to Sam", source: "slack", ref, at: "2026-11-24T07:00:00Z" });
+    const closed = await followups.add({ title: "Reply to Sam", source: "slack", ref });
     expect(closed).toMatchObject({ status: "closed", item: { n: 1, status: "done" } });
-    expect(await followups.list()).toHaveLength(0);
-    // Something new on that thread after it was closed: the same item opens again.
-    const reopened = await followups.add({ title: "Sam asks again", source: "gmail", ref, at: new Date(clock.ms + 60_000).toISOString() });
-    expect(reopened).toMatchObject({ status: "reopened", item: { n: 1, status: "open", title: "Sam asks again" } });
-    expect((await followups.get(1))?.doneAt).toBeUndefined();
+    // Whatever time it claims the thing happened again: only the owner reopens it.
+    const later = { title: "Sam asks again", source: "gmail", ref, at: new Date(clock.ms + 60 * 60_000).toISOString() } as Parameters<FollowupStore["add"]>[0];
+    expect(await followups.add(later)).toMatchObject({ status: "closed", item: { n: 1, status: "done", title: "Reply to Sam" } });
+    expect((await followups.get(1))?.doneAt).toBeDefined();
+    expect((await followups.list()).map((i) => i.n)).toEqual([2]);
+  });
+
+  it("empties the list for another person, keeping numbers and whose it was", async () => {
+    const { followups } = env();
+    await followups.add({ title: "Reply to Sam", source: "slack", ref: "slack:D1:1.1" });
+    await followups.add({ title: "Call Omar", source: "owner" });
+    await followups.updateReminders((s) => ((s.briefDay = "2026-11-24"), (s.sent["meeting:e:1"] = "2026-11-24T08:00:00.000Z"), (s.conversationId = "c-1"), true));
+    expect(await followups.lastOwner()).toBeUndefined();
+    await followups.reset("U0OLD");
+    expect(await followups.list({ status: "all" })).toEqual([]);
+    expect(await followups.reminderState()).toEqual({ sent: {} });
+    expect(await followups.lastOwner()).toBe("U0OLD");
+    // Numbers are never given again.
+    expect(await followups.add({ title: "Next", source: "owner" })).toMatchObject({ item: { n: 3 } });
   });
 
   it("clips texts and keeps reminders sane", async () => {

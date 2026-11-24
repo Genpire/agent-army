@@ -114,8 +114,8 @@ export class RoutineScheduler {
   private timer: ReturnType<typeof setTimeout> | undefined;
   private chain: Promise<unknown> = Promise.resolve();
   private stopped = true;
-  /** Work on the same clock and lease, after the routines (onLeaderTick). */
-  private readonly leaderTasks: { name: string; run: (now: Date) => Promise<unknown> }[] = [];
+  /** Work on the same clock and lease, after the routines (onLeaderTick); `running` while a run of it has not finished. */
+  private readonly leaderTasks: { name: string; run: (now: Date) => Promise<unknown>; running: boolean }[] = [];
 
   constructor(private readonly deps: SchedulerDeps) {}
 
@@ -153,10 +153,12 @@ export class RoutineScheduler {
   /**
    * Runs `run` on every tick while this instance holds the lease, after the
    * routines were started: one instance at a time, every minute, and on
-   * POST /routines/tick. A failure is logged and never stops the clock.
+   * POST /routines/tick. A failure is logged and never stops the clock. A
+   * run never overlaps the one before it: while that one has not finished
+   * (it went past the tick's time limit), the task is skipped.
    */
   onLeaderTick(name: string, run: (now: Date) => Promise<unknown>): void {
-    this.leaderTasks.push({ name, run });
+    this.leaderTasks.push({ name, run, running: false });
   }
 
   /** One tick; ticks never overlap in this process. */
@@ -197,14 +199,28 @@ export class RoutineScheduler {
     }
     result.finished = Promise.all(runs);
     for (const task of this.leaderTasks) {
-      // A task that hangs (a calendar that never answers) must not stop the clock: the tick goes on after a while.
+      if (task.running) {
+        console.warn(`[routines] ${task.name} is still running from an earlier tick: skipped on this one`);
+        continue;
+      }
+      // A task that hangs (a calendar that never answers) must not stop the clock: the tick goes on after a while,
+      // and the task stays marked running until it really ends, so the next tick does not start it twice.
+      task.running = true;
+      const run = Promise.resolve()
+        .then(() => task.run(now))
+        .finally(() => {
+          task.running = false;
+        });
       let timer: ReturnType<typeof setTimeout> | undefined;
       const limit = new Promise<"late">((resolve) => {
         timer = setTimeout(() => resolve("late"), this.deps.leaderTaskMs ?? LEADER_TASK_MS);
         timer.unref?.();
       });
       try {
-        if ((await Promise.race([task.run(now), limit])) === "late") console.error(`[routines] ${task.name} is still running after the tick's time limit; the tick goes on`);
+        if ((await Promise.race([run, limit])) === "late") {
+          console.error(`[routines] ${task.name} is still running after the tick's time limit; the tick goes on`);
+          run.catch((err: unknown) => console.error(`[routines] ${task.name} failed after the tick's time limit:`, errorText(err).slice(0, 300)));
+        }
       } catch (err) {
         console.error(`[routines] ${task.name} failed on this tick:`, errorText(err).slice(0, 300));
       } finally {

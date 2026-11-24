@@ -11,8 +11,8 @@ export const FOLLOWUPS_ADD_TOOL = followupToolName("followups_add");
 /**
  * Closing, snoozing and changing an item: gated after outside content
  * (confirm-gate.ts), so that something Pointer read (an email, a Slack
- * message) cannot close or hide the owner's items. Adding is not: it only
- * adds to the owner's own list, and an item Pointer found says where from.
+ * message) cannot close or hide the owner's items. Adding is gated only for
+ * some inputs (followupAddNeedsYes).
  */
 export const FOLLOWUP_GATED_TOOLS = (["followups_done", "followups_snooze", "followups_update"] as const).map(followupToolName);
 
@@ -25,3 +25,24 @@ export const FOLLOWUP_TRUSTED_TOOLS = [FOLLOWUPS_ADD_TOOL, ...FOLLOWUP_GATED_TOO
 
 /** Every follow-up tool: the owner's own list, never a subagent's. */
 export const FOLLOWUP_TOOL_NAMES = FOLLOWUP_TOOLS.map(followupToolName);
+
+/** Where an item Pointer found came from: what an add may say without the owner's yes after outside content. */
+const FOUND_SOURCES: ReadonlySet<string> = new Set(["slack", "gmail", "calendar", "pointer"]);
+
+/**
+ * Whether followups_add with this input needs the owner's yes once the turn
+ * has read outside content (confirm-gate.ts, in the owner's conversation):
+ * when it adds the item as the owner's own (source "owner", or none, which
+ * means the owner), so it would be shown without a source like one they
+ * asked for; or with a reminder (remind_at, repeat_min), so it would nag
+ * them on its own. What Pointer found, labelled with its source and
+ * without a reminder, goes straight in: listing it is what reading the
+ * inbox is for. A routine run never gets this far: its tool refuses
+ * "owner" and sets no reminder (tools.ts).
+ */
+export function followupAddNeedsYes(input: unknown): boolean {
+  const args = input && typeof input === "object" ? (input as Record<string, unknown>) : {};
+  if (typeof args.source !== "string" || !FOUND_SOURCES.has(args.source)) return true;
+  if (args.remind_at !== undefined && args.remind_at !== null && String(args.remind_at).trim() !== "") return true;
+  return args.repeat_min !== undefined && args.repeat_min !== null && args.repeat_min !== 0;
+}

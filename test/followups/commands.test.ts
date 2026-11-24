@@ -83,7 +83,7 @@ describe("the done command in the owner's DM with Pointer", () => {
     await t.send({ ts: "100.1", text: "done 1" });
     expect(t.requests).toEqual([]);
     expect(t.posts).toEqual([
-      { channel: "D0OWN", text: "✅ Closed #1 Reply to Omar.", metadata: { event_type: "pointer_outside_content", event_payload: { source: "followups", level: "read" } } },
+      { channel: "D0OWN", text: "✅ Closed #1 Reply to Omar.", metadata: { event_type: "pointer_outside_content", event_payload: { source: "followups", level: "inbox" } } },
     ]);
     expect(t.reactions).toEqual(["+eyes", "-eyes", "+white_check_mark"]);
     expect((await t.followups.list()).map((i) => i.n)).toEqual([2]);
@@ -94,11 +94,23 @@ describe("the done command in the owner's DM with Pointer", () => {
 
   it("takes the owner's numbered list under Pointer's list of follow-ups, even right after a reminder (relayed outside content)", async () => {
     const t = await slackEnv();
-    t.history.set("D0OWN", [{ ts: "99.1", user: "UBOT", bot_id: "B1", text: LISTED, metadata: { event_type: "pointer_outside_content", event_payload: { source: "followups", level: "read" } } }]);
+    t.history.set("D0OWN", [{ ts: "99.1", user: "UBOT", bot_id: "B1", text: LISTED, metadata: { event_type: "pointer_outside_content", event_payload: { source: "followups", level: "inbox" } } }]);
     await t.send({ ts: "100.1", text: "1. Omar (DM) - done\n2. Rita (DM) - done" });
     expect(t.requests).toEqual([]);
     expect(t.posts[0]!.text).toBe("✅ Closed #1 Reply to Omar, #2 Answer Rita.");
     expect(await t.followups.list()).toEqual([]);
+  });
+
+  it("closes in reply to the brief (relayed at the inbox level), while anything else there reaches Pointer as relayed inbox content", async () => {
+    const t = await slackEnv();
+    t.history.set("D0OWN", [{ ts: "99.1", user: "UBOT", bot_id: "B1", text: LISTED, metadata: { event_type: "pointer_outside_content", event_payload: { source: "followups", level: "inbox" } } }]);
+    await t.send({ ts: "100.1", text: "done 2" });
+    expect(t.requests).toEqual([]);
+    expect((await t.followups.list()).map((i) => i.n)).toEqual([1]);
+    await t.send({ ts: "100.2", text: "3 not done" });
+    expect(t.requests.map((r) => r.text)).toEqual(["3 not done"]);
+    expect(t.requests[0]!.history.find((m) => m.ts === "99.1")).toMatchObject({ isPointer: true, outsideContent: "inbox" });
+    expect((await t.followups.list()).map((i) => i.n)).toEqual([1]);
   });
 
   it("leaves anything else, and anyone else, to Pointer", async () => {
@@ -141,7 +153,7 @@ describe("the done command in the console", () => {
     expect(created.conversation.pending).toBe(false);
     expect(created.conversation.messages.map((m) => [m.role, m.text, m.relayed])).toEqual([
       ["user", "done 1", undefined],
-      ["pointer", "✅ Closed #1 Reply to Omar.", "read"],
+      ["pointer", "✅ Closed #1 Reply to Omar.", "inbox"],
     ]);
     const id = created.conversation.id;
     const next = await conversations.send(id, "what else is open?");

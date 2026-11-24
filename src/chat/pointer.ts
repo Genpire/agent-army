@@ -14,7 +14,7 @@ import { type ProviderRuntime, type ProviderSession, defaultModel, fitContentBlo
 import { type FallbackNote, RunWatch, fallbackLine, routeRuntimes } from "../ai/routing.js";
 import { type AttachmentInfo, type AttachmentRepo, type PromptFile, type ThreadRef, classify, toContentBlocks } from "./attachments.js";
 import { type ChatIntegration, chatIntegrations, subagentIntegrationTools } from "./chat-integrations.js";
-import { PendingActions, afterInboxGate, confirmGate, conversationKey, gatedTools, takeConfirmation } from "./confirm-gate.js";
+import { PendingActions, afterInboxGate, confirmGate, conversationKey, gatedInputs, gatedTools, takeConfirmation } from "./confirm-gate.js";
 import type { Config } from "../core/config.js";
 import { GitHub } from "../integrations/github/github.js";
 import { isRepoAllowedOnHost } from "../integrations/code-hosts/code-host-access.js";
@@ -684,7 +684,7 @@ export function createPointerBrain(
             // is read-only: writes (memory, notes, tickets, repo tasks) only from Pointer itself.
             // Pointer's own memory, notes and app writes need the user's yes once this query
             // has read outside content (confirm-gate.ts); one gate per query holds its taint.
-            // Once it has read the owner's Slack inbox or Gmail, nothing can carry it out (afterInboxGate).
+            // Once it has read the owner's Slack inbox, Gmail, calendar or follow-ups, nothing can carry it out (afterInboxGate).
             hooks: {
               PreToolUse: [
                 {
@@ -699,13 +699,14 @@ export function createPointerBrain(
                       ...(answersHeld ? { answersHeld: true } : {}),
                       onHeld: () => void (heldAction = true),
                       gated: gatedTools(connected),
+                      gatedWhen: gatedInputs(connected),
                       ...(slackSelf ? { requesterSlackId: slackSelf } : {}),
                       ...(relayed ? { tainted: true } : {}),
                     }),
                     afterInboxGate({
                       ...(relayed === "inbox" ? { relayed: true } : {}),
                       onInboxRead: () => void (readInbox = true),
-                      // Gmail's own MCP server (an app) reads the inbox too.
+                      // The owner's own apps (Gmail's MCP server, their calendar, their files) count as their inbox too.
                       inboxApps: inboxApps(config).filter((a) => connected.some((i) => i.key === a.key)),
                     }),
                   ],

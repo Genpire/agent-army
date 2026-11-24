@@ -96,12 +96,17 @@ describe("which apps are only for the owner", () => {
     expect(view).toEqual({ "app-gmail": true, "app-google-calendar": true, "app-google-drive": false, "app-linear": false, "app-notion": true });
   });
 
-  it("Gmail and Google Chat read the owner's inbox; the calendar and Drive do not", () => {
+  it("Gmail and Google Chat read the owner's inbox; every owner-only app is gated like it", () => {
     expect(appReadsInbox({ presetId: "gmail", url: "https://gmailmcp.googleapis.com/mcp/v1" })).toBe(true);
     expect(appReadsInbox({ url: "https://chatmcp.googleapis.com/mcp/v1" })).toBe(true);
     expect(appReadsInbox({ presetId: "google-calendar", url: "https://calendarmcp.googleapis.com/mcp/v1" })).toBe(false);
     expect(appReadsInbox({ presetId: "google-drive", url: "https://drivemcp.googleapis.com/mcp/v1" })).toBe(false);
-    expect(inboxApps(config())).toEqual([{ key: "app-gmail", name: "Gmail" }]);
+    // The calendar and Notion (only for the owner) return the owner's own data: gated like the inbox too. Drive was shared.
+    expect(inboxApps(config())).toEqual([
+      { key: "app-gmail", name: "Gmail", inbox: true },
+      { key: "app-google-calendar", name: "Google Calendar", inbox: false },
+      { key: "app-notion", name: "Notion", inbox: false },
+    ]);
     expect(ownerOnlyAppKeys(config())).toEqual(["app-gmail", "app-google-calendar", "app-notion"]);
   });
 });
@@ -200,25 +205,31 @@ describe("owner-only apps' tools are outside content", () => {
     }
   });
 
-  it("Gmail's MCP tools are gated exactly like the Slack inbox; the calendar's only taint", async () => {
+  it("Gmail's MCP tools are gated exactly like the Slack inbox, and so are the calendar's (the owner's own account)", async () => {
     const apps = inboxApps(config());
     let read = 0;
     const gate = afterInboxGate({ inboxApps: apps, onInboxRead: () => void read++ });
     expect(await call(gate, "WebFetch")).toBeUndefined();
     await call(gate, GMAIL_SEARCH, { query: "from:sam" });
     expect(read).toBe(1);
-    for (const tool of ["WebFetch", "Agent", CALENDAR_SEARCH, "mcp__app-linear__search", "mcp__pointer__start_repo_task"]) {
+    for (const tool of ["WebFetch", "Agent", "mcp__app-linear__search", "mcp__pointer__start_repo_task"]) {
       const d = await call(gate, tool);
       expect(denied(d), tool).toBe(true);
       expect(d?.permissionDecisionReason).toMatch(/^After reading your Gmail \(an app that reads your inbox\), .+ is off for the rest of this reply/);
     }
-    // Gmail's own tools stay (its writes are held by the confirm gate), like Slack and the inboxes.
-    for (const tool of [GMAIL_DRAFT, GMAIL_SEARCH, "mcp__slack__slack_send_message", GMAIL_INBOX_TOOL_NAME]) expect(await call(gate, tool), tool).toBeUndefined();
+    // Gmail's own tools stay (its writes are held by the confirm gate), like Slack, the inboxes and the owner's other own apps.
+    for (const tool of [GMAIL_DRAFT, GMAIL_SEARCH, CALENDAR_SEARCH, "mcp__slack__slack_send_message", GMAIL_INBOX_TOOL_NAME]) expect(await call(gate, tool), tool).toBeUndefined();
 
-    // The calendar's tools are not an inbox: nothing is turned off after them.
+    // The calendar's tools return the owner's agenda (meeting links with passcodes, invites outsiders wrote): the same.
     const calendar = afterInboxGate({ inboxApps: apps });
-    await call(calendar, CALENDAR_SEARCH);
     expect(await call(calendar, "WebFetch")).toBeUndefined();
+    await call(calendar, CALENDAR_SEARCH);
+    for (const tool of ["WebFetch", "Agent", "mcp__app-linear__search"]) {
+      const d = await call(calendar, tool);
+      expect(denied(d), tool).toBe(true);
+      expect(d?.permissionDecisionReason).toMatch(/^After reading your Google Calendar \(your own account, an app only for you\), .+ is off/);
+    }
+    expect(await call(calendar, GMAIL_SEARCH)).toBeUndefined();
     // A subagent's call (refused elsewhere) turns nothing off.
     const sub = afterInboxGate({ inboxApps: apps });
     await call(sub, GMAIL_SEARCH, {}, "a1");

@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Config } from "../../src/core/config.js";
-import { FollowupReminders, briefDue, meetingDue, reminderDueAt } from "../../src/followups/reminders.js";
+import { CONSOLE_KEEP, FollowupReminders, briefDue, meetingDue, reminderDueAt } from "../../src/followups/reminders.js";
+import { RoutineScheduler } from "../../src/routines/scheduler.js";
 import { FollowupStore } from "../../src/followups/store.js";
 import type { CalendarEvent, CalendarSource, EmailSource, EmailThread, FollowupItem } from "../../src/followups/types.js";
 import { Clock, KEY, MemoryStore, configured, fakeSlack, fakeThreads, routineEnv, tmpStore } from "../routines/helpers.js";
@@ -46,6 +47,27 @@ describe("when reminders are due", () => {
     expect(reminderDueAt({ ...every2h, remindedAt: "2026-11-24T11:00:05.000Z" }, at("2026-11-24T13:01:00Z"))?.toISOString()).toBe("2026-11-24T13:00:00.000Z");
   });
 
+  it("a repeat of whole days stays at its local time when the clocks change; a shorter one steps in minutes", () => {
+    const at = (iso: string) => new Date(iso);
+    const LONDON = "Europe/London"; // GMT, then BST (UTC+1) from Sunday, March 29, 2026 at 01:00 UTC
+    // Every day at 09:00 local, from Friday (09:00 GMT = 09:00 UTC).
+    const daily = item(1, { remindAt: "2026-03-27T09:00:00.000Z", repeatMin: 24 * 60, remindedAt: "2026-03-28T09:00:05.000Z" });
+    // Sunday 09:00 BST is 08:00 UTC: reminded then, not an hour late at 09:00 UTC.
+    expect(reminderDueAt(daily, at("2026-03-29T07:59:00Z"), LONDON)).toBeUndefined();
+    expect(reminderDueAt(daily, at("2026-03-29T08:00:00Z"), LONDON)?.toISOString()).toBe("2026-03-29T08:00:00.000Z");
+    expect(reminderDueAt({ ...daily, remindedAt: "2026-03-29T08:00:05.000Z" }, at("2026-03-30T08:00:00Z"), LONDON)?.toISOString()).toBe("2026-03-30T08:00:00.000Z");
+    expect(reminderDueAt({ ...daily, remindedAt: "2026-03-30T08:00:05.000Z" }, at("2026-03-30T12:00:00Z"), LONDON)).toBeUndefined();
+    // Weekly, across the change in the autumn too (BST ends Sunday, October 25, 2026): Monday 09:00 local each time.
+    const weekly = item(2, { remindAt: "2026-10-19T08:00:00.000Z", repeatMin: 7 * 24 * 60, remindedAt: "2026-10-19T08:00:05.000Z" });
+    expect(reminderDueAt(weekly, at("2026-10-26T08:30:00Z"), LONDON)).toBeUndefined();
+    expect(reminderDueAt(weekly, at("2026-10-26T09:00:00Z"), LONDON)?.toISOString()).toBe("2026-10-26T09:00:00.000Z");
+    // Every 2 hours: elapsed time, whatever the clocks do.
+    const every2h = item(3, { remindAt: "2026-03-28T23:00:00.000Z", repeatMin: 120, remindedAt: "2026-03-28T23:00:05.000Z" });
+    expect(reminderDueAt(every2h, at("2026-03-29T01:00:00Z"), LONDON)?.toISOString()).toBe("2026-03-29T01:00:00.000Z");
+    // Without a timezone: UTC.
+    expect(reminderDueAt(daily, at("2026-03-29T09:00:00Z"))?.toISOString()).toBe("2026-03-29T09:00:00.000Z");
+  });
+
   it("a meeting: its minutes before it starts, until it starts; not all-day or declined ones", () => {
     const e: CalendarEvent = { id: "ev1", title: "Standup", start: "2026-11-24T07:00:00.000Z", end: "2026-11-24T07:15:00.000Z", allDay: false };
     expect(meetingDue(e, new Date("2026-11-24T06:49:00Z"), 10)).toBe(false);
@@ -59,10 +81,11 @@ describe("when reminders are due", () => {
 });
 
 /** A calendar that returns these events (overlapping the window asked), counting its reads. */
-function fakeCalendar(events: CalendarEvent[], ready = true) {
+function fakeCalendar(events: CalendarEvent[], ready = true, connected?: boolean) {
   const reads: [string, string][] = [];
   const calendar: CalendarSource = {
     ready: async () => ready,
+    ...(connected === undefined ? {} : { connected: async () => connected }),
     eventsBetween: async (from, to) => {
       reads.push([from.toISOString(), to.toISOString()]);
       return events.filter((e) => Date.parse(e.end) > from.getTime() && Date.parse(e.start) < to.getTime());
@@ -103,7 +126,7 @@ async function setup(opts: { account?: boolean; calendar?: CalendarSource; email
 }
 
 const EVENTS: CalendarEvent[] = [
-  { id: "ev-standup", title: "Standup", start: "2026-11-24T07:00:00.000Z", end: "2026-11-24T07:15:00.000Z", allDay: false, link: "https://meet.example.com/abc" },
+  { id: "ev-standup", title: "Standup", start: "2026-11-24T07:00:00.000Z", end: "2026-11-24T07:15:00.000Z", allDay: false, link: "https://meet.example.com/abc", location: "Room 4, pin 9921" },
   { id: "ev-offsite", title: "Offsite <!channel>", start: "2026-11-23T22:00:00.000Z", end: "2026-11-24T22:00:00.000Z", allDay: true },
   { id: "ev-declined", title: "Declined sync", start: "2026-11-24T09:00:00.000Z", end: "2026-11-24T09:30:00.000Z", allDay: false, declined: true },
 ];
@@ -134,10 +157,10 @@ describe("the reminders", () => {
     expect(t.slack.messages).toHaveLength(1);
     const dm = t.slack.messages[0]!;
     expect(dm.channel).toBe(OWNER);
-    expect(dm.metadata).toEqual({ event_type: "pointer_outside_content", event_payload: { source: "followups", level: "read" } });
+    expect(dm.metadata).toEqual({ event_type: "pointer_outside_content", event_payload: { source: "followups", level: "inbox" } });
     expect(dm.text).toContain("*Good morning: Tuesday, November 24*");
     expect(dm.text).toContain("• All day: Offsite &lt;!channel&gt;");
-    expect(dm.text).toContain("• 09:00–09:15 Standup · <https://meet.example.com/abc|join>");
+    expect(dm.text).toContain("• 09:00–09:15 Standup · Room 4, pin 9921 · <https://meet.example.com/abc|join>");
     expect(dm.text).not.toContain("Declined sync");
     expect(dm.text).toContain("*Open follow-ups: 2*");
     // The most overdue first, then the oldest; each with its own number.
@@ -147,30 +170,38 @@ describe("the reminders", () => {
     expect(dm.text).toContain("Reply `done 2 1` to close items when they are done.");
     // Today's window, local midnight to midnight.
     expect(cal.reads[0]).toEqual(["2026-11-23T22:00:00.000Z", "2026-11-24T22:00:00.000Z"]);
-    // Kept in the console, as relayed outside content.
-    expect(t.threads.started).toEqual([expect.objectContaining({ title: "Follow-ups", relayed: "read" })]);
-    expect(t.threads.started[0]!.markdown).toContain("**#1** Reply to Omar about the Q3 invoice");
-    expect(t.threads.started[0]!.markdown).toContain("[open](https://example.slack.com/archives/D1/p1)");
+    // Kept in the console, as relayed inbox content: short titles, no links, no places (console conversations are plain text).
+    expect(t.threads.started).toEqual([expect.objectContaining({ title: "Follow-ups", relayed: "inbox" })]);
+    const kept = t.threads.started[0]!.markdown;
+    expect(kept).toContain("**#1** Reply to Omar about the Q3 invoice · Omar · Slack");
+    expect(kept).toContain("• 09:00–09:15 Standup");
+    expect(kept).not.toContain("https://");
+    expect(kept).not.toContain("pin 9921");
 
     // Once a day, also after a restart.
     expect((await t.tick("2026-11-24T06:31:00Z")).brief).toBe(false);
     expect((await t.make().tick(new Date("2026-11-24T06:40:00Z"))).brief).toBe(false);
     expect(t.slack.messages).toHaveLength(1);
-    // The next day's goes to the same console conversation.
+    // The next day's goes to the same console conversation, which keeps its latest messages only.
     expect((await t.tick("2026-11-25T06:30:00Z")).brief).toBe(true);
-    expect(t.threads.posted).toHaveLength(1);
+    expect(t.threads.posted).toEqual([expect.objectContaining({ relayed: "inbox", keepLast: CONSOLE_KEEP })]);
     // Not on Saturday.
     expect((await t.tick("2026-11-28T06:30:00Z")).brief).toBe(false);
   });
 
-  it("say plainly in the brief when no calendar is connected", async () => {
-    const t = await setup({ calendar: fakeCalendar([], false).calendar });
+  it("say plainly in the brief when no calendar is connected, and when it is connected but cannot be read", async () => {
+    const t = await setup({ calendar: fakeCalendar([], false, false).calendar });
     await t.tick("2026-11-24T06:30:00Z");
     expect(t.slack.messages[0]!.text).toContain("No calendar is connected: connect Google Calendar on the Integrations page");
     expect(t.slack.messages[0]!.text).toContain("Nothing open.");
     const none = await setup();
     await none.tick("2026-11-24T06:30:00Z");
     expect(none.slack.messages[0]!.text).toContain("No calendar is connected");
+    // Connected, but its sign-in expired or Google is down: not "no calendar".
+    const failing = await setup({ calendar: fakeCalendar([], false, true).calendar });
+    await failing.tick("2026-11-24T06:30:00Z");
+    expect(failing.slack.messages[0]!.text).toContain("Your calendar is connected but could not be read just now");
+    expect(failing.slack.messages[0]!.text).not.toContain("No calendar is connected");
   });
 
   it("remind of an item at its time and every repeat until it is closed, never while snoozed", async () => {
@@ -182,7 +213,7 @@ describe("the reminders", () => {
     expect(t.slack.messages[0]!.text).toContain("⏰ *Reminders*");
     expect(t.slack.messages[0]!.text).toContain("• *#1* Call Omar");
     expect(t.slack.messages[0]!.text).toContain("Reply `done 1 2` to close items when they are done.");
-    expect(t.slack.messages[0]!.metadata).toMatchObject({ event_payload: { source: "followups", level: "read" } });
+    expect(t.slack.messages[0]!.metadata).toMatchObject({ event_payload: { source: "followups", level: "inbox" } });
     expect((await t.tick("2026-11-24T13:01:00Z")).items).toEqual([]);
     expect((await t.tick("2026-11-24T15:00:00Z")).items).toEqual([1]);
     expect(t.slack.messages[1]!.text).toMatch(/^⏰ \*Reminder\* \*#1\* Call Omar/);
@@ -205,6 +236,82 @@ describe("the reminders", () => {
     });
     expect((await failing.tick(new Date("2026-11-24T13:00:00Z"))).items).toEqual([]);
     expect((await t.tick("2026-11-24T13:01:00Z")).items).toEqual([1]);
+  });
+
+  it("never post twice: a tick that starts while the one before still runs is skipped", async () => {
+    let release: () => void = () => undefined;
+    const slow = new Promise<void>((resolve) => (release = resolve));
+    const calendar: CalendarSource = {
+      ready: async () => true,
+      eventsBetween: async () => {
+        await slow;
+        return EVENTS;
+      },
+    };
+    const t = await setup({ calendar, patch: (c) => void (c.followups.morningBrief.enabled = false) });
+    const first = t.tick("2026-11-24T06:50:00Z");
+    // The calendar takes longer than a minute (Google's retries): the next minute's tick starts meanwhile.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const second = await t.reminders.tick(new Date("2026-11-24T06:51:00Z"));
+    expect(second).toMatchObject({ meetings: [], skipped: "The previous tick is still running." });
+    release();
+    expect((await first).meetings).toEqual(["meeting:ev-standup:2026-11-24T07:00:00.000Z"]);
+    expect((await t.tick("2026-11-24T06:52:00Z")).meetings).toEqual([]);
+    expect(t.slack.messages).toHaveLength(1);
+  });
+
+  it("never post twice when what went cannot be recorded in the store", async () => {
+    const cal = fakeCalendar(EVENTS);
+    const t = await setup({ calendar: cal.calendar });
+    // Due before the brief: the brief lists it, so it is not reminded again on its own.
+    await t.followups.add({ title: "Call Omar", source: "owner", remindAt: "2026-11-24T06:00:00Z" });
+    // From now on every write of the follow-ups fails (Cloud Storage down): the DMs still go, once each.
+    const writes = t.followups as unknown as { put: () => Promise<void> };
+    writes.put = async () => Promise.reject(new Error("storage unavailable"));
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const warns = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const brief = await t.tick("2026-11-24T06:30:00Z");
+      expect(brief.brief).toBe(true);
+      for (const minute of ["06:31", "06:32", "06:45"]) expect(await t.tick(`2026-11-24T${minute}:00Z`), minute).toMatchObject({ brief: false, items: [] });
+      // The item listed in the brief is not reminded again on its own either; the meeting goes once.
+      expect((await t.tick("2026-11-24T06:50:00Z")).meetings).toEqual(["meeting:ev-standup:2026-11-24T07:00:00.000Z"]);
+      expect((await t.tick("2026-11-24T06:51:00Z")).meetings).toEqual([]);
+      expect(t.slack.messages.map((m) => m.text.split("\n")[0])).toEqual(["☀️ *Good morning: Tuesday, November 24*", "📅 *In 10 min*: Standup · 09:00–09:15 · <https://meet.example.com/abc|join>"]);
+      expect(errors.mock.calls.map((c) => String(c[0])).filter((l) => l.includes("could not be recorded"))).not.toHaveLength(0);
+    } finally {
+      errors.mockRestore();
+      warns.mockRestore();
+    }
+  });
+
+  it("keep the upcoming events only once the calendar read has finished", async () => {
+    let release: () => void = () => undefined;
+    const slow = new Promise<void>((resolve) => (release = resolve));
+    let reads = 0;
+    const calendar: CalendarSource = {
+      ready: async () => true,
+      eventsBetween: async () => {
+        reads += 1;
+        await slow;
+        return EVENTS;
+      },
+    };
+    const t = await setup({ calendar });
+    const reminders = new FollowupReminders({ configRepo: t.configRepo, followups: t.followups, slack: t.slack.slack, calendar, calendarTtlMs: 5 * 60_000 });
+    const upcoming = (reminders as unknown as { upcomingEvents(now: Date, minutes: number): Promise<CalendarEvent[]> }).upcomingEvents.bind(reminders);
+    const now = new Date("2026-11-24T06:50:00Z");
+    const a = upcoming(now, 10);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    // A second look while the first read is under way never takes it for an empty calendar.
+    const b = upcoming(now, 10);
+    release();
+    expect((await a).map((e) => e.id)).toEqual(["ev-standup", "ev-offsite", "ev-declined"]);
+    expect((await b).map((e) => e.id)).toEqual(["ev-standup", "ev-offsite", "ev-declined"]);
+    expect(reads).toBe(2);
+    // Read: kept for the next minutes.
+    expect((await upcoming(new Date("2026-11-24T06:51:00Z"), 10)).length).toBe(3);
+    expect(reads).toBe(2);
   });
 
   it("remind before each meeting once, also across a restart", async () => {
@@ -263,6 +370,39 @@ describe("the reminders", () => {
 });
 
 describe("the reminders on the routines' clock", () => {
+  it("never start a task again while its run from an earlier tick has not finished", async () => {
+    const env = await routineEnv({ owner: "inst-a" });
+    const scheduler = new RoutineScheduler({ configRepo: env.configRepo, repo: env.service.repo, runner: env.service.runner, owner: "inst-a", now: env.clock.now, leaderTaskMs: 5 });
+    let release: () => void = () => undefined;
+    const slow = new Promise<void>((resolve) => (release = resolve));
+    const started: string[] = [];
+    scheduler.onLeaderTick("slow reminders", async (now) => {
+      started.push(now.toISOString());
+      await slow;
+    });
+    const quiet = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      // The first run outlasts the tick's limit: the tick goes on, the run goes on.
+      expect((await scheduler.tick()).leader).toBe(true);
+      env.clock.ms += 60_000;
+      await scheduler.tick();
+      env.clock.ms += 60_000;
+      await scheduler.tick();
+      expect(started).toEqual(["2026-11-21T07:00:00.000Z"]);
+      release();
+      await slow;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      env.clock.ms += 60_000;
+      await scheduler.tick();
+      expect(started).toEqual(["2026-11-21T07:00:00.000Z", "2026-11-21T07:03:00.000Z"]);
+    } finally {
+      quiet.mockRestore();
+      warn.mockRestore();
+      await scheduler.stop();
+    }
+  });
+
   it("run on each tick only while this instance holds the lease", async () => {
     const store = await tmpStore();
     const a = await routineEnv({ store, owner: "inst-a" });

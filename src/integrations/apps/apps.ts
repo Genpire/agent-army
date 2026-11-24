@@ -220,9 +220,16 @@ export const appAgents = (config: Config, appId: string): AgentSpec[] => {
 /** The server keys of the enabled owner-only apps: their tools are never a subagent's (pointer.ts). */
 export const ownerOnlyAppKeys = (config: Pick<Config, "apps">): string[] => config.apps.filter((a) => a.enabled && appOwnerOnly(a)).map(appServerKey);
 
-/** The enabled apps that read the owner's inbox (Gmail, Google Chat), by server key and name: gated like the Slack inbox (afterInboxGate). */
-export const inboxApps = (config: Pick<Config, "apps">): { key: string; name: string }[] =>
-  config.apps.filter((a) => a.enabled && appReadsInbox(a)).map((a) => ({ key: appServerKey(a), name: a.name }));
+/**
+ * The enabled apps gated like the Slack inbox (afterInboxGate), by server
+ * key and name: those that read the owner's inbox (Gmail, Google Chat:
+ * `inbox`), and every other owner-only app (their calendar, their Drive):
+ * what those return is the owner's own (meeting links with passcodes,
+ * invites and files other people wrote), so once one is called the web,
+ * the team and other apps are off for the rest of the reply.
+ */
+export const inboxApps = (config: Pick<Config, "apps">): { key: string; name: string; inbox: boolean }[] =>
+  config.apps.filter((a) => a.enabled && (appReadsInbox(a) || appOwnerOnly(a))).map((a) => ({ key: appServerKey(a), name: a.name, inbox: appReadsInbox(a) }));
 
 /** Every agent (enabled or not) an app is assigned to. */
 export const appAgentIds = (config: Config, appId: string): string[] => config.team.agents.filter((a) => a.apps.includes(appId)).map((a) => a.id);

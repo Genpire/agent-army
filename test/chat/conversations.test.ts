@@ -165,6 +165,19 @@ describe("ConversationService", () => {
     expect(buildPointerPrompt(req)).not.toContain("Sam needs the deck");
   });
 
+  it("keeps only a conversation's latest messages when a post asks so (the reminders' Follow-ups conversation)", async () => {
+    const t = await setup();
+    const c = await created(t.service, "hi");
+    await t.service.idle();
+    for (let i = 1; i <= 5; i++) expect(await t.service.post(c.id, `Reminder ${i}`, false, "inbox", 3)).toBe(true);
+    const kept = (await t.service.view(c.id))!.conversation.messages;
+    expect(kept.map((m) => m.text)).toEqual(["Reminder 3", "Reminder 4", "Reminder 5"]);
+    expect(kept.every((m) => m.relayed === "inbox")).toBe(true);
+    // Without it, nothing is dropped.
+    await t.service.post(c.id, "Reminder 6", false, "inbox");
+    expect((await t.service.view(c.id))!.conversation.messages).toHaveLength(4);
+  });
+
   it("refuses a second message while Pointer answers (409), then sends it with the history", async () => {
     const t = await setup();
     const gate = deferred<PointerReply>();

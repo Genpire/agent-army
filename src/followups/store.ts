@@ -6,9 +6,12 @@
  *
  * - Items are numbered `n` from 1, never reused, also after an item is
  *   pruned: "done 12" always means the same item.
- * - One thing is one item: adding an open item's `ref` again updates it; a
- *   closed one is reopened only when the thing happened again after it was
- *   closed (`at`), else left closed.
+ * - One thing is one item: adding an open item's `ref` again changes nothing
+ *   the item already says (its title, link, reminder, snooze stay), at most
+ *   fills in a detail or a sender it lacked; a closed one stays closed. Only
+ *   the owner reopens an item (the console: reopen), never an add, whatever
+ *   time it claims the thing happened again: what Pointer adds comes from
+ *   what it read, and that may be someone's planted message.
  * - At most 2 000 items; closed ones are kept 60 days after they were
  *   closed, then dropped, the oldest first when the list is full. Open items
  *   are never dropped: a new one is refused while 2 000 are open.
@@ -64,9 +67,15 @@ interface FollowupData {
   nextN: number;
   items: FollowupItem[];
   reminders: ReminderState;
+  /**
+   * The Slack user the list was last emptied for (reset): kept so that
+   * connecting another person after a disconnect is still seen as a switch
+   * (routes/slack-account.ts).
+   */
+  owner?: string;
 }
 
-/** A new item, or what changes on the open item with its ref. */
+/** A new item, or the fields an open item with its ref may still lack. */
 export interface NewFollowup {
   title: string;
   detail?: string;
@@ -76,13 +85,13 @@ export interface NewFollowup {
   link?: string;
   remindAt?: string;
   repeatMin?: number;
-  /** When it happened at its source (ISO): a closed item with the same ref is reopened only when this is after it was closed. */
-  at?: string;
 }
 
 export type AddResult =
-  | { status: "added" | "updated" | "reopened"; item: FollowupItem }
-  /** The same ref was closed by the owner and nothing happened since: left closed. */
+  | { status: "added"; item: FollowupItem }
+  /** An open item has the same ref: left as it is, but for the empty fields named in `filled`. */
+  | { status: "tracked"; item: FollowupItem; filled: FillableField[] }
+  /** The same ref was closed by the owner: left closed (only the owner reopens it). */
   | { status: "closed"; item: FollowupItem }
   /** The list holds FOLLOWUP_LIMITS.items open items. */
   | { status: "full" };
@@ -194,7 +203,7 @@ export class FollowupStore {
 
   // ---------- Changing ----------
 
-  /** Adds an item, or updates (or reopens) the one with its ref (see the file's comment). */
+  /** Adds an item; with the ref of one already there, leaves that one as it is (see the file's comment). */
   add(input: NewFollowup): Promise<AddResult> {
     return this.write<AddResult>((data) => {
       const now = this.now().toISOString();
@@ -203,20 +212,11 @@ export class FollowupStore {
       if (ref) {
         const open = data.items.find((i) => i.ref === ref && i.status === "open");
         if (open) {
-          const changed = assign(open, fields);
-          return { changed, result: { status: "updated", item: copy(open) } };
+          const filled = fillEmpty(open, fields, input.source);
+          return { changed: filled.length > 0, result: { status: "tracked", item: copy(open), filled } };
         }
         const closed = data.items.filter((i) => i.ref === ref && i.status === "done").sort((a, b) => b.n - a.n)[0];
-        if (closed) {
-          const happened = input.at ? Date.parse(input.at) : NaN;
-          if (!(Number.isFinite(happened) && happened > Date.parse(closed.doneAt ?? closed.createdAt))) return { changed: false, result: { status: "closed", item: copy(closed) } };
-          assign(closed, fields);
-          closed.status = "open";
-          delete closed.doneAt;
-          delete closed.answeredAt;
-          delete closed.snoozedUntil;
-          return { changed: true, result: { status: "reopened", item: copy(closed) } };
-        }
+        if (closed) return { changed: false, result: { status: "closed", item: copy(closed) } };
       }
       if (data.items.length >= FOLLOWUP_LIMITS.items) makeRoom(data);
       if (data.items.length >= FOLLOWUP_LIMITS.items) return { changed: false, result: { status: "full" } };
@@ -335,6 +335,28 @@ export class FollowupStore {
     });
   }
 
+  /**
+   * Empties the list for another person (routes/slack-account.ts: their
+   * Slack account was switched or disconnected): every item and what the
+   * reminders remember go; numbers are still never reused. `owner` is the
+   * Slack user it was emptied for (FollowupData.owner).
+   */
+  reset(owner: string | undefined): Promise<void> {
+    return this.write((data) => {
+      const changed = data.items.length > 0 || JSON.stringify(data.reminders) !== JSON.stringify({ sent: {} }) || data.owner !== owner;
+      data.items = [];
+      data.reminders = { sent: {} };
+      if (owner) data.owner = owner;
+      else delete data.owner;
+      return { changed, result: undefined };
+    });
+  }
+
+  /** The Slack user the list was last emptied for, if any (reset). */
+  async lastOwner(): Promise<string | undefined> {
+    return (await this.current()).owner;
+  }
+
   /** Changes what the reminders remember; `change` returns false when it changes nothing. */
   updateReminders(change: (state: ReminderState) => boolean): Promise<void> {
     return this.write((data) => ({ changed: change(data.reminders), result: undefined }));
@@ -409,6 +431,7 @@ export class FollowupStore {
       nextN: Math.max(typeof raw.nextN === "number" ? raw.nextN : 1, highest + 1),
       items,
       reminders: { ...(raw.reminders ?? {}), sent: { ...(raw.reminders?.sent ?? {}) } },
+      ...(typeof raw.owner === "string" ? { owner: raw.owner } : {}),
     };
   }
 
@@ -475,19 +498,31 @@ function cleanFields(input: NewFollowup): Fields {
   return fields;
 }
 
-/** Applies the fields given to an item; true when anything changed. */
-function assign(item: FollowupItem, fields: Fields): boolean {
-  const before = JSON.stringify(item);
-  if (fields.title) item.title = fields.title;
-  if (fields.detail) item.detail = fields.detail;
-  if (fields.from) item.from = fields.from;
-  if (fields.link) item.link = fields.link;
-  if (fields.remindAt) {
-    item.remindAt = fields.remindAt;
-    delete item.snoozedUntil;
+/** The fields an add may fill in on an item already tracked, when it has none. */
+export type FillableField = "detail" | "from" | "link";
+
+/**
+ * Fills in what an item already tracked lacks: a detail and a sender, and
+ * a link when the add says the same source (whose links tools.ts checks).
+ * Never its title, link, reminder, repeat or snooze: changing those is
+ * followups_update's, which needs the owner's yes after outside content.
+ * Returns the fields filled.
+ */
+function fillEmpty(item: FollowupItem, fields: Fields, source: FollowupSource): FillableField[] {
+  const filled: FillableField[] = [];
+  if (fields.detail && !item.detail) {
+    item.detail = fields.detail;
+    filled.push("detail");
   }
-  if (fields.repeatMin) item.repeatMin = fields.repeatMin;
-  return JSON.stringify(item) !== before;
+  if (fields.from && !item.from) {
+    item.from = fields.from;
+    filled.push("from");
+  }
+  if (fields.link && !item.link && source === item.source) {
+    item.link = fields.link;
+    filled.push("link");
+  }
+  return filled;
 }
 
 type OptionalKey = "from" | "link" | "remindAt" | "repeatMin";
