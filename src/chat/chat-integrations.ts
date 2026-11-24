@@ -2,8 +2,8 @@
  * The integrations Pointer uses in chat beyond its own tool server
  * (pointer-tools.ts: GitHub, memory, notes, monday.com, repo tasks): GitLab
  * and Bitbucket code tools, Jira and Confluence, Miro, Slack (finding people
- * and sending messages), the owner's Slack inbox (their requests only), and
- * apps connected through their MCP servers. Each
+ * and sending messages), the owner's Slack inbox and follow-ups (their
+ * requests only), and apps connected through their MCP servers. Each
  * one brings an MCP server (in-process or remote), the tool names Pointer may
  * call, the read-only ones its chat subagents may call, and a rule for
  * Pointer's instructions.
@@ -32,6 +32,12 @@ export interface ChatIntegration {
   allToolNames: string[];
   /** Full tool names chat subagents may call: read-only ones only. */
   readOnlyToolNames: string[];
+  /**
+   * Full tool names a routine run may call besides the read-only ones: writes
+   * that only add to the owner's own list (followups_add). Never a subagent's
+   * (readOnlyRunGate in pointer.ts).
+   */
+  routineToolNames?: string[];
   /** One or more "- …" lines for the Rules section of Pointer's instructions. */
   promptRule: string;
   /**
@@ -53,6 +59,8 @@ export interface ChatIntegrationContext {
   slackAccount?: SlackUserAccess;
   /** The owner's own conversation with Pointer: the console, or their DM with Pointer (ownerConversation in slack/user-account.ts). */
   ownerConversation?: boolean;
+  /** A run of the owner's own routine, reporting to them alone (ownerRoutine in slack/user-account.ts), checked by the runner. */
+  ownerRoutine?: boolean;
   redact: (text: string) => string;
 }
 

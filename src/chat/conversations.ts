@@ -38,7 +38,9 @@ import { configSecrets, makeRedactor } from "../tasks/worker.js";
  * attachment store first (channel "web", thread = the conversation id, the
  * same place Slack files live), then sent with a message: Pointer reads them
  * like Slack files and repo tasks started here get them. Before the first
- * message a conversation's uploads go to a draft id it then takes.
+ * message a conversation's uploads go to a draft id it then takes. A message
+ * that is only the owner's "done 3 5" is answered by the platform itself
+ * (QuickReplies: the follow-ups are closed), without Pointer.
  * Message text, file contents and transcripts are never logged.
  */
 
@@ -450,7 +452,15 @@ export interface ConversationDeps {
   brainSlot?: <T>(fn: () => Promise<T>) => Promise<T>;
   /** The attachment store Slack files use; without it, the console takes no files (older tests). */
   attachments?: AttachmentRepo;
+  /** Messages the platform answers itself, without Pointer (the owner's "done 3 5"); absent = Pointer answers everything. */
+  quickReplies?: QuickReplies;
   now?: () => Date;
+}
+
+/** Messages the platform answers itself (followups/done-command.ts: "done 3 5" closes those follow-ups). */
+export interface QuickReplies {
+  /** The reply to a message without files, or undefined when Pointer answers it. `before`: the conversation so far, oldest first. */
+  reply(text: string, before: ChatMessage[]): Promise<{ text: string; relayed?: OutsideContent } | undefined>;
 }
 
 export type SendResult = { ok: true; conversation: Conversation } | { ok: false; status: 400 | 404 | 409; error: string };
@@ -576,19 +586,20 @@ export class ConversationService implements WebThreads {
       if (!picked.ok) return { ok: false, status: 400, error: picked.error };
       const now = this.iso();
       const first: ChatMessage = { id: newMessageId(), role: "user", text: body, at: now, ...(picked.files.length ? { files: picked.files } : {}) };
+      const quick = picked.files.length ? undefined : await this.quickReply(body, []);
       const c: Conversation = {
         id,
         title: conversationTitle(body || filesTitle(picked.files)),
         createdAt: now,
         updatedAt: now,
-        pending: true,
-        messages: [first],
+        pending: !quick,
+        messages: quick ? [first, quick] : [first],
         taskIds: [],
       };
       await this.repo.save(c, this.now());
       this.drafts.delete(id);
       // Inside the queue: nothing reads the conversation between the save and the answer starting.
-      this.answerLater(c.id, first);
+      if (!quick) this.answerLater(c.id, first);
       return { ok: true, conversation: c };
     });
   }
@@ -615,12 +626,32 @@ export class ConversationService implements WebThreads {
         at: this.iso(),
         ...(picked.files.length ? { files: picked.files } : {}),
       };
+      const quick = picked.files.length ? undefined : await this.quickReply(body, c.messages);
       c.messages.push(message);
-      c.pending = true;
+      if (quick) c.messages.push(quick);
+      c.pending = !quick;
       await this.repo.save(c, this.now());
-      this.answerLater(c.id, message);
+      if (!quick) this.answerLater(c.id, message);
       return { ok: true, conversation: c };
     });
+  }
+
+  /**
+   * The platform's own answer to a message, as Pointer's message, or
+   * undefined when Pointer answers it (QuickReplies). One that fails leaves
+   * the message to Pointer.
+   */
+  private async quickReply(text: string, before: ChatMessage[]): Promise<ChatMessage | undefined> {
+    const quick = this.deps.quickReplies;
+    if (!quick || !text) return undefined;
+    try {
+      const reply = await quick.reply(text, before);
+      if (!reply) return undefined;
+      return { id: newMessageId(), role: "pointer", text: clip(reply.text, REPLY_MAX_CHARS), at: this.iso(), ...(reply.relayed ? { relayed: reply.relayed } : {}) };
+    } catch (err) {
+      console.error("[web] quick reply failed:", errorText(err).slice(0, 200));
+      return undefined;
+    }
   }
 
   // ---------- Files and voice messages ----------

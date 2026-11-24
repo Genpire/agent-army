@@ -154,7 +154,7 @@ describe("the owner's Slack account API", () => {
     expect(res.status).toBe(200);
     const { routine } = await res.json();
     expect(routine).toMatchObject({
-      name: "What needs my attention on Slack",
+      name: "Follow-ups digest",
       schedule: { cron: "0 9,13,17 * * 1-5", timezone: "Europe/London" },
       deliver: { email: [], slack: "UOWN", console: true },
       scheduleText: "Weekdays at 09:00, 13:00 and 17:00",
@@ -162,8 +162,9 @@ describe("the owner's Slack account API", () => {
       ownerOnly: true,
     });
     expect(routine.instruction).toContain("slack_my_inbox");
+    expect(routine.instruction).toContain("followups_add");
     const status = await (await get("/api/slack/user/report")).json();
-    expect(status).toEqual({ routine: { id: routine.id, name: routine.name }, blocked: 'It already exists: "What needs my attention on Slack" on the Routines page.' });
+    expect(status).toEqual({ routine: { id: routine.id, name: routine.name }, blocked: 'It already exists: "Follow-ups digest" on the Routines page.' });
     const again = await post("/api/slack/user/report", {});
     expect(again.status).toBe(409);
     const { routines } = await (await get("/api/routines")).json();

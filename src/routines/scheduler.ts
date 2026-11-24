@@ -14,6 +14,8 @@
  *   recorded as skipped, with a note. Earlier missed runs are only counted.
  * - A new, changed or resumed routine starts counting from then
  *   (RoutineState.since): it never catches up on runs from before.
+ * - Other work on the same clock (the owner's follow-up reminders) runs
+ *   after the routines on each tick this instance leads (onLeaderTick).
  */
 import { randomBytes } from "node:crypto";
 import type { ConfigRepo, Routine } from "../core/config.js";
@@ -30,6 +32,8 @@ export const CATCH_UP_LIMIT_MS = 60 * 60_000;
 export const ON_TIME_MS = 5 * 60_000;
 /** How far back missed runs are looked for. */
 const LOOKBACK_MS = 8 * 24 * 60 * 60_000;
+/** The longest a task on the clock (onLeaderTick) holds a tick up. */
+export const LEADER_TASK_MS = 45_000;
 
 export type Due =
   | { kind: "none" }
@@ -97,6 +101,8 @@ export interface SchedulerDeps {
   now?: () => Date;
   tickMs?: number;
   leaseTtlMs?: number;
+  /** How long a task on the clock may hold a tick up (tests). */
+  leaderTaskMs?: number;
 }
 
 /** An id for this process in the lease and on the runs it claims. */
@@ -108,6 +114,8 @@ export class RoutineScheduler {
   private timer: ReturnType<typeof setTimeout> | undefined;
   private chain: Promise<unknown> = Promise.resolve();
   private stopped = true;
+  /** Work on the same clock and lease, after the routines (onLeaderTick). */
+  private readonly leaderTasks: { name: string; run: (now: Date) => Promise<unknown> }[] = [];
 
   constructor(private readonly deps: SchedulerDeps) {}
 
@@ -140,6 +148,15 @@ export class RoutineScheduler {
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
     await this.deps.repo.releaseLease(this.deps.owner).catch(() => undefined);
+  }
+
+  /**
+   * Runs `run` on every tick while this instance holds the lease, after the
+   * routines were started: one instance at a time, every minute, and on
+   * POST /routines/tick. A failure is logged and never stops the clock.
+   */
+  onLeaderTick(name: string, run: (now: Date) => Promise<unknown>): void {
+    this.leaderTasks.push({ name, run });
   }
 
   /** One tick; ticks never overlap in this process. */
@@ -179,6 +196,21 @@ export class RoutineScheduler {
       }
     }
     result.finished = Promise.all(runs);
+    for (const task of this.leaderTasks) {
+      // A task that hangs (a calendar that never answers) must not stop the clock: the tick goes on after a while.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const limit = new Promise<"late">((resolve) => {
+        timer = setTimeout(() => resolve("late"), this.deps.leaderTaskMs ?? LEADER_TASK_MS);
+        timer.unref?.();
+      });
+      try {
+        if ((await Promise.race([task.run(now), limit])) === "late") console.error(`[routines] ${task.name} is still running after the tick's time limit; the tick goes on`);
+      } catch (err) {
+        console.error(`[routines] ${task.name} failed on this tick:`, errorText(err).slice(0, 300));
+      } finally {
+        clearTimeout(timer);
+      }
+    }
     return result;
   }
 }

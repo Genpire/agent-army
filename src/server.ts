@@ -65,8 +65,15 @@ import { dataSourcesRoutes } from "./routes/data-sources.js";
 import { emailRoutes } from "./routes/email.js";
 import { routinesRoutes } from "./routes/routines.js";
 import { slackAccountRoutes } from "./routes/slack-account.js";
+import { followupsRoutes } from "./routes/followups.js";
+import { followupQuickReplies } from "./followups/done-command.js";
+import { FollowupReminders } from "./followups/reminders.js";
+import { FollowupStore, type FollowupStoreOptions } from "./followups/store.js";
+import type { CalendarSource, EmailSource } from "./followups/types.js";
+import { registerFollowups } from "./followups/tools.js";
+import { gmailSource, googleCalendarSource } from "./integrations/google/index.js";
 import { SlackInbox } from "./slack/inbox.js";
-import { registerSlackInbox } from "./slack/inbox-tools.js";
+import { migrateAttentionReports, registerSlackInbox } from "./slack/inbox-tools.js";
 import { AnswerNotifier } from "./slack/outreach.js";
 import { normalizeTimeZone } from "./routines/cron.js";
 import { registerRoutineService } from "./routines/routines.js";
@@ -193,6 +200,10 @@ export interface AppOverrides {
   skills?: { fetch?: FetchLike; scoutQuery?: QueryFn };
   /** This instance's memory in bytes, instead of the container's or machine's (the parallel-task cap). */
   memoryBytes?: number;
+  /** The follow-ups store's write batching (tests: 0, so writes one after another do not wait). */
+  followups?: FollowupStoreOptions;
+  /** The owner's calendar and mail for the reminders, instead of the connected Google apps. */
+  google?: { calendar?: CalendarSource; email?: EmailSource };
 }
 
 /** A skill's assignment: every agent, or the listed agent ids. */
@@ -304,8 +315,22 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
   const spending = new Spending({ store, usage, config: () => configRepo.load(), slack: slackFactory });
   // Pointer skips a provider whose monthly cap is used up (the next of its route answers).
   const brain = overrides.brain ?? createPointerBrain({ configRepo, memory, notes, lessons, attachments, spending }, { skills: () => skillsPlugin.current() });
-  // Console conversations: answered by the same brain, within the same limit as Slack answers.
-  const conversations = new ConversationService({ store, configRepo, tasks, runner, brain, usage, spending, brainSlot: withBrainSlot, attachments });
+  // The owner's follow-ups: kept until they say done (Pointer's tools, "done 3 5" in their DM and the console, the API).
+  const followups = new FollowupStore(store, masterKey, overrides.followups);
+  registerFollowups(configRepo, followups);
+  // Console conversations: answered by the same brain, within the same limit as Slack answers; "done 3 5" closes follow-ups itself.
+  const conversations = new ConversationService({
+    store,
+    configRepo,
+    tasks,
+    runner,
+    brain,
+    usage,
+    spending,
+    brainSlot: withBrainSlot,
+    attachments,
+    quickReplies: followupQuickReplies(followups),
+  });
   // Routines: Pointer's scheduled work, run by the same brain (read-only), within the same caps and concurrency limit.
   const routines = new RoutineService({
     configRepo,
@@ -326,7 +351,21 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
   const answers = new AnswerNotifier({ configRepo, slack: slackFactory });
   // Emptying the inbox (listening off, disconnected, another account) drops the notices still waiting too.
   inbox.onClear(() => answers.clear());
-  const slackDeps: SlackDeps & { web: WebThreads; spending: Spending; inbox: SlackInbox; answers: AnswerNotifier } = {
+  // The owner answered in Slack: their follow-ups about it say "you replied" (and stay open).
+  inbox.onAnswered((refs, at) => void followups.answered(refs, at).catch(() => console.error("[followups] an answer of the owner's was not noted")));
+  // Reminders on the routines' clock and lease: the morning brief, items' own times, before meetings (followups/reminders.ts).
+  const reminders = new FollowupReminders({
+    configRepo,
+    followups,
+    calendar: overrides.google?.calendar ?? googleCalendarSource({ configRepo }),
+    email: overrides.google?.email ?? gmailSource({ configRepo }),
+    slack: slackFactory,
+    threads: consoleThreads(conversations),
+  });
+  routines.scheduler.onLeaderTick("follow-up reminders", (now) => reminders.tick(now));
+  // The attention reports made before follow-ups become the follow-ups digest (their instruction, word for word).
+  await migrateAttentionReports(configRepo).catch((err: unknown) => console.error("[followups] attention reports not migrated:", err instanceof Error ? err.message.slice(0, 200) : "unknown error"));
+  const slackDeps: SlackDeps & { web: WebThreads; spending: Spending; inbox: SlackInbox; answers: AnswerNotifier; followups: FollowupStore } = {
     configRepo,
     tasks,
     runner,
@@ -339,6 +378,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
     spending,
     inbox,
     answers,
+    followups,
   };
 
   // The setup token creates the admin account on first run and resets its
@@ -1471,6 +1511,8 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
   app.use(routinesRoutes({ ...routeDeps, routines }));
   // The owner's own Slack account: connect, switches, disconnect, the attention report.
   app.use(slackAccountRoutes({ ...routeDeps, routines, inbox, slack: slackFactory }));
+  // The owner's follow-ups: the list, add, done, reopen, snooze, and the reminders' settings.
+  app.use(followupsRoutes({ ...routeDeps, followups }));
   app.use(chatRoutes({ ...routeDeps, conversations }));
   app.use(lessonsRoutes({ ...routeDeps, lessons }));
 
@@ -1481,7 +1523,7 @@ export async function createApp(env: NodeJS.ProcessEnv = process.env, overrides:
     res.status(500).json({ error: "Something went wrong on the server." });
   });
 
-  return { app, runner, store, conversations, automation, routines, inbox, answers, stopAcceptingWork };
+  return { app, runner, store, conversations, automation, routines, inbox, answers, followups, reminders, stopAcceptingWork };
 }
 
 /** The stored key of a repo's setup: repo names are compared without letter case. */
@@ -1512,7 +1554,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   // Checkouts of workers killed with an earlier process (older than the job's deadline: no worker runs longer).
   void removeStaleWorkFolders({ dirs: workFolderDirs(process.env), maxAgeMs: staleWorkFolderAgeMs(process.env) });
   const port = Number(process.env.PORT ?? 8080);
-  const { app, runner, store, routines, inbox, answers, stopAcceptingWork } = await createApp();
+  const { app, runner, store, routines, inbox, answers, followups, stopAcceptingWork } = await createApp();
   // The local runner's workers stopped with the earlier process: their tasks are marked failed before anything
   // new starts. Cloud Run job tasks go on across a restart of this service.
   if (runner.kind === "local") {
@@ -1536,7 +1578,8 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
       server,
       stopAccepting: stopAcceptingWork,
       // The owner's inbox writes changes about a second after they arrive: what is still queued is saved.
-      // Then the answers collected for a notice to the owner (those just saved included) are sent.
+      // Then the answers collected for a notice to the owner (those just saved included) are sent, and the
+      // follow-ups' queued changes (the "you replied" those answers noted included) are saved.
       finish: [
         { run: () => routines.scheduler.stop(), timeoutMs: 3_000 },
         {
@@ -1544,6 +1587,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
             await inbox.flush();
             await new Promise((resolve) => setImmediate(resolve));
             await answers.flush();
+            await followups.flush();
           },
           timeoutMs: 3_000,
         },

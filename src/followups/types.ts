@@ -3,7 +3,7 @@
  * says they are done, with reminders until then.
  *
  * Where items come from:
- * - the owner ("remind me to call Fadi at 3", "track this");
+ * - the owner ("remind me to call Omar at 3", "track this");
  * - Pointer, when it finds something that needs the owner's reply or action
  *   in their Slack inbox (slack/inbox.ts) or their Gmail (EmailSource);
  * - nothing else adds items on its own.
@@ -30,7 +30,7 @@ export type FollowupStatus = (typeof FOLLOWUP_STATUSES)[number];
 export interface FollowupItem {
   /** The owner's number for it: stable, never reused ("done 12"). */
   n: number;
-  /** One line: "Reply to Fadi about the Q3 invoice". */
+  /** One line: "Reply to Omar about the Q3 invoice". */
   title: string;
   /** More context, plain text, clipped (outside content when the source is slack or gmail). */
   detail: string;
@@ -40,7 +40,7 @@ export interface FollowupItem {
    * "slack:<channel>:<ts>", "gmail:<threadId>", "calendar:<eventId>". Absent for the owner's own items.
    */
   ref?: string;
-  /** Who it is from or with ("Fadi Shqerat", "billing@acme.example"). */
+  /** Who it is from or with ("Sam Lee", "billing@acme.example"). */
   from?: string;
   /** A link to it (Slack permalink, Gmail thread, calendar event). */
   link?: string;

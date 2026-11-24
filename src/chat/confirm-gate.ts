@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { HookCallback, SyncHookJSONOutput } from "@anthropic-ai/claude-agent-sdk";
 import type { ChatIntegration } from "./chat-integrations.js";
 import { APP_ID_RE } from "../core/config.js";
+import { FOLLOWUPS_SERVER_KEY, FOLLOWUP_GATED_TOOLS, FOLLOWUP_TRUSTED_TOOLS } from "../followups/tool-names.js";
 import { ROUTINES_SERVER_KEY, ROUTINE_RUN_TOOL, ROUTINE_WRITE_TOOLS } from "../routines/tool-names.js";
 import { INBOX_SERVER_KEY, INBOX_TOOL_NAME } from "../slack/inbox-tools.js";
 import { SLACK_SEND_TOOL, SLACK_SERVER_KEY, isSelfTarget } from "../slack/slack-tools.js";
@@ -33,6 +34,11 @@ import type { PointerRequest } from "./pointer-types.js";
  * A Slack message from Pointer to the person asking ("me", or their own
  * Slack user id) is not held: it reaches nobody else. One sent as the owner
  * (as "me") always is: it is their own message, to someone.
+ *
+ * Closing, snoozing and changing the owner's follow-ups are gated too, so that
+ * an email or a message Pointer read cannot close or hide the owner's items.
+ * Adding one is not: it only adds to the owner's own list, and says where
+ * it came from.
  *
  * Not gated: Jira, monday.com and Miro writes, and start_repo_task. They are
  * bounded by allow lists, visible where they land (the issue, item or board
@@ -70,6 +76,9 @@ export const OUTBOUND_TOOLS = [SLACK_SEND_TOOL];
  */
 export const ROUTINE_GATED_TOOLS = ROUTINE_WRITE_TOOLS;
 
+/** The owner's follow-ups: closing, snoozing and changing an item (followups/tool-names.ts). */
+export const FOLLOWUP_GATED = FOLLOWUP_GATED_TOOLS;
+
 /**
  * Tools whose output holds nothing from outside, so calling them never
  * taints a query; every other tool does, the Agent/Task tool included
@@ -78,7 +87,9 @@ export const ROUTINE_GATED_TOOLS = ROUTINE_WRITE_TOOLS;
  * project_notes_add and slack_send_message only echo what Pointer wrote
  * (slack_send_message also, when a name matches several people, their user
  * ids and @handles, never real names or titles): without them here,
- * "remember A and B" would need a confirmation for B.
+ * "remember A and B" would need a confirmation for B. The follow-up tools
+ * that add, close, snooze and change items answer with numbers and times
+ * only; listing them shows other people's words, so it taints.
  */
 export const TRUSTED_TOOLS: ReadonlySet<string> = new Set([
   "mcp__pointer__repo_task_status",
@@ -87,14 +98,16 @@ export const TRUSTED_TOOLS: ReadonlySet<string> = new Set([
   ...OUTBOUND_TOOLS,
   ...ROUTINE_GATED_TOOLS,
   ROUTINE_RUN_TOOL,
+  ...FOLLOWUP_TRUSTED_TOOLS,
   "TodoWrite",
   "Skill",
 ]);
 
 /**
  * The tools that need a confirmation after outside content: memory, project
- * notes, every app tool that is not read-only, sending Slack messages, and
- * creating, changing or deleting routines.
+ * notes, every app tool that is not read-only, sending Slack messages,
+ * creating, changing or deleting routines, and closing, snoozing or changing
+ * the owner's follow-ups.
  */
 export function gatedTools(integrations: ChatIntegration[]): Set<string> {
   const appWrites = integrations
@@ -106,7 +119,8 @@ export function gatedTools(integrations: ChatIntegration[]): Set<string> {
   const offered = integrations.flatMap((i) => i.allToolNames);
   const outbound = offered.filter((t) => OUTBOUND_TOOLS.includes(t));
   const routines = offered.filter((t) => ROUTINE_GATED_TOOLS.includes(t));
-  return new Set([...PERSISTENT_WRITE_TOOLS, ...appWrites, ...outbound, ...routines]);
+  const followups = offered.filter((t) => FOLLOWUP_GATED.includes(t));
+  return new Set([...PERSISTENT_WRITE_TOOLS, ...appWrites, ...outbound, ...routines, ...followups]);
 }
 
 /**
@@ -392,9 +406,11 @@ export function confirmGate({
 /**
  * Servers whose tools stay on after the owner's inbox was read: Pointer's own
  * (GitHub reads, memory and notes, held for a yes), Slack (a message is held
- * for the owner's yes: the inbox taints), the inbox itself and routines.
+ * for the owner's yes: the inbox taints), the inbox itself, routines, and the
+ * owner's follow-ups (adding what needs them is what reading the inbox is
+ * for; closing one is held for their yes).
  */
-const SERVERS_AFTER_INBOX = ["pointer", SLACK_SERVER_KEY, INBOX_SERVER_KEY, ROUTINES_SERVER_KEY].map((key) => `mcp__${key}__`);
+const SERVERS_AFTER_INBOX = ["pointer", SLACK_SERVER_KEY, INBOX_SERVER_KEY, ROUTINES_SERVER_KEY, FOLLOWUPS_SERVER_KEY].map((key) => `mcp__${key}__`);
 /** Built-in tools that carry nothing out: loading a skill, the todo list. */
 const BUILTINS_AFTER_INBOX = new Set(["Skill", "TodoWrite"]);
 /** Pointer's own tools that hand what it knows to others without a yes: the team (it has the network) and monday.com writes. */

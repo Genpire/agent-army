@@ -23,6 +23,7 @@ import { MondayClient } from "../integrations/monday/monday.js";
 import type { NotesRepo } from "./notes.js";
 import { ActivityMapper } from "./pointer-activity.js";
 import { createPointerToolServer, githubToolOptions } from "./pointer-tools.js";
+import { FOLLOWUP_TOOL_NAMES } from "../followups/tool-names.js";
 import { INBOX_TOOL_NAME } from "../slack/inbox-tools.js";
 import { OUTREACH_LIMITS } from "../slack/outreach.js";
 import { requesterSlackId } from "../slack/slack-tools.js";
@@ -201,6 +202,7 @@ const RELAYED_KIND: Record<RelayedSource, string> = {
   answer_notice: "answers passed on to the owner",
   routine_report: "a routine's report",
   chat_reply: "a reply that read the owner's inbox",
+  followups: "follow-up reminders (calendar events, items found in other people's messages)",
 };
 
 /** When a history message was, "2026-11-23 09:00 UTC": a Slack ts or the console's ISO time; empty when it is neither. */
@@ -437,8 +439,8 @@ async function* singleUserTurn(content: ContentBlockParam[]): AsyncGenerator<SDK
   yield { type: "user", message: { role: "user", content }, parent_tool_use_id: null };
 }
 
-/** Tools no subagent ever calls, whatever the read-only set says: the owner's Slack inbox (their private messages). */
-const NEVER_FOR_SUBAGENTS = new Set([INBOX_TOOL_NAME]);
+/** Tools no subagent ever calls, whatever the read-only set says: the owner's Slack inbox (their private messages) and follow-ups. */
+const NEVER_FOR_SUBAGENTS = new Set([INBOX_TOOL_NAME, ...FOLLOWUP_TOOL_NAMES]);
 
 /** PreToolUse hook: inside any subagent, deny every tool outside the read-only set, and the owner's inbox always. */
 export function subagentReadOnlyGate(allowed: Set<string>): HookCallback {
@@ -459,11 +461,14 @@ export function subagentReadOnlyGate(allowed: Set<string>): HookCallback {
  * PreToolUse hook of a routine run (surface "routine"): every tool outside
  * the read-only set is denied, for Pointer itself and for subagents. The
  * write tools are not offered in the first place (disallowedTools); this
- * holds even if one were.
+ * holds even if one were. The one exception, `ownListWrites`: writes that
+ * only add to the owner's own list (followups_add in the owner's routine,
+ * ChatIntegration.routineToolNames), for Pointer itself, never a subagent.
  */
-export function readOnlyRunGate(allowed: Set<string>): HookCallback {
+export function readOnlyRunGate(allowed: Set<string>, ownListWrites: ReadonlySet<string> = new Set()): HookCallback {
   return async (input) => {
     if (input.hook_event_name !== "PreToolUse" || allowed.has(input.tool_name)) return {};
+    if (ownListWrites.has(input.tool_name) && !("agent_id" in input && input.agent_id)) return {};
     return {
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
@@ -605,6 +610,7 @@ export function createPointerBrain(
           addAttachment: ctx.addAttachment,
           ...(slackAccount ? { slackAccount } : {}),
           ownerConversation: ownerConversation(config, req),
+          ...(routineRun && req.ownerRoutine === true ? { ownerRoutine: true } : {}),
           redact,
         });
         const connected = integrations.filter((i) => i.server);
@@ -620,11 +626,14 @@ export function createPointerBrain(
             connected.filter((i) => i.agentIds?.includes(agentId)).flatMap((i) => i.readOnlyToolNames);
           // The owner's inbox is read-only but never a subagent's: subagentReadOnlyGate refuses it whatever this set holds.
           const gateTools = new Set([...subagentTools, ...connected.flatMap((i) => i.readOnlyToolNames)]);
-          gateTools.delete(INBOX_TOOL_NAME);
+          for (const never of NEVER_FOR_SUBAGENTS) gateTools.delete(never);
           const allTools = [...builtins, ...tools.allToolNames, ...connected.flatMap((i) => i.allToolNames)];
-          // A routine run is offered only the read-only tools; the rest are not loaded at all.
+          // A routine run is offered only the read-only tools, and the writes that only add to the owner's own list
+          // (followups_add in their routine); the rest are not loaded at all.
           const readOnlyTools = new Set([...builtins, ...tools.readOnlyToolNames, ...connected.flatMap((i) => i.readOnlyToolNames)]);
-          const writeTools = allTools.filter((t) => !readOnlyTools.has(t));
+          const ownListWrites = new Set(connected.flatMap((i) => i.routineToolNames ?? []).filter((t) => allTools.includes(t)));
+          const routineTools = new Set([...readOnlyTools, ...ownListWrites]);
+          const writeTools = allTools.filter((t) => !routineTools.has(t));
           const chatModel = team.pointer.model || defaultModel(config, runtime);
           const options: Options = {
             systemPrompt: buildPointerSystemPrompt({
@@ -643,7 +652,7 @@ export function createPointerBrain(
             ...(runtime.managedSettings ? { managedSettings: runtime.managedSettings } : {}),
             tools: [...builtins],
             // Headless: nothing can prompt, so anything not listed here is denied.
-            allowedTools: routineRun ? [...readOnlyTools] : allTools,
+            allowedTools: routineRun ? [...routineTools] : allTools,
             // The library's plugin (outside any repository) and its skills; Pointer loads them with the Skill tool.
             ...(skillOptions ?? {}),
             disallowedTools: [...CHAT_BLOCKED_TOOLS, ...runtime.disallowedTools, ...(routineRun ? writeTools : [])],
@@ -666,7 +675,7 @@ export function createPointerBrain(
                 {
                   hooks: [
                     subagentReadOnlyGate(gateTools),
-                    ...(routineRun ? [readOnlyRunGate(readOnlyTools)] : []),
+                    ...(routineRun ? [readOnlyRunGate(readOnlyTools, ownListWrites)] : []),
                     confirmGate({
                       pending,
                       conversation,

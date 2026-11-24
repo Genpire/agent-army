@@ -28,8 +28,11 @@ import type {
   SlackMessageEvent,
   StartRepoTask,
 } from "../chat/pointer-types.js";
+import { handleDoneCommand } from "../followups/done-command.js";
+import type { FollowupStore } from "../followups/store.js";
 import type { SlackInbox } from "./inbox.js";
 import type { AnswerNotifier } from "./outreach.js";
+import { ownerConversation } from "./user-account.js";
 import {
   BotConversations,
   type BotPresence,
@@ -90,7 +93,19 @@ export type DispatchDeps = SlackDeps & {
   inbox?: SlackInbox;
   /** Tells the owner when someone answers a message Pointer sent for them (outreach.ts). Absent = nobody is told. */
   answers?: Pick<AnswerNotifier, "add" | "revise">;
+  /** The owner's follow-ups: "done 3 5" in their DM closes them without the model (followups/done-command.ts). Absent = Pointer answers it. */
+  followups?: Pick<FollowupStore, "done">;
 };
+
+/** What the conversation gets back for a message. */
+interface Reply {
+  text: string;
+  isError: boolean;
+  readInbox?: boolean;
+  heldAction?: boolean;
+  /** It relays outside content of its own (the titles of follow-ups closed), from `source`. */
+  outside?: { level: OutsideContent; source: string };
+}
 
 interface Ctx {
   e: Incoming;
@@ -238,12 +253,17 @@ async function handleMessage(ctx: Ctx, decision: RespondDecision): Promise<void>
   await react(slack, e.channel, e.ts, "eyes");
   let isError = false;
   try {
-    const command: Command | null = hasText ? parseCommand(raw, ctx.config.gitlab.baseUrl) : files.length ? null : { kind: "help" };
-    const reply: { text: string; isError: boolean; readInbox?: boolean; heldAction?: boolean } = command
-      ? { text: await runCommand(ctx, command), isError: false }
-      : await askPointer(ctx, messageText(raw, ctx.config.slack.botUserId) || filesOnlyText(files), history);
+    // The owner's "done 3 5" in their DM with Pointer: the platform closes those follow-ups, no model call.
+    const closed = hasText ? await ownerDoneCommand(ctx, raw, history) : undefined;
+    const command: Command | null = closed ? null : hasText ? parseCommand(raw, ctx.config.gitlab.baseUrl) : files.length ? null : { kind: "help" };
+    const reply: Reply =
+      closed ??
+      (command
+        ? { text: await runCommand(ctx, command), isError: false }
+        : await askPointer(ctx, messageText(raw, ctx.config.slack.botUserId) || filesOnlyText(files), history));
     isError = reply.isError;
-    await say(ctx, truncate(reply.text, REPLY_MAX_CHARS), reply.readInbox ? "inbox" : undefined, reply.heldAction);
+    const outside = reply.outside ?? (reply.readInbox ? { level: "inbox" as const, source: "chat_reply" } : undefined);
+    await say(ctx, truncate(reply.text, REPLY_MAX_CHARS), outside, reply.heldAction);
   } catch (err) {
     isError = true;
     const reason = ctx.redact(errorText(err));
@@ -253,6 +273,27 @@ async function handleMessage(ctx: Ctx, decision: RespondDecision): Promise<void>
   state.postedThreads.add(threadKey);
   await unreact(slack, e.channel, e.ts, "eyes");
   await react(slack, e.channel, e.ts, isError ? "x" : "white_check_mark");
+}
+
+/**
+ * A message in the owner's DM with Pointer that is only a command to close
+ * follow-ups ("done 3 5", "تم 3", a numbered list ending in "done" under
+ * Pointer's list): closed here, and the reply says what was closed. The
+ * owner's own command is not outside content, so no confirmation, also right
+ * after a reminder. Undefined for anything else, and anywhere else: it goes
+ * to Pointer. The reply quotes the items' titles (maybe other people's
+ * words), so it is marked as relayed outside content.
+ */
+async function ownerDoneCommand(ctx: Ctx, raw: string, history: ConversationMessage[] | undefined): Promise<Reply | undefined> {
+  const { e, config, deps } = ctx;
+  const store = deps.followups;
+  if (!store || !ownerConversation(config, { userId: e.user, channelType: e.channel_type === "im" ? "im" : "unknown", surface: "slack" })) return undefined;
+  const text = messageText(raw, config.slack.botUserId);
+  const lastPointer = async () => [...(history ?? (await loadHistory(ctx)))].reverse().find((m) => m.isPointer)?.text;
+  const done = await handleDoneCommand(store, text, lastPointer, "slack");
+  if (!done) return undefined;
+  console.info(`[followups] closed ${done.result.closed.length} by the owner's command in Slack`);
+  return { text: done.text, isError: false, outside: { level: "read", source: "followups" } };
 }
 
 async function askPointer(
@@ -534,18 +575,18 @@ function loadHistory({ e, slack, config }: Ctx): Promise<ConversationMessage[]> 
 /**
  * Chat replies go in the thread in channels and flat in DMs, marked as
  * Pointer's chat reply (slack.ts): in a DM that keeps an outreach's window
- * open (outreach.ts). A reply that read the owner's inbox is marked as
- * outside content instead: the next reply starts as if it had read it. One
- * that held a call for the user's yes says so (`held`): the reply to their
- * answer starts tainted.
+ * open (outreach.ts). A reply that read the owner's inbox (or quotes their
+ * follow-ups) is marked as outside content instead, with where it comes
+ * from: the next reply starts as if it had read it. One that held a call for
+ * the user's yes says so (`held`): the reply to their answer starts tainted.
  */
-function say(ctx: Ctx, text: string, outside?: OutsideContent, held = false) {
+function say(ctx: Ctx, text: string, outside?: { level: OutsideContent; source: string }, held = false) {
   const threadTs = replyThreadTs(ctx.e);
   return ctx.slack.chat.postMessage({
     channel: ctx.e.channel,
     text,
     ...(threadTs ? { thread_ts: threadTs } : {}),
-    metadata: outside ? pointerPostMetadata("outside", "chat_reply", outside, held) : pointerPostMetadata("reply", "chat_reply", undefined, held),
+    metadata: outside ? pointerPostMetadata("outside", outside.source, outside.level, held) : pointerPostMetadata("reply", "chat_reply", undefined, held),
   });
 }
 

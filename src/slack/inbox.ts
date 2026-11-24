@@ -28,7 +28,8 @@ import { slackErrorCode, slackFileRefs, tsAfter, tsDate, userName } from "./slac
  * and replies in threads they started or replied in. The owner's own messages
  * are not kept: each one marks its conversation or thread as answered at that
  * time, which closes what came before it there, and makes the thread one to
- * follow.
+ * follow. The listeners (onAnswered: the owner's follow-ups) hear which
+ * messages that answered, as refs "slack:<channel>:<ts>".
  *
  * Each conversation is checked with the owner's own token: one they are not
  * in (Pointer's DMs with colleagues, a channel they are not a member of)
@@ -223,6 +224,8 @@ export { tsAfter, tsDate };
 const byTs = (a: string, b: string) => (tsAfter(a, b) ? 1 : tsAfter(b, a) ? -1 : 0);
 
 const threadKey = (channel: string, threadTs: string) => `${channel}:${threadTs}`;
+/** A Slack message as a follow-up's ref (followups/types.ts). */
+export const slackRef = (channel: string, ts: string) => `slack:${channel}:${ts}`;
 const markKey = (ownerId: string, key: string) => `${ownerId}|${key}`;
 /** Answers kept for an outreach. */
 const answerCount = (data: Pick<InboxData, "items">, outreachId: string) => data.items.reduce((n, i) => n + Number(i.outreachId === outreachId), 0);
@@ -321,6 +324,8 @@ export class SlackInbox {
   private readonly current = new Map<string, Promise<boolean>>();
   /** Told when clear() runs. */
   private readonly clearListeners: (() => void)[] = [];
+  /** Told what the owner's own messages answered. */
+  private readonly answeredListeners: ((refs: string[], at: string) => void)[] = [];
   private timer: ReturnType<typeof setTimeout> | undefined;
   private readonly now: () => Date;
   private readonly batchMs: number;
@@ -340,6 +345,16 @@ export class SlackInbox {
   }
 
   /**
+   * Calls `listener` when a message of the owner's, once written, answered
+   * something: the refs ("slack:<channel>:<ts>") of the kept messages it
+   * answered (and their threads), and of the thread it replied in; `at` is
+   * when they wrote (ISO). The owner's follow-ups say "you replied" for them.
+   */
+  onAnswered(listener: (refs: string[], at: string) => void): void {
+    this.answeredListeners.push(listener);
+  }
+
+  /**
    * Keeps one Slack event when it is for the owner (see the file's comment),
    * and resolves once it is written. Slack may throw; the caller logs the
    * reason, never the text. A clear() while it runs drops it.
@@ -354,7 +369,10 @@ export class SlackInbox {
 
     if (signal.kind === "owner") {
       const keys = signal.threadTs ? [threadKey(signal.channel, signal.threadTs)] : [signal.channel, threadKey(signal.channel, signal.ts)];
+      /** What this message answered, for the listeners: the thread it replied in, and each kept message it answered. */
+      const refs = new Set<string>(signal.threadTs ? [slackRef(signal.channel, signal.threadTs)] : []);
       const mark = (data: InboxData) => {
+        const open = this.answeredListeners.length ? data.items.filter((i) => !i.outreachId && !isAnswered(i, data.answered)) : [];
         let changed = false;
         for (const key of keys) {
           const at = data.answered[key];
@@ -362,9 +380,15 @@ export class SlackInbox {
           data.answered[key] = signal.ts;
           changed = true;
         }
+        for (const i of open) {
+          if (!isAnswered(i, data.answered)) continue;
+          refs.add(slackRef(i.channel, i.ts));
+          if (i.threadTs) refs.add(slackRef(i.channel, i.threadTs));
+        }
         return changed;
       };
-      await this.write(ownerId, generation, mark, keys);
+      const kept = await this.write(ownerId, generation, mark, keys);
+      if (kept && refs.size) this.tellAnswered([...refs], tsDate(signal.ts).toISOString());
       return;
     }
 
@@ -651,6 +675,17 @@ export class SlackInbox {
       await this.store.put(INBOX_KEY, "");
       this.last = undefined;
     });
+  }
+
+  /** Tells the listeners what the owner answered; a listener that fails is logged, never the refs. */
+  private tellAnswered(refs: string[], at: string): void {
+    for (const listener of this.answeredListeners) {
+      try {
+        listener(refs, at);
+      } catch (err) {
+        console.error("[slack] a listener of the owner's answers failed:", writeError(err));
+      }
+    }
   }
 
   /** A thread's reply answers; a DM message only while the outreach is still what the DM is about, asked of Slack once per message. */

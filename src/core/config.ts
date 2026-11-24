@@ -973,6 +973,8 @@ export function publicView(c: Config) {
       ]),
     ) as Record<EngineId, { connected: boolean; key: string | null; model: string; checkedAt: string | null; allowUnsandboxed: boolean }>,
     timezone: c.timezone,
+    /** The owner's reminders: the morning brief, before meetings, following Gmail (no secrets in them). */
+    followups: c.followups,
     email: {
       provider: c.email.provider,
       from: c.email.from,

@@ -147,7 +147,7 @@ export async function userName(client: { users: Pick<WebClient["users"], "info">
  * - sent: a message it sent at someone's request (slack_send_message).
  * - outside: a post that relays outside content (OutsideContent): an answer
  *   passed on to the owner, a routine's report, a reply that read the owner's
- *   inbox. Its payload's `level` says which.
+ *   inbox, a follow-up reminder. Its payload's `level` says which.
  * A chat reply (reply or outside) that asked the user to confirm a call it
  * held has `held: true` in its payload (PointerReply.heldAction).
  */
@@ -207,7 +207,7 @@ export function heldActionPost(m: Pick<RawMessage, "metadata">): boolean {
   return Boolean(payload && typeof payload === "object" && (payload as { held?: unknown }).held === true);
 }
 
-const RELAYED_SOURCES: readonly RelayedSource[] = ["answer_notice", "routine_report", "chat_reply"];
+const RELAYED_SOURCES: readonly RelayedSource[] = ["answer_notice", "routine_report", "chat_reply", "followups"];
 
 /** Which post relayed the outside content, from its metadata's source; undefined for none or one Pointer does not write. */
 export function relayedSource(m: Pick<RawMessage, "metadata">): RelayedSource | undefined {

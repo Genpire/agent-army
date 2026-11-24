@@ -280,11 +280,11 @@ describe("the attention report", () => {
   it("is a weekday routine that DMs the owner and keeps the report in the console", () => {
     const draft = attentionReportDraft(config({ timezone: "Asia/Jerusalem" }), OWNER);
     expect(draft).toMatchObject({ name: ATTENTION_REPORT_NAME, cron: "0 9,13,17 * * 1-5", timezone: "Asia/Jerusalem", slack: OWNER, console: true, email: [] });
+    expect(ATTENTION_REPORT_NAME).toBe("Follow-ups digest");
     expect(ATTENTION_REPORT_CRON).toBe("0 9,13,17 * * 1-5");
     expect(draft.instruction).toContain("slack_my_inbox");
     expect(draft.instruction).toContain("since set to the start of this run's window");
     expect(draft.instruction).toContain("most urgent first");
-    expect(draft.instruction).toContain("If nothing needs me, say so in one line.");
     expect(draft.instruction).toContain("The answers to messages you sent for me that are marked new");
     // The routines code accepts it as it is.
     const base: Routine = { id: "rt-attention", name: "", instruction: "", schedule: { cron: "", timezone: "UTC" }, deliver: { email: [], slack: "", console: true }, budgetUsd: 1, enabled: true, createdBy: "", createdAt: NOW.toISOString() };

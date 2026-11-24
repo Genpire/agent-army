@@ -88,9 +88,10 @@ export type OutsideContent = "inbox" | "read";
 /**
  * Which of Pointer's posts relayed outside content, as its Slack metadata
  * says (slack.ts): answers passed on to the owner, a routine's report, a reply
- * that read the owner's inbox.
+ * that read the owner's inbox, the owner's follow-up reminders (calendar
+ * events and items found in other people's messages: followups/reminders.ts).
  */
-export type RelayedSource = "answer_notice" | "routine_report" | "chat_reply";
+export type RelayedSource = "answer_notice" | "routine_report" | "chat_reply" | "followups";
 
 /** One earlier message in the conversation, oldest first. */
 export interface ConversationMessage {
