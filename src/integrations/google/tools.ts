@@ -25,6 +25,7 @@ import type { Config } from "../../core/config.js";
 import type { CalendarEvent, EmailThread } from "../../followups/types.js";
 import { formatRunTime } from "../../routines/cron.js";
 import { parseSince } from "../../slack/inbox-tools.js";
+import { ownerRequest } from "../../slack/user-account.js";
 import type { CallToolResult } from "../monday/monday.js";
 import { type GoogleCalendarSource, dayStart, googleCalendarSource, parseDate, wallDayOf } from "./calendar.js";
 import { type GmailSource, gmailSource } from "./gmail.js";
@@ -55,14 +56,8 @@ const fail = (text: string): CallToolResult => ({ content: [{ type: "text", text
 const messageOf = (err: unknown) => (err instanceof Error ? err.message : String(err));
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
-/**
- * The request is the owner's own: the console or their DM with Pointer
- * (ownerConversation), or a run of their own routine (the runner gives it
- * the owner's Slack account only then: ownSlackAccount).
- */
-export function ownerRequest(ctx: Pick<ChatIntegrationContext, "ownerConversation" | "slackAccount">): boolean {
-  return ctx.ownerConversation === true || ctx.slackAccount !== undefined;
-}
+/** The request is the owner's own (slack/user-account.ts): the same rule as owner-only apps. */
+export { ownerRequest };
 
 // ---------- gmail_my_inbox ----------
 

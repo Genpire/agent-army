@@ -945,6 +945,16 @@ describe("apps admin API", () => {
     expect((await post("/api/apps/NOT-AN-ID", {})).status).toBe(404);
   });
 
+  it('turns "Only for me" on and off, and shows the effective value', async () => {
+    const view = async () => ((await config()).apps as { id: string; ownerOnly: boolean; agentIds: string[] }[]).find((a) => a.id === "app-linear")!;
+    expect((await view()).ownerOnly).toBe(false);
+    expect((await (await post("/api/apps/app-linear", { ownerOnly: true })).json()).app.ownerOnly).toBe(true);
+    // Its agents are kept, unused while it is only the owner's.
+    expect((await view()).agentIds).toEqual(["qa"]);
+    expect((await (await post("/api/apps/app-linear", { ownerOnly: false })).json()).app.ownerOnly).toBe(false);
+    expect((await post("/api/apps/app-linear", { ownerOnly: "yes" })).status).toBe(400);
+  });
+
   it("refuses an email as a client id, and forgets an own client for automatic sign-in", async () => {
     const email = await post("/api/apps", { name: "Payments", url: "https://mcp.example.com/oauth-mcp", auth: { type: "oauth", clientId: "someone@example.com" } });
     expect(email.status).toBe(400);

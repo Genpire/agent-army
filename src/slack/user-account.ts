@@ -76,6 +76,16 @@ export function ownerRoutine(config: Config, routine: Pick<Routine, "ownerOnly" 
 }
 
 /**
+ * A chat request is the owner's own: the console or their DM with Pointer
+ * (ownerConversation), or a run of their own routine (the runner gives it
+ * the owner's account only then: ownSlackAccount). What owner-only tools
+ * and apps (their Gmail, calendar, files) are offered in.
+ */
+export function ownerRequest(ctx: { ownerConversation?: boolean; slackAccount?: SlackUserAccess }): boolean {
+  return ctx.ownerConversation === true || ctx.slackAccount !== undefined;
+}
+
+/**
  * The owner's Slack account for this request, or undefined: not connected, or
  * the request is not the owner's. The console is the owner's; a Slack request
  * only in their DM with Pointer, from the account the token belongs to; a

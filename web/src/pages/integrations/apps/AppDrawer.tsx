@@ -48,6 +48,7 @@ function AppForm({ app, preset, redirectUrl, onClose }: { app: AppView; preset?:
   const settings = useAppSettings(app);
   const [name, setName] = useState(app.name);
   const [enabled, setEnabled] = useState(app.enabled);
+  const [ownerOnly, setOwnerOnly] = useState(app.ownerOnly);
   const [token, setToken] = useState("");
   const [headerValues, setHeaderValues] = useState<Record<string, string>>({});
   const [clientId, setClientId] = useState("");
@@ -72,7 +73,9 @@ function AppForm({ app, preset, redirectUrl, onClose }: { app: AppView; preset?:
   const submit = async () => {
     if (!name.trim()) return settings.setError("Give the app a name.");
     const auth = credentials();
-    if (!(await settings.submit({ name: name.trim(), enabled, ...(auth ? { auth } : {}) }))) return;
+    // Sent only when changed, so a personal Google app left as it is keeps following the default.
+    const owner = ownerOnly !== app.ownerOnly ? { ownerOnly } : {};
+    if (!(await settings.submit({ name: name.trim(), enabled, ...owner, ...(auth ? { auth } : {}) }))) return;
     if (auth && app.auth.type === "oauth") return settings.signIn();
     onClose();
   };
@@ -109,8 +112,16 @@ function AppForm({ app, preset, redirectUrl, onClose }: { app: AppView; preset?:
               labelPosition="start"
               labelSpacing="spread"
             />
+            <Switch
+              label="Only for me"
+              description={`Only you can use it: in the console and your DM with ${lead}. Colleagues talking to ${lead} and team members never get it.`}
+              value={ownerOnly}
+              onChange={setOwnerOnly}
+              labelPosition="start"
+              labelSpacing="spread"
+            />
             <AccessField value={settings.access} onChange={settings.setAccess} appName={app.name} lead={lead} />
-            <AgentsField value={settings.agentIds} onChange={settings.setAgentIds} agents={config.team.agents} lead={lead} />
+            <AgentsField value={settings.agentIds} onChange={settings.setAgentIds} agents={config.team.agents} lead={lead} ownerOnly={ownerOnly} />
 
             <Divider />
             <Section title="Tools" description={`${plural(settings.usable, "tool")} of ${app.tools.length} can be used. Turn off any you don't want used.`}>

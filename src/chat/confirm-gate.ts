@@ -421,11 +421,23 @@ const OWN_TOOLS_OFF_AFTER_INBOX = new Set([
   "mcp__pointer__monday_add_comment",
 ]);
 
-/** Whether a tool can carry what Pointer read out of this reply, so it is off once the inbox was read. */
-export function offAfterInbox(tool: string): boolean {
+/**
+ * Whether a tool can carry what Pointer read out of this reply, so it is off
+ * once the inbox was read. `inboxApps`: the server keys of apps that read the
+ * owner's inbox (Gmail's MCP server): they stay on like the inboxes, their
+ * writes (a draft, a send) held for the owner's yes by confirmGate.
+ */
+export function offAfterInbox(tool: string, inboxApps: readonly string[] = []): boolean {
   if (OWN_TOOLS_OFF_AFTER_INBOX.has(tool)) return true;
   if (BUILTINS_AFTER_INBOX.has(tool)) return false;
+  if (inboxApps.some((key) => tool.startsWith(`mcp__${key}__`))) return false;
   return !SERVERS_AFTER_INBOX.some((prefix) => tool.startsWith(prefix));
+}
+
+/** An app whose tools read the owner's inbox (apps.ts inboxApps): its server key and name. */
+export interface InboxApp {
+  key: string;
+  name: string;
 }
 
 /** The tool in words, for the reason Pointer reads. */
@@ -455,20 +467,32 @@ function offLabel(tool: string): string {
  * the inbox; the reply to their message after this one is not. `onInboxRead`
  * is told when Pointer calls slack_my_inbox or gmail_my_inbox: its reply then
  * carries the inbox (PointerReply.readInbox).
+ *
+ * `inboxApps`: connected apps that read the owner's inbox (Gmail's own MCP
+ * server): any of their tools counts as reading the inbox, exactly like
+ * slack_my_inbox, and they stay on after it.
  */
-export function afterInboxGate(opts: { relayed?: boolean; onInboxRead?: () => void } = {}): HookCallback {
+export function afterInboxGate(opts: { relayed?: boolean; onInboxRead?: () => void; inboxApps?: readonly InboxApp[] } = {}): HookCallback {
   /** The inbox Pointer read first in this query ("your Slack inbox", "your Gmail"), if any. */
   let inboxRead: string | undefined;
+  const apps = opts.inboxApps ?? [];
+  const appKeys = apps.map((a) => a.key);
+  const inboxOf = (tool: string): string | undefined => {
+    const own = OWNER_INBOXES.get(tool);
+    if (own) return own;
+    const app = apps.find((a) => tool.startsWith(`mcp__${a.key}__`));
+    return app ? `your ${app.name.replace(/\s+/g, " ").trim().slice(0, 60)} (an app that reads your inbox)` : undefined;
+  };
   return async (input) => {
     if (input.hook_event_name !== "PreToolUse" || input.agent_id) return {};
     const tool = input.tool_name;
-    const inbox = OWNER_INBOXES.get(tool);
+    const inbox = inboxOf(tool);
     if (inbox) {
       inboxRead ??= inbox;
       opts.onInboxRead?.();
       return {};
     }
-    if (!(inboxRead || opts.relayed) || !offAfterInbox(tool)) return {};
+    if (!(inboxRead || opts.relayed) || !offAfterInbox(tool, appKeys)) return {};
     console.info(`[pointer] ${tool}: off after ${inboxRead ? `reading ${inboxRead.replace(/^your/, "the owner's")}` : "what other people wrote, relayed earlier in the conversation"}`);
     const reason = inboxRead
       ? `After reading ${inboxRead}, ${offLabel(tool)} is off for the rest of this reply, so that what other people wrote there cannot leave through it. ` +

@@ -34,6 +34,8 @@ const SIGN_IN_TEXT: Record<AppView["auth"]["type"], string> = {
 export interface AppUpdate {
   name?: string;
   enabled?: boolean;
+  /** "Only for me": only the owner may use it; team members never get it. */
+  ownerOnly?: boolean;
   auth?: object;
 }
 
