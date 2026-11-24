@@ -188,7 +188,7 @@ export default function FollowupsPage() {
             <EmptyState
               icon={<Icon icon={BellAlertIcon} size="lg" />}
               title="Nothing to follow up"
-              description={`Items come from you (ask ${pointer} “remind me to call Fadi at 3” or “track this”) and from ${pointer}, when a Slack message or an email waits on your reply. Each stays here until you close it: with Done, or from Slack by replying “done 3 5” to ${pointer}.`}
+              description={`Items come from you (ask ${pointer} “remind me to call Sam at 3” or “track this”) and from ${pointer}, when a Slack message or an email waits on your reply. Each stays here until you close it: with Done, or from Slack by replying “done 3 5” to ${pointer}.`}
               actions={<Button label="Add a follow-up" variant="secondary" icon={<Icon icon={PlusIcon} />} onClick={() => setAdding(true)} />}
             />
           ) : (

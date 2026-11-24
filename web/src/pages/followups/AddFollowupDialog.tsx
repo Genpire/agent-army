@@ -79,7 +79,7 @@ export function AddFollowupDialog({ isOpen, onOpenChange, timezone, onAdded }: A
                 label="What to follow up on"
                 value={title}
                 onChange={setTitle}
-                placeholder="Call Fadi about the Q3 invoice"
+                placeholder="Call Sam about the Q3 invoice"
                 isRequired
                 hasAutoFocus
                 status={shown(errors.title)}

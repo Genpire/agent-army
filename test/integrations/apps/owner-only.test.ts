@@ -191,9 +191,9 @@ describe("owner-only apps' tools are outside content", () => {
     for (const tool of [GMAIL_DRAFT, CALENDAR_CREATE]) expect(gated.has(tool), tool).toBe(true);
     for (const tool of [GMAIL_SEARCH, CALENDAR_SEARCH, GMAIL_DRAFT]) expect(TRUSTED_TOOLS.has(tool)).toBe(false);
     for (const read of [GMAIL_SEARCH, CALENDAR_SEARCH]) {
-      const gate = confirmGate({ pending: new PendingActions(), conversation: "web:c1", message: "anything from Fadi?", gated });
+      const gate = confirmGate({ pending: new PendingActions(), conversation: "web:c1", message: "anything from Sam?", gated });
       // Before any outside content a write goes through.
-      expect(await call(gate, GMAIL_DRAFT, { to: "fadi@partner.example" })).toBeUndefined();
+      expect(await call(gate, GMAIL_DRAFT, { to: "sam@partner.example" })).toBeUndefined();
       await call(gate, read);
       expect(denied(await call(gate, GMAIL_DRAFT, { to: "someone@evil.example" })), read).toBe(true);
       expect(denied(await call(gate, CALENDAR_CREATE, { title: "x" })), read).toBe(true);
@@ -205,7 +205,7 @@ describe("owner-only apps' tools are outside content", () => {
     let read = 0;
     const gate = afterInboxGate({ inboxApps: apps, onInboxRead: () => void read++ });
     expect(await call(gate, "WebFetch")).toBeUndefined();
-    await call(gate, GMAIL_SEARCH, { query: "from:fadi" });
+    await call(gate, GMAIL_SEARCH, { query: "from:sam" });
     expect(read).toBe(1);
     for (const tool of ["WebFetch", "Agent", CALENDAR_SEARCH, "mcp__app-linear__search", "mcp__pointer__start_repo_task"]) {
       const d = await call(gate, tool);

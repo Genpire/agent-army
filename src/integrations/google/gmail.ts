@@ -93,7 +93,7 @@ const header = (m: GmailMessage, name: string): string | undefined => {
 /** Control characters and line breaks out, spaces collapsed. */
 const oneLine = (s: string) => s.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
 
-/** A From header's name and address: `"Fadi S" <fadi@x.example>`, `Fadi <fadi@x.example>` or `fadi@x.example`. */
+/** A From header's name and address: `"Sam R" <sam@x.example>`, `Sam <sam@x.example>` or `sam@x.example`. */
 export function parseFrom(value: string | undefined): { name: string; address: string } {
   const v = oneLine(value ?? "");
   const angle = v.match(/^(.*?)<([^<>\s]+@[^<>\s]+)>\s*$/);

@@ -39,7 +39,7 @@ function Hint({ icon, color, children }: { icon: ComponentType<SVGProps<SVGSVGEl
   );
 }
 
-/** "Slack · Fadi Shqerat · 3 h ago", "You added it 2 days ago". */
+/** "Slack · Sam Rivera · 3 h ago", "You added it 2 days ago". */
 function origin(item: FollowupItem, pointer: string): string {
   if (item.source === "owner") return `You added it ${timeAgo(item.createdAt)}`;
   return [sourceLabel(item.source, pointer), item.from, timeAgo(item.createdAt)].filter(Boolean).join(" · ");

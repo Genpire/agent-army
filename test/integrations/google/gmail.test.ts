@@ -21,7 +21,7 @@ async function source(threads: FakeThread[], opts: Parameters<typeof fakeGoogle>
 
 describe("telling mail from people apart", () => {
   it("parses From headers and formats them as Name <address>", () => {
-    expect(parseFrom('"Fadi S." <Fadi@Partner.example>')).toEqual({ name: "Fadi S.", address: "fadi@partner.example" });
+    expect(parseFrom('"Sam R." <Sam@Partner.example>')).toEqual({ name: "Sam R.", address: "sam@partner.example" });
     expect(parseFrom("Sam Lee <sam@x.example>")).toEqual({ name: "Sam Lee", address: "sam@x.example" });
     expect(parseFrom("rita@x.example")).toEqual({ name: "", address: "rita@x.example" });
     expect(parseFrom("Evil\r\nBcc: x <e@x.example>").name).toBe("Evil Bcc: x");
@@ -29,7 +29,7 @@ describe("telling mail from people apart", () => {
 
   it("skips no-reply, mailer-daemon and notifications senders, and lists, bulk and automated mail", () => {
     const m = (from: string, headers: Record<string, string> = {}) => ({ payload: { headers: [{ name: "From", value: from }, ...Object.entries(headers).map(([name, value]) => ({ name, value }))] } });
-    expect(fromPerson(m("Fadi <fadi@partner.example>"))).toBe(true);
+    expect(fromPerson(m("Sam <sam@partner.example>"))).toBe(true);
     for (const from of ["Acme <no-reply@acme.example>", "noreply@acme.example", "do-not-reply@x.example", "MAILER-DAEMON@mx.example", "notifications+abc@code.example", "notification@x.example", "postmaster@x.example"]) {
       expect(fromPerson(m(from)), from).toBe(false);
     }
@@ -60,7 +60,7 @@ describe("telling mail from people apart", () => {
 
 describe("gmailSource: threadsSince", () => {
   const threads = [
-    thread("t-person", msg("m1", "Fadi S <fadi@partner.example>", 2, { subject: "Q3 invoice", snippet: "Can you approve the &quot;Q3&quot; invoice?" })),
+    thread("t-person", msg("m1", "Sam R <sam@partner.example>", 2, { subject: "Q3 invoice", snippet: "Can you approve the &quot;Q3&quot; invoice?" })),
     thread("t-answered", msg("m2", "Sam Lee <sam@x.example>", 30), msg("m3", `Owner <${OWNER}>`, 1, { labels: ["SENT"], snippet: "Done, thanks" })),
     thread("t-noreply", msg("m4", "Acme <no-reply@acme.example>", 3)),
     thread("t-list", msg("m5", "News <news@shop.example>", 3, { headers: { "List-Unsubscribe": "<mailto:u@shop.example>" } })),
@@ -85,7 +85,7 @@ describe("gmailSource: threadsSince", () => {
     expect(person).toEqual({
       id: "t-person",
       subject: "Q3 invoice",
-      from: "Fadi S <fadi@partner.example>",
+      from: "Sam R <sam@partner.example>",
       at: new Date(at(2)).toISOString(),
       snippet: 'Can you approve the "Q3" invoice?',
       ownerRepliedLast: false,

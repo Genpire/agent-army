@@ -3,7 +3,7 @@
  * Slack account with the app's User OAuth Token, so Pointer can send as them
  * and read what reaches them; then the switches (read, send as me, tell me
  * of answers to what Pointer sends for me), the privacy note, Disconnect,
- * and the attention report (an owner-only routine that DMs them what needs
+ * and the follow-ups digest (an owner-only routine that DMs them what needs
  * their reply). Its steps use the account's own manifest (the bot's plus user
  * scopes and events): the bot's manifest asks nothing of anyone's account.
  */
@@ -64,7 +64,7 @@ const USER_SCOPE_USES: Record<string, string> = {
   "users:read": "Check whose token it is",
 };
 
-/** The attention report's status, read again whenever `key` changes (the account, its switches, the routines). */
+/** The follow-ups digest's status, read again whenever `key` changes (the account, its switches, the routines). */
 function useReport(key: string) {
   const [data, setData] = useState<ReportStatus>();
   const [error, setError] = useState<string>();
@@ -276,20 +276,20 @@ function ConnectedAccount({ requiredScopes, onRevoked }: { requiredScopes: strin
       </Text>
 
       <VStack gap={3}>
-        <Heading level={4}>Attention report</Heading>
+        <Heading level={4}>Follow-ups digest</Heading>
         <Text color="secondary">
           A routine that DMs you on weekdays at 09:00, 13:00 and 17:00 ({config.timezone}) what needs your reply or action on Slack, most urgent first, then a short FYI
           list, and keeps each report in the console. Change it on the Routines page like any routine. Any time, you can also ask {name}: “what needs my attention on
           Slack?”
         </Text>
-        {report.error && <Banner status="error" title="Couldn't check the attention report" description={report.error} collapsible={false} />}
+        {report.error && <Banner status="error" title="Couldn't check the follow-ups digest" description={report.error} collapsible={false} />}
         <FormActions>
           {report.data?.routine ? (
             <Link href={href("routines", report.data.routine.id)} weight="semibold" isStandalone>
               Open “{report.data.routine.name}” on the Routines page
             </Link>
           ) : (
-            <Button label="Create the attention report" variant="primary" isDisabled={!report.data || Boolean(report.data.blocked)} isLoading={!report.data && !report.error} clickAction={createReport} />
+            <Button label="Create the follow-ups digest" variant="primary" isDisabled={!report.data || Boolean(report.data.blocked)} isLoading={!report.data && !report.error} clickAction={createReport} />
           )}
           {report.data?.blocked && !report.data.routine && (
             <Text type="supporting" color="secondary">
