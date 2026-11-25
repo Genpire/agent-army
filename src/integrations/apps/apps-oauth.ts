@@ -128,13 +128,17 @@ class AppOAuthProvider implements OAuthClientProvider {
   }
 
   saveTokens(tokens: OAuthTokens) {
-    this.data.tokens = { ...tokens };
+    // A renewal need not send a new refresh token (Google never does): the one
+    // that was used stays valid, so it is kept. A new sign-in starts over.
+    const previous = this.data.tokens?.refresh_token;
+    const keep = this.opts.mode !== "start" && !tokens.refresh_token && typeof previous === "string" && previous ? { refresh_token: previous } : {};
+    this.data.tokens = { ...keep, ...tokens };
     this.data.expiresAt = typeof tokens.expires_in === "number" ? this.opts.now() + tokens.expires_in * 1000 : undefined;
   }
 
   redirectToAuthorization(url: URL) {
     if (this.opts.mode !== "start") throw new AppSignInError(`${this.opts.appName}: the sign-in expired. Sign in again on the Integrations page.`);
-    this.authorizationUrl = url;
+    this.authorizationUrl = withOfflineAccess(url, this.data.serverMetadata);
   }
 
   saveCodeVerifier(verifier: string) {
@@ -164,6 +168,30 @@ class AppOAuthProvider implements OAuthClientProvider {
   saveDiscoveryState(state: OAuthDiscoveryState) {
     this.data.serverMetadata = JSON.parse(JSON.stringify(state)) as Record<string, unknown>;
   }
+}
+
+/**
+ * The sign-in page's address, asking for a refresh token where the server
+ * gives one only when asked, so the sign-in renews itself instead of expiring
+ * with its first access token (an hour on Google):
+ * - Google: access_type=offline, and prompt=consent so a refresh token comes
+ *   back even when the owner approved the app before;
+ * - a server that lists the OpenID `offline_access` scope: added to the
+ *   scopes asked for (only when some are asked for: a scope list of just
+ *   offline_access could narrow the grant).
+ */
+export function withOfflineAccess(url: URL, serverMetadata?: Record<string, unknown>): URL {
+  const next = new URL(url.href);
+  if (next.hostname === "accounts.google.com") {
+    next.searchParams.set("access_type", "offline");
+    next.searchParams.set("prompt", "consent");
+    return next;
+  }
+  const meta = serverMetadata?.authorizationServerMetadata as { scopes_supported?: unknown } | undefined;
+  const supported = Array.isArray(meta?.scopes_supported) && meta.scopes_supported.includes("offline_access");
+  const scope = next.searchParams.get("scope");
+  if (supported && scope && !scope.split(" ").includes("offline_access")) next.searchParams.set("scope", `${scope} offline_access`);
+  return next;
 }
 
 /** Replaces an app's OAuth state, when it still exists and still signs in with OAuth. `next` returning undefined changes nothing. */
