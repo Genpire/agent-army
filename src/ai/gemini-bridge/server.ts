@@ -21,9 +21,10 @@
  *   only time limits they have (they go over node:https, not the global
  *   fetch, which gives up after 5 minutes without a byte), and stop when
  *   Claude Code hangs up. When Gemini sends nothing for too long, the answer
- *   is a 529 overloaded_error (errors.ts silenceError); when it cannot be
- *   reached, a 500 api_error with the network error's code. Nothing logged
- *   holds the key, a token or what was sent.
+ *   is a 529 overloaded_error (errors.ts silenceError); when no connection
+ *   can be made, a 503 api_error, and when one breaks, a 500 api_error, each
+ *   with the network error's code. Nothing logged holds the key, a token or
+ *   what was sent.
  * - Each session has limits of its own: requests in flight at once, and
  *   requests in all. Its token is in the environment of everything the query
  *   runs, a repo task's shell included, where the checkout's own (untrusted)
@@ -88,7 +89,7 @@ export const MAX_REQUESTS = 10_000;
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 /** A failure for the log: status, type, the network error's code when there was one, and the (redacted) message. */
 const failureLine = (e: BridgeError): string => `${e.status} ${e.type}${e.code ? ` (cause ${e.code})` : ""}: ${e.message.slice(0, 200)}`;
-const isLoopback =(address: string | undefined) => !!address && /^(?:::ffff:)?127\.\d{1,3}\.\d{1,3}\.\d{1,3}$|^::1$/.test(address);
+const isLoopback = (address: string | undefined) => !!address && /^(?:::ffff:)?127\.\d{1,3}\.\d{1,3}\.\d{1,3}$|^::1$/.test(address);
 
 /** The token Claude Code sends: a Bearer token (ANTHROPIC_AUTH_TOKEN) or x-api-key (ANTHROPIC_API_KEY). */
 function tokenOf(req: IncomingMessage): string | undefined {

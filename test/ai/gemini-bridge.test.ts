@@ -517,13 +517,23 @@ describe("Gemini's errors as Anthropic's", () => {
     expect(toBridgeError(new Error("ECONNRESET"))).toMatchObject({ status: 500, type: "api_error", code: undefined });
     // Node's global fetch: "fetch failed", with undici's code on the cause.
     const failed = (code: string) => new TypeError("fetch failed", { cause: Object.assign(new Error(`socket said ${KEY}`), { code }) });
-    for (const code of ["UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT", "UND_ERR_CONNECT_TIMEOUT", "ETIMEDOUT"]) {
+    // Connected, then nothing came: Gemini was silent.
+    for (const code of ["UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT"]) {
       expect(toBridgeError(failed(code), redact), code).toMatchObject({ status: 529, type: "overloaded_error", code, message: expect.stringContaining("sent nothing for too long") });
     }
+    // Never connected (refused, no such name, no route, the connection itself timed out): Gemini is unreachable, not silent.
+    for (const code of ["ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT", "ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "EHOSTUNREACH", "ENETUNREACH"]) {
+      expect(toBridgeError(failed(code), redact), code).toEqual(new BridgeError(503, "api_error", `Could not connect to the Gemini API (${code}).`, {}, code));
+    }
+    // node:https puts the code on the error itself.
+    expect(toBridgeError(Object.assign(new Error("getaddrinfo ENOTFOUND generativelanguage.googleapis.com"), { code: "ENOTFOUND" }))).toMatchObject({
+      status: 503,
+      code: "ENOTFOUND",
+      message: "Could not connect to the Gemini API (ENOTFOUND).",
+    });
+    // Connected, then broken.
     const reset = toBridgeError(failed("ECONNRESET"), redact);
     expect(reset).toMatchObject({ status: 500, type: "api_error", code: "ECONNRESET", message: "Could not reach the Gemini API (ECONNRESET): fetch failed" });
-    // node:https puts the code on the error itself.
-    expect(toBridgeError(Object.assign(new Error("getaddrinfo ENOTFOUND"), { code: "ENOTFOUND" }))).toMatchObject({ status: 500, code: "ENOTFOUND" });
   });
 
   it("take only a code-shaped code from an error, never other text", () => {

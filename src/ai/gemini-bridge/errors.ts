@@ -11,11 +11,12 @@
  * an authentication error here, and 503 UNAVAILABLE is Anthropic's 529
  * overloaded_error, which is what Claude Code waits out and retries.
  *
- * No answer at all is one of two things: Gemini sent nothing for too long
- * (the bridge's own deadline, or the connection's), a 529 overloaded_error
- * (silenceError), or Gemini could not be reached (a refused, reset or
- * unresolved connection), a 500 api_error. Both name the network error's code
- * (ECONNRESET, UND_ERR_BODY_TIMEOUT) for the log, never what it said.
+ * No answer at all is one of three things: Gemini sent nothing for too long
+ * once connected (the bridge's own deadline, or the connection's), a 529
+ * overloaded_error (silenceError); no connection was made (refused, no such
+ * name, no route, the connect itself timed out), a 503 api_error; or the
+ * connection broke (reset), a 500 api_error. Each names the network error's
+ * code (ECONNREFUSED, UND_ERR_BODY_TIMEOUT) for the log, never what it said.
  */
 
 /** Anthropic's error types (https://platform.claude.com/docs/en/api/errors). */
@@ -114,8 +115,11 @@ export function errorCode(err: unknown): string | undefined {
   return undefined;
 }
 
-/** Codes of a wait that ran out (undici's headers and body timeouts, a socket's), not of a refused or broken connection. */
-const TIMEOUT_CODES = new Set(["UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT", "UND_ERR_CONNECT_TIMEOUT", "ETIMEDOUT", "ESOCKETTIMEDOUT"]);
+/** Codes of a wait for Gemini's answer that ran out once connected (undici's headers and body timeouts, a socket's). */
+const TIMEOUT_CODES = new Set(["UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT", "ESOCKETTIMEDOUT"]);
+
+/** Codes of a connection never made: refused, no such name (or no answer from DNS), no route, the connect timed out. */
+const CONNECT_CODES = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "EHOSTUNREACH", "ENETUNREACH", "ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT"]);
 
 /**
  * Gemini sent nothing for too long: 529 overloaded_error. That is what Claude
@@ -133,6 +137,8 @@ export function toBridgeError(err: unknown, redact: (text: string) => string = (
   if (name === "TimeoutError") return silenceError("The Gemini API did not answer in time.");
   const code = errorCode(err);
   if (code && TIMEOUT_CODES.has(code)) return silenceError(`The Gemini API sent nothing for too long, and the connection gave up waiting (${code}).`, code);
+  // Unreachable, not silent: Claude Code retries a 503 (and calls it a server error), routing.ts falls back on it.
+  if (code && CONNECT_CODES.has(code)) return new BridgeError(503, "api_error", `Could not connect to the Gemini API (${code}).`, {}, code);
   const text = err instanceof Error ? err.message : String(err);
   const out = redact(`Could not reach the Gemini API${code ? ` (${code})` : ""}: ${text}`).replace(/\s+/g, " ").slice(0, MESSAGE_MAX);
   return new BridgeError(500, "api_error", out, {}, code);
