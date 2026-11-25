@@ -67,8 +67,23 @@ export interface ProviderRuntime {
   disallowedTools: string[];
   /** For Options.managedSettings: model prices (modelPricing), so costs and budgets are right. */
   managedSettings?: Settings;
-  /** The model to pass for a configured model ("" = the provider's default, undefined in the options). */
+  /**
+   * The model to pass for a configured model (undefined in the options = the
+   * provider's main tier): "" for its default; a Claude model id or alias on
+   * the tier it stands for; a model of another provider's family
+   * (foreignModel) on the main tier instead (on Anthropic, the Claude card's
+   * model), so a setting made for one provider does not break the work when
+   * a route hands it to another.
+   */
   model(model: string): string | undefined;
+  /**
+   * Why this provider does not run a configured model: an id of another
+   * provider's family ("gemini-4-carbon" on Claude), which neither its model
+   * list nor its connection's tiers have. Undefined when it runs it, maps it
+   * (a Claude id) or cannot tell (an id of no known family: an alias, a
+   * deployment's own name).
+   */
+  foreignModel(model: string): string | undefined;
   /** The effort to pass, as the provider accepts it (undefined = leave it out). */
   effort(effort: Effort): Effort | undefined;
   capabilities: ProviderCapabilities;
@@ -111,7 +126,79 @@ const CLAUDE_MODEL_RE = /^(?:claude-)?(opus|sonnet|haiku|fable)(?:$|-|\[)/;
 const ALIAS_TIER: Record<string, ModelTier> = { opus: "opus", sonnet: "sonnet", haiku: "haiku", fable: "opus" };
 const claudeAlias = (model: string): string | undefined => model.toLowerCase().match(CLAUDE_MODEL_RE)?.[1];
 
-const nonEmpty = (record: Partial<Record<string, string>>): Record<string, string> =>
+// ---------- Whose model an id is ----------
+
+/** The families of models the presets run, told apart by how their ids start. */
+export type ModelFamily = "claude" | "gemini" | "kimi" | "deepseek" | "qwen" | "glm" | "gpt";
+
+const FAMILY_NAMES: Record<ModelFamily, string> = { claude: "Claude", gemini: "Gemini", kimi: "Kimi", deepseek: "DeepSeek", qwen: "Qwen", glm: "GLM", gpt: "GPT" };
+
+/** The other families, by the model's name (after any "vendor/" prefix). */
+const FAMILY_RES: [RegExp, ModelFamily][] = [
+  [/^(?:gemini|gemma|learnlm)(?:-|$)/, "gemini"],
+  [/^(?:kimi|moonshot)(?:-|$)/, "kimi"],
+  [/^deepseek(?:-|$)/, "deepseek"],
+  [/^(?:qwen|qwq|qvq)/, "qwen"],
+  [/^(?:glm|chatglm)(?:-|$)/, "glm"],
+  [/^(?:gpt|chatgpt|codex)(?:-|$)|^o\d+(?:-|$)/, "gpt"],
+];
+
+/**
+ * The family of a model id: Claude for a Claude id or alias in any provider's
+ * spelling ("claude-opus-5-5", "sonnet", "us.anthropic.claude-…",
+ * "claude-haiku-4-5@20251001"), else by its name. Undefined for an id that
+ * says none: an alias Claude Code knows ("opusplan"), a deployment's own name,
+ * an inference profile's ARN.
+ */
+export function modelFamily(id: string): ModelFamily | undefined {
+  const lower = id.trim().toLowerCase();
+  if (claudeAlias(lower) || /(?:^|[./~])claude(?:-|$)/.test(lower)) return "claude";
+  const name = lower.replace(/\[1m\]$/, "").split("/").pop() ?? "";
+  return FAMILY_RES.find(([re]) => re.test(name))?.[1];
+}
+
+/**
+ * The family a provider runs: Claude on Anthropic and the clouds, its default
+ * model's on another provider's own API (Kimi's, Gemini's…), none on a custom
+ * endpoint (a gateway may serve any).
+ */
+export function presetFamily(preset: Pick<AiPreset, "kind" | "defaults">): ModelFamily | undefined {
+  if (preset.kind === "anthropic" || preset.kind === "cloud") return "claude";
+  if (preset.kind === "custom") return undefined;
+  return modelFamily(preset.defaults.main);
+}
+
+/** For comparing ids: as typed, without Claude Code's "[1m]" marker. */
+const sameId = (id: string): string => id.trim().toLowerCase().replace(/\[1m\]$/, "");
+
+/** Settings already logged as ignored on a provider ("provider, setting, model"): each is said once per process. */
+const ignoredSaid = new Set<string>();
+
+/**
+ * The model to pass for a configured model (runtime.model), saying once per
+ * process when the provider does not run it (foreignModel): `setting` names
+ * where it was set ("Pointer's chat model (Team page)"), so the owner can
+ * tell why the provider ran its main model instead.
+ */
+export function configuredModel(
+  runtime: Pick<ProviderRuntime, "provider" | "label" | "model" | "foreignModel">,
+  model: string,
+  setting: string,
+  log: (line: string) => void = (line) => console.warn(line),
+): string | undefined {
+  const why = model ? runtime.foreignModel(model) : undefined;
+  if (why) {
+    const key = `${runtime.provider}\n${setting}\n${model}`;
+    if (!ignoredSaid.has(key)) {
+      if (ignoredSaid.size >= 500) ignoredSaid.clear();
+      ignoredSaid.add(key);
+      log(`[models] ${setting} is ignored on ${runtime.label}: ${why}. ${runtime.label} runs its main model instead.`);
+    }
+  }
+  return runtime.model(model);
+}
+
+const nonEmpty =(record: Partial<Record<string, string>>): Record<string, string> =>
   Object.fromEntries(Object.entries(record).filter((e): e is [string, string] => typeof e[1] === "string" && e[1].trim() !== ""));
 
 /** The saved connection of a provider (Anthropic's from config.anthropic), or undefined when there is none. */
@@ -349,6 +436,12 @@ export function anthropicRuntime(apiKey: string): ProviderRuntime {
 export const defaultModel = (config: Pick<Config, "anthropic">, runtime: Pick<ProviderRuntime, "provider">): string =>
   runtime.provider === "anthropic" ? config.anthropic.model : "";
 
+/** Pointer's chat model on a runtime, and where it was set (for configuredModel): the Team page's, else the Claude card's. */
+export function chatModelOf(config: Pick<Config, "anthropic" | "team">, runtime: Pick<ProviderRuntime, "provider">): { model: string; setting: string } {
+  if (config.team.pointer.model) return { model: config.team.pointer.model, setting: "Pointer's chat model (Team page)" };
+  return { model: defaultModel(config, runtime), setting: "The Claude card's model" };
+}
+
 /** The accepted level nearest to `effort`; between two, the one nearer "high" (as the providers themselves round). */
 export function nearestEffort(effort: Effort, accepted: readonly Effort[]): Effort | undefined {
   if (!accepted.length) return undefined;
@@ -438,21 +531,38 @@ export function buildRuntime(id: AiProviderId, conn: ConnectionValues): Provider
   const labelOf = (model: string) => preset.models.find((m) => m.id === model)?.label ?? model;
   const files: Record<string, string> = secrets.credentialsJson ? { GOOGLE_APPLICATION_CREDENTIALS: secrets.credentialsJson } : {};
 
+  // A model of another provider's family is not this one's, unless its list or its connection's tiers have it
+  // (a setting made for one provider of a route reaching another after a fallback, or Pointer's model set to Gemini).
+  const family = presetFamily(preset);
+  const ownIds = new Set([...preset.models.map((m) => m.id), ...Object.values(nonEmpty(conn.models))].map(sameId));
+  const foreignModel = (model: string): string | undefined => {
+    const of = model ? modelFamily(model) : undefined;
+    if (!of || of === "claude" || !family || of === family || ownIds.has(sameId(model))) return undefined;
+    return `"${model}" is a ${FAMILY_NAMES[of]} model, and ${preset.short} runs ${FAMILY_NAMES[family]} models`;
+  };
+
   if (id === "anthropic") {
     // As before providers existed: the key, and the models and efforts as configured. Also here: a
     // repository's .claude/settings*.json (repo tasks load project settings) cannot redirect the
     // endpoint or the key, which would otherwise send the Anthropic key to another host.
     const env = { ...credentialEnv(preset, secrets, settings), CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: "1" };
+    // Its main tier: the Claude card's model (connectionOf), else Claude Code's default.
+    const card = nonEmpty(conn.models).main;
+    const main = card && !foreignModel(card) ? card : undefined;
     return {
       provider: id,
       label: preset.short,
       env,
       disallowedTools,
-      model: (model) => model || undefined,
+      model: (model) => (!model ? undefined : foreignModel(model) ? main : model),
+      foreignModel,
       effort: (effort) => effort,
       capabilities,
       session: async () => ({ env: { ...env }, dispose: async () => undefined }),
-      displayModel: (model) => (model ? labelOf(model) : "the default model"),
+      displayModel: (model) => {
+        const runs = model && !foreignModel(model) ? model : main;
+        return runs ? labelOf(runs) : "the default model";
+      },
     };
   }
 
@@ -495,8 +605,10 @@ export function buildRuntime(id: AiProviderId, conn: ConnectionValues): Provider
     env,
     disallowedTools,
     ...(Object.keys(overrides).length ? { managedSettings: { modelPricing: { overrides } } } : {}),
-    // The alias, which Claude Code resolves through the tier's variable (fable through the opus tier's).
-    model: (model) => (!model ? undefined : tierOf(model) ? claudeAlias(model) : model),
+    // The alias, which Claude Code resolves through the tier's variable (fable through the opus tier's);
+    // another provider's model, nothing: the main tier (ANTHROPIC_MODEL).
+    model: (model) => (!model || foreignModel(model) ? undefined : tierOf(model) ? claudeAlias(model) : model),
+    foreignModel,
     effort: (effort) => nearestEffort(effort, capabilities.effort),
     capabilities,
     session: async () => {
@@ -526,7 +638,7 @@ export function buildRuntime(id: AiProviderId, conn: ConnectionValues): Provider
       return { env: { ...env, ...written }, dispose: () => rm(dir, { recursive: true, force: true }).catch(() => undefined) };
     },
     displayModel: (model) => {
-      const tier = model ? tierOf(model) : "main";
+      const tier = !model || foreignModel(model) ? "main" : tierOf(model);
       const runs = tier ? models[tier] : model;
       return runs ? labelOf(runs) : "the default model";
     },

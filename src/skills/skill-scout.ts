@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Options, query } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
-import { type ProviderRuntime, defaultModel } from "../ai/ai-providers.js";
+import { type ProviderRuntime, chatModelOf, configuredModel } from "../ai/ai-providers.js";
 import { type ProviderFailure, RunWatch, acrossRoute, fallbackLine, onlyClaudeMissing, routeRuntimes } from "../ai/routing.js";
 import type { Spending } from "../spending/budget.js";
 import type { Config } from "../core/config.js";
@@ -190,7 +190,9 @@ export async function findSkills(need: string, deps: ScoutDeps): Promise<ScoutRe
   const timeoutMs = deps.timeoutMs ?? SCOUT_TIMEOUT_MS;
 
   const search = async (runtime: ProviderRuntime): Promise<ScoutRun> => {
-    const model = runtime.model(scout?.model || config.team.pointer.model || defaultModel(config, runtime));
+    // The Scout's own model, else Pointer's chat model; another provider's model runs as this one's main tier.
+    const chat = chatModelOf(config, runtime);
+    const model = scout?.model ? configuredModel(runtime, scout.model, `${scout.name}'s model (Team page)`) : configuredModel(runtime, chat.model, chat.setting);
     const effort = runtime.effort(scout?.effort || config.team.pointer.effort);
     const tmp = await mkdtemp(join(tmpdir(), "scout-"));
     const abort = new AbortController();

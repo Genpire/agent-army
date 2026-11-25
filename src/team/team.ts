@@ -513,6 +513,8 @@ export interface RepoAgentOptions {
   engines?: RepoTaskEngines;
   /** The task provider's model and effort mapping (see ai-providers.ts). Absent = Anthropic, as configured. */
   provider?: Pick<ProviderRuntime, "model" | "effort">;
+  /** The model to pass for an agent's own (the worker's: configuredModel, which says when the provider does not run it). Absent = provider.model. */
+  modelOf?: (agent: AgentSpec) => string | undefined;
 }
 
 /** The Skill tool loads a library skill; allowed only when one is installed. */
@@ -543,8 +545,9 @@ export function buildRepoAgents(team: Team, opts: RepoAgentOptions = {}): Record
     enabledAgents(team).map((a) => {
       // Each agent starts its own servers (browser, apps), scoped to that agent.
       const servers: AgentMcpServerSpec[] = [...(usesBrowser(a, opts) ? [{ [BROWSER_SERVER]: opts.browser! }] : []), ...appServersFor(a, opts.apps)];
-      // The task provider maps models and efforts (a Claude model id onto another provider's tier, an effort it does not take).
-      const model = opts.provider ? opts.provider.model(a.model) : a.model || undefined;
+      // The task provider maps models and efforts (a Claude model id onto another provider's tier, another provider's
+      // model onto its main tier, an effort it does not take).
+      const model = opts.modelOf ? opts.modelOf(a) : opts.provider ? opts.provider.model(a.model) : a.model || undefined;
       const effort = opts.provider ? opts.provider.effort(a.effort || team.pointer.taskEffort) : a.effort || team.pointer.taskEffort;
       const base: AgentDefinition = {
         description: describeForSdk(a),
@@ -585,20 +588,25 @@ export function buildChatAgents(
   skills?: TeamSkills,
   /** Tools only some agents get (apps assigned to them), by agent id. */
   extraToolsFor?: (agentId: string) => string[],
+  /** The model to pass for an agent's own, on the chat's provider (pointer.ts: configuredModel). Absent = the agent's model as set. */
+  modelOf?: (agent: AgentSpec) => string | undefined,
 ): Record<string, AgentDefinition> {
   return Object.fromEntries(
-    enabledAgents(team).map((a) => [
-      a.id,
-      {
-        description: describeForSdk(a),
-        tools: [...new Set([...chatTools, ...(extraToolsFor?.(a.id) ?? [])])],
-        prompt: `${a.instructions}\n${CHAT_RULES}`,
-        ...(a.model ? { model: a.model } : {}),
-        effort: a.effort || team.pointer.effort,
-        background: false,
-        ...skillsFor(a, skills),
-      } satisfies AgentDefinition,
-    ]),
+    enabledAgents(team).map((a) => {
+      const model = modelOf ? modelOf(a) : a.model || undefined;
+      return [
+        a.id,
+        {
+          description: describeForSdk(a),
+          tools: [...new Set([...chatTools, ...(extraToolsFor?.(a.id) ?? [])])],
+          prompt: `${a.instructions}\n${CHAT_RULES}`,
+          ...(model ? { model } : {}),
+          effort: a.effort || team.pointer.effort,
+          background: false,
+          ...skillsFor(a, skills),
+        } satisfies AgentDefinition,
+      ];
+    }),
   );
 }
 

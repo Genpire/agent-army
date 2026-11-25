@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Options, query } from "@anthropic-ai/claude-agent-sdk";
-import type { ProviderRuntime } from "../ai/ai-providers.js";
+import { type ProviderRuntime, configuredModel } from "../ai/ai-providers.js";
 import { type ProviderFailure, RunWatch, acrossRoute, fallbackLine, isRouteReady, routeRuntimes } from "../ai/routing.js";
 import { TRANSCRIPTION } from "../chat/transcribe.js";
 import type { QueryFn } from "../chat/pointer.js";
@@ -193,7 +193,8 @@ export async function chatTalk(route: ProviderRuntime | ProviderRuntime[], call:
 async function chatTalkOn(runtime: ProviderRuntime, call: TalkCall, opts: TalkCallOptions): Promise<{ value: TalkOutcome; failure?: ProviderFailure }> {
   const queryFn: QueryFn = opts.queryFn ?? query;
   const watch = new RunWatch();
-  const model = runtime.model(call.model || SIZING_MODEL);
+  // The owner's model, else the cheapest (also when the owner's is another provider's: the log says so once).
+  const model = configuredModel(runtime, call.model, "The office's talk model") ?? runtime.model(SIZING_MODEL);
   const effort = runtime.effort("low");
   const asked = model ?? "";
   let outcome: TalkOutcome = { model: asked, costUsd: 0, tokens: 0, error: "no answer" };

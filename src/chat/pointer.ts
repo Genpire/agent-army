@@ -10,7 +10,7 @@ import {
   query,
 } from "@anthropic-ai/claude-agent-sdk";
 import type { ContentBlockParam } from "@anthropic-ai/sdk/resources";
-import { type ProviderRuntime, type ProviderSession, defaultModel, fitContentBlocks } from "../ai/ai-providers.js";
+import { type ProviderRuntime, type ProviderSession, chatModelOf, configuredModel, fitContentBlocks } from "../ai/ai-providers.js";
 import { type FallbackNote, RunWatch, fallbackLine, routeRuntimes } from "../ai/routing.js";
 import { type AttachmentInfo, type AttachmentRepo, type PromptFile, type ThreadRef, classify, toContentBlocks } from "./attachments.js";
 import { type ChatIntegration, chatIntegrations, subagentIntegrationTools } from "./chat-integrations.js";
@@ -42,7 +42,7 @@ import type {
   PointerRequest,
   RelayedSource,
 } from "./pointer-types.js";
-import { SKILL_TOOL, type TeamSkills, buildChatAgents, pluginSkillName, rosterText, skillQueryOptions } from "../team/team.js";
+import { type AgentSpec, SKILL_TOOL, type TeamSkills, buildChatAgents, pluginSkillName, rosterText, skillQueryOptions } from "../team/team.js";
 import { configSecrets, makeRedactor } from "../tasks/worker.js";
 import { type AgentCosts, SpendTracker, addCosts } from "../spending/attribution.js";
 import { runtimePrices } from "../spending/prices.js";
@@ -661,7 +661,11 @@ export function createPointerBrain(
           const ownListWrites = new Set(connected.flatMap((i) => i.routineToolNames ?? []).filter((t) => allTools.includes(t)));
           const routineTools = new Set([...readOnlyTools, ...ownListWrites]);
           const writeTools = allTools.filter((t) => !routineTools.has(t));
-          const chatModel = team.pointer.model || defaultModel(config, runtime);
+          // Pointer's own chat model, else the model on the Claude card, else the provider's main tier; one of another
+          // provider's family (Gemini's, after a fallback to Claude) is left out, and the log says so once.
+          const chat = chatModelOf(config, runtime);
+          const chatModel = configuredModel(runtime, chat.model, chat.setting);
+          const agentModel = (agent: AgentSpec) => configuredModel(runtime, agent.model, `${agent.name}'s model (Team page)`);
           const options: Options = {
             systemPrompt: buildPointerSystemPrompt({
               config,
@@ -673,8 +677,7 @@ export function createPointerBrain(
               ...(skillOptions && teamSkills ? { skills: teamSkills.skills } : {}),
               integrationRules: integrations.map((i) => i.promptRule).filter(Boolean),
             }),
-            // Pointer's own chat model, else the model on the Claude card, else the SDK default.
-            ...(runtime.model(chatModel) ? { model: runtime.model(chatModel) } : {}),
+            ...(chatModel ? { model: chatModel } : {}),
             ...(runtime.effort(team.pointer.effort) ? { effort: runtime.effort(team.pointer.effort) } : {}),
             ...(runtime.managedSettings ? { managedSettings: runtime.managedSettings } : {}),
             tools: [...builtins],
@@ -691,7 +694,7 @@ export function createPointerBrain(
             // (string prompt and streamed user message alike).
             verbatimPrompts: true,
             mcpServers: { pointer: tools.server, ...Object.fromEntries(connected.map((i) => [i.key, i.server!])) },
-            agents: buildChatAgents(team, subagentTools, skillOptions ? teamSkills : undefined, scopedTools),
+            agents: buildChatAgents(team, subagentTools, skillOptions ? teamSkills : undefined, scopedTools, agentModel),
             // Every subagent, including the SDK's built-in ones (general-purpose, Explore, …),
             // is read-only: writes (memory, notes, tickets, repo tasks) only from Pointer itself.
             // Pointer's own memory, notes and app writes need the user's yes once this query

@@ -5,7 +5,7 @@ import { type Options, query } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import type { Spending } from "../spending/budget.js";
 import type { Budget, Config } from "../core/config.js";
-import { type ProviderRuntime, defaultModel } from "../ai/ai-providers.js";
+import { type ProviderRuntime, chatModelOf, configuredModel } from "../ai/ai-providers.js";
 import { type ProviderFailure, RunWatch, acrossRoute, fallbackLine, onlyClaudeMissing, routeRuntimes } from "../ai/routing.js";
 import type { QueryFn } from "../chat/pointer.js";
 import { modelName } from "../tasks/sizing.js";
@@ -959,7 +959,7 @@ export class HrService {
     ]);
     const hr = team.agents.find((a) => a.id === HR_AGENT_ID);
     const instructions = hr?.instructions ?? defaultHrAgent().instructions;
-    const chatModelOn = (runtime: ProviderRuntime) => team.pointer.model || defaultModel(config, runtime);
+    const chatModelOn = (runtime: ProviderRuntime) => chatModelOf(config, runtime).model;
     const chatModel = chatModelOn(route.runtimes[0]!);
     const evidence = buildEvidence({ tasks, team, chatModel, budget: config.budget, usage, skills, now, redact });
     const prompt = `<evidence>\n${evidenceText(evidence).replace(/<\/?evidence>/gi, "")}\n</evidence>\n\nReview the team and answer with the summary and your proposals.`;
@@ -971,6 +971,7 @@ export class HrService {
         runtime,
         // The HR agent's own model and effort when the owner set them; else Pointer's chat settings.
         model: hr?.model || chatModelOn(runtime),
+        modelSetting: hr?.model ? `${hr.name}'s model (Team page)` : chatModelOf(config, runtime).setting,
         effort: hr?.effort || team.pointer.effort,
         system: hrSystemPrompt(instructions, team.pointer.name),
         prompt,
@@ -1021,7 +1022,7 @@ export class HrService {
   }
 
   /** One call through the Agent SDK: no tools, a JSON-schema answer, a small budget, an isolated cwd and environment. Never throws. */
-  private async ask(o: { runtime: ProviderRuntime; model: string; effort: Effort; system: string; prompt: string }): Promise<{
+  private async ask(o: { runtime: ProviderRuntime; model: string; modelSetting: string; effort: Effort; system: string; prompt: string }): Promise<{
     answer?: RawAnswer;
     costUsd: number;
     problem: string;
@@ -1038,7 +1039,7 @@ export class HrService {
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), this.deps.timeoutMs ?? HR_TIMEOUT_MS);
     const { runtime } = o;
-    const model = runtime.model(o.model);
+    const model = configuredModel(runtime, o.model, o.modelSetting);
     const effort = runtime.effort(o.effort);
     try {
       tmp = await mkdtemp(join(tmpdir(), "hr-"));

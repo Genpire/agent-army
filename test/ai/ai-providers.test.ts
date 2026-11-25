@@ -11,10 +11,13 @@ import {
   GEMINI_BRIDGE_NOT_STARTED,
   anthropicRuntime,
   buildRuntime,
+  configuredModel,
   connectionProblem,
   fitContentBlocks,
+  modelFamily,
   nearestEffort,
   parseHeaderLines,
+  presetFamily,
   providerRuntime,
   redactConnection,
   secretParts,
@@ -219,6 +222,86 @@ describe("provider environments", () => {
     expect(custom.model("claude-sonnet-5-5")).toBe("claude-sonnet-5-5");
     expect(kimi.displayModel("claude-sonnet-5-5")).toBe("Kimi K3");
     expect(kimi.displayModel("")).toBe("Kimi K3");
+  });
+
+  it("run another provider's model on their main tier: a Gemini id on Claude, a Kimi id on Gemini", () => {
+    // Pointer's chat model set to Gemini, and the reply handed to Claude after Gemini failed.
+    const claude = anthropicRuntime("sk-ant-x-123456789");
+    expect(claude.model("gemini-4-carbon")).toBeUndefined();
+    expect(claude.foreignModel("gemini-4-carbon")).toBe('"gemini-4-carbon" is a Gemini model, and Claude runs Claude models');
+    expect(claude.displayModel("gemini-4-carbon")).toBe("the default model");
+    for (const id of ["kimi-k3[1m]", "deepseek-v4-pro[1m]", "qwen3.7-max", "glm-5.3", "gpt-6", "o4-mini", "models/gemini-3.6-flash"]) {
+      expect(claude.model(id), id).toBeUndefined();
+    }
+    // Claude's main tier is the Claude card's model, when there is one.
+    const card = buildRuntime("anthropic", { ...CONNECTIONS.anthropic, models: { main: "claude-opus-5-5" } });
+    expect(card.model("gemini-4-carbon")).toBe("claude-opus-5-5");
+    expect(card.displayModel("gemini-4-carbon")).toBe("Opus 5.5");
+    // Ids of no known family still pass (a Claude Code alias, a deployment's own name), and so do Claude's.
+    expect(claude.model("opusplan")).toBe("opusplan");
+    expect(claude.model("claude-sonnet-5-5")).toBe("claude-sonnet-5-5");
+    expect(claude.foreignModel("claude-sonnet-5-5")).toBeUndefined();
+    expect(buildRuntime("bedrock", CONNECTIONS.bedrock).model("gemini-4-carbon")).toBeUndefined();
+    expect(buildRuntime("bedrock", CONNECTIONS.bedrock).model("arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc")).toBe(
+      "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc",
+    );
+
+    const gemini = buildRuntime("google-ai", CONNECTIONS["google-ai"]);
+    // Its own family passes, listed or not (a newer model the live catalog lists); a Claude id goes to its tier.
+    expect(gemini.model("gemini-4-carbon")).toBe("gemini-4-carbon");
+    expect(gemini.model("gemini-9-pro")).toBe("gemini-9-pro");
+    expect(gemini.model("claude-haiku-5-5")).toBe("haiku");
+    expect(gemini.model("kimi-k3[1m]")).toBeUndefined();
+    expect(gemini.displayModel("kimi-k3[1m]")).toBe("Gemini 4 Carbon");
+    expect(buildRuntime("kimi", CONNECTIONS.kimi).model("gemini-4-carbon")).toBeUndefined();
+    // A model the owner put on one of the connection's tiers is the provider's, whatever its name says.
+    const routed = buildRuntime("qwen", { ...CONNECTIONS.qwen, models: { main: "kimi-k3" } });
+    expect(routed.model("kimi-k3")).toBe("kimi-k3");
+    // A custom endpoint may serve anything.
+    expect(buildRuntime("custom", CONNECTIONS.custom).model("gemini-4-carbon")).toBe("gemini-4-carbon");
+  });
+
+  it("tell model families apart, and give every provider's own API a family", () => {
+    expect(modelFamily("claude-opus-5-5")).toBe("claude");
+    expect(modelFamily("sonnet[1m]")).toBe("claude");
+    expect(modelFamily("us.anthropic.claude-haiku-4-5-20251001-v1:0")).toBe("claude");
+    expect(modelFamily("~anthropic/claude-opus-latest")).toBe("claude");
+    expect(modelFamily("claude-haiku-4-5@20251001")).toBe("claude");
+    expect(modelFamily("gemini-4-carbon")).toBe("gemini");
+    expect(modelFamily("google/gemma-4-27b")).toBe("gemini");
+    expect(modelFamily("moonshot-v1-128k")).toBe("kimi");
+    expect(modelFamily("qwen-max")).toBe("qwen");
+    expect(modelFamily("glm-5.3-flash[1m]")).toBe("glm");
+    expect(modelFamily("gpt-6-codex")).toBe("gpt");
+    expect(modelFamily("opusplan")).toBeUndefined();
+    expect(modelFamily("my-deployment")).toBeUndefined();
+    for (const preset of AI_PRESETS) {
+      const family = presetFamily(preset);
+      if (preset.kind === "custom") expect(family).toBeUndefined();
+      else expect(family, preset.id).toBeTruthy();
+      // Every listed model is the provider's own.
+      const runtime = buildRuntime(preset.id, CONNECTIONS[preset.id]);
+      for (const m of preset.models) expect(runtime.foreignModel(m.id), `${preset.id} ${m.id}`).toBeUndefined();
+    }
+    expect(presetFamily(AI_PRESETS.find((p) => p.id === "zai")!)).toBe("glm");
+  });
+
+  it("say once per setting, model and provider when a configured model is ignored", () => {
+    const lines: string[] = [];
+    const log = (line: string) => lines.push(line);
+    const claude = anthropicRuntime("sk-ant-x-123456789");
+    expect(configuredModel(claude, "gemini-4-carbon", "Pointer's chat model (Team page)", log)).toBeUndefined();
+    expect(configuredModel(claude, "gemini-4-carbon", "Pointer's chat model (Team page)", log)).toBeUndefined();
+    expect(lines).toEqual([
+      `[models] Pointer's chat model (Team page) is ignored on Claude: "gemini-4-carbon" is a Gemini model, and Claude runs Claude models. Claude runs its main model instead.`,
+    ]);
+    // Another setting, or a model that fits: said separately, or not at all.
+    configuredModel(claude, "gemini-4-carbon", "Ada's model (Team page)", log);
+    expect(configuredModel(claude, "claude-opus-5-5", "Pointer's chat model (Team page)", log)).toBe("claude-opus-5-5");
+    expect(configuredModel(claude, "", "Pointer's chat model (Team page)", log)).toBeUndefined();
+    expect(lines).toHaveLength(2);
+    expect(configuredModel(buildRuntime("google-ai", CONNECTIONS["google-ai"]), "gemini-4-carbon", "Pointer's chat model (Team page)", log)).toBe("gemini-4-carbon");
+    expect(lines).toHaveLength(2);
   });
 
   it("map efforts onto the levels each provider takes", () => {

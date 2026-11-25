@@ -21,7 +21,7 @@ import { providerLabel, runtimePrices } from "../spending/prices.js";
 import { TaskSpend } from "../spending/task-spend.js";
 import { BROWSER_ACTION_TOOLS, type Screenshot, browserAvailable, browserServer, collectScreenshots } from "./browser.js";
 import { type CiOutcome, type WaitOptions, ciFailureDetails, ciFixPrompt, ciSummary, ciSummaryLine, storedCiSummary, waitForChecks } from "./ci.js";
-import { type ProviderRuntime, type ProviderSession, secretParts, sessionSecrets } from "../ai/ai-providers.js";
+import { type ProviderRuntime, type ProviderSession, configuredModel, secretParts, sessionSecrets } from "../ai/ai-providers.js";
 import {
   type FallbackNote,
   type OutsideCalls,
@@ -70,7 +70,7 @@ import { slackClient, slackErrorCode, toMrkdwn, truncate, uploadThreadFiles } fr
 import { type Store, createStore } from "../core/store.js";
 import { TimelineRecorder, checkItems, plainLine } from "./task-events.js";
 import { type Task, type TaskPhase, type TaskReport, TaskRepo, type ThreadState, decodeTaskPayload, isWebTask } from "./tasks.js";
-import { type RepoAgentOptions, type Team, type TeamSkills, agentLabel, buildRepoAgents, repoAllowedTools, skillQueryOptions } from "../team/team.js";
+import { type AgentSpec, type RepoAgentOptions, type Team, type TeamSkills, agentLabel, buildRepoAgents, repoAllowedTools, skillQueryOptions } from "../team/team.js";
 import { ticketFinished, ticketPrOpened, ticketStarted, ticketStopped, ticketSyncDeps } from "../integrations/tickets/ticket-sync.js";
 import { UsageRepo, addProviderCost } from "../spending/usage.js";
 
@@ -1928,13 +1928,17 @@ export async function main(): Promise<void> {
       const taskOver = () => runAbort.abort();
       if (opts.abort.signal.aborted) runAbort.abort();
       else opts.abort.signal.addEventListener("abort", taskOver, { once: true });
+      // The task's model (the Claude card's on Anthropic, or model routing's for the task's size) and the agents' own,
+      // on this provider: one of another provider's family runs as its main tier, and the log says so once.
+      const leadModel = configuredModel(runtime, runConfig.anthropic.model, "The task's model (the Claude card's, or model routing's for its size)");
+      const modelOf = (a: AgentSpec) => configuredModel(runtime, a.model, `${a.name}'s model`);
       try {
         for await (const message of query({
           prompt: runPrompt,
           options: {
             cwd: repoDir,
             abortController: runAbort,
-            ...teamQueryOptions(runConfig, opts.context, attachmentsDir, { browser, skills, apps, engines, provider: runtime }),
+            ...teamQueryOptions(runConfig, opts.context, attachmentsDir, { browser, skills, apps, engines, provider: runtime, modelOf }),
             // Headless: nothing can prompt, so anything not in allowedTools is denied.
             permissionMode: "dontAsk",
             settingSources: ["project"], // loads the project's own CLAUDE.md
@@ -1944,7 +1948,7 @@ export async function main(): Promise<void> {
             outputFormat: { type: "json_schema", schema: REPORT_SCHEMA },
             maxTurns: config.limits.maxTurns,
             maxBudgetUsd: opts.budgetUsd,
-            ...(runtime.model(runConfig.anthropic.model) ? { model: runtime.model(runConfig.anthropic.model) } : {}),
+            ...(leadModel ? { model: leadModel } : {}),
             ...(runtime.disallowedTools.length ? { disallowedTools: runtime.disallowedTools } : {}),
             ...(runtime.managedSettings ? { managedSettings: runtime.managedSettings } : {}),
             env: agentEnv,

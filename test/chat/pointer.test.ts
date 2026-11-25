@@ -2551,6 +2551,49 @@ describe("Pointer brain: routes and fallback", () => {
     expect(after.fallback).toBeUndefined();
   });
 
+  it("runs a chat model set for one provider only there: after a fallback, the next provider runs its main model, said once", async () => {
+    const deps = await routed((c) => {
+      c.team.pointer.model = "kimi-k3[1m]";
+      c.team.agents = c.team.agents.map((a, i) => (i === 0 ? { ...a, model: "kimi-k3.1-pro[1m]" } : { ...a, model: "claude-haiku-5-5" }));
+    });
+    const config = await deps.configRepo.load(true);
+    const first = config.team.agents.find((a) => a.enabled)!;
+    const { queryFn, calls } = fakeQuery(async function* (call) {
+      if (onKimi(call)) {
+        yield* rateLimited;
+        return;
+      }
+      yield result();
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const brain = createPointerBrain(deps, { queryFn });
+    const reply = await brain.reply(baseReq(), ctx);
+    await brain.reply(baseReq(), ctx);
+    const warned = warn.mock.calls.map((c) => String(c[0]));
+    warn.mockRestore();
+    error.mockRestore();
+
+    expect(reply).toMatchObject({ text: "Here is the answer.", provider: "anthropic" });
+    // On Kimi, Kimi's model; on Claude, no model (Claude Code's default) rather than Kimi's, which Claude Code refuses.
+    expect(calls[0]!.options.model).toBe("kimi-k3[1m]");
+    expect(calls[1]!.options.model).toBeUndefined();
+    // The agents' too: Kimi's left out on Claude, Claude's own kept (and mapped onto Kimi's tier on Kimi).
+    expect(calls[0]!.options.agents?.[first.id]?.model).toBe("kimi-k3.1-pro[1m]");
+    expect(calls[1]!.options.agents?.[first.id]?.model).toBeUndefined();
+    const other = config.team.agents.find((a) => a.enabled && a.id !== first.id);
+    if (other) {
+      expect(calls[0]!.options.agents?.[other.id]?.model).toBe("haiku");
+      expect(calls[1]!.options.agents?.[other.id]?.model).toBe("claude-haiku-5-5");
+    }
+    // Said once per setting, however many replies.
+    const ignored = warned.filter((line) => line.startsWith("[models]"));
+    expect(ignored).toEqual([
+      `[models] Pointer's chat model (Team page) is ignored on Claude: "kimi-k3[1m]" is a Kimi model, and Claude runs Claude models. Claude runs its main model instead.`,
+      `[models] ${first.name}'s model (Team page) is ignored on Claude: "kimi-k3.1-pro[1m]" is a Kimi model, and Claude runs Claude models. Claude runs its main model instead.`,
+    ]);
+  });
+
   it("does not move on for the work's own failures, and says what happened when the last provider fails too", async () => {
     const deps = await routed();
     const turns = fakeQuery(async function* () {
