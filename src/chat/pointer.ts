@@ -570,6 +570,8 @@ export function createPointerBrain(
       // The owner's own Slack account, for the owner's requests only: the console, their DM with Pointer, their own routines.
       const slackAccount = ownSlackAccount(config, req);
       const budgetUsd = routineRun && req.budgetUsd !== undefined ? req.budgetUsd : team.pointer.budgetUsd;
+      // A routine run has its own time limit (nobody waits on it); a chat reply keeps the chat limit.
+      const limitMs = routineRun && req.timeoutMs !== undefined && req.timeoutMs > 0 ? req.timeoutMs : timeoutMs;
       const limits = { maxTurns: team.pointer.maxTurns, budgetUsd };
       // Outside content Pointer relayed since the person's previous message here (an answer passed on, a report): the
       // reply starts as if it had read it; "inbox" also as if it had read the owner's inbox (confirm-gate.ts).
@@ -755,7 +757,7 @@ export function createPointerBrain(
 
       // One time limit for the whole reply, whichever providers answer it.
       const abort = new AbortController();
-      const timer = setTimeout(() => abort.abort(), timeoutMs);
+      const timer = setTimeout(() => abort.abort(), limitMs);
       const attempts: ReplyAttempt[] = [];
       const fallback: FallbackNote[] = [];
       // Why the reply could not move on to the next provider after a provider failure, for its error text.
@@ -804,7 +806,7 @@ export function createPointerBrain(
         };
       }
       if (abort.signal.aborted) {
-        const minutes = Math.round(timeoutMs / 60_000) || 1;
+        const minutes = Math.round(limitMs / 60_000) || 1;
         reply = { ...reply, text: `I ran out of time (${minutes} min limit) on this one.`, costUsd: reply?.costUsd, isError: true };
       }
       reply ??= { text: "I finished without an answer. Please try again.", isError: true };

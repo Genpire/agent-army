@@ -6,7 +6,7 @@
  */
 import { z } from "zod";
 import type { PointerBrain } from "../chat/pointer-types.js";
-import { type Config, type ConfigRepo, ROUTINE_ID_RE, type Routine, RoutineSchema } from "../core/config.js";
+import { type Config, type ConfigRepo, ROUTINE_ID_RE, ROUTINE_TIMEOUT_DEFAULT_MIN, ROUTINE_TIMEOUT_MAX_MIN, type Routine, RoutineSchema } from "../core/config.js";
 import { safeEqual } from "../core/crypto.js";
 import type { Store } from "../core/store.js";
 import { emailReady, sendEmail } from "../integrations/email/email.js";
@@ -51,6 +51,8 @@ export interface RoutineDraft {
   slack?: string;
   console?: boolean;
   budgetUsd?: number;
+  /** Minutes one run may take (1 to ROUTINE_TIMEOUT_MAX_MIN). */
+  timeoutMin?: number;
   enabled?: boolean;
 }
 
@@ -121,6 +123,9 @@ export function applyDraft(base: Routine, draft: RoutineDraft, now: Date): { ok:
   if (draft.timezone !== undefined) next.schedule.timezone = draft.timezone.trim();
   if (draft.console !== undefined) next.deliver.console = draft.console;
   if (draft.budgetUsd !== undefined) next.budgetUsd = draft.budgetUsd;
+  if (draft.timeoutMin !== undefined) next.timeoutMin = draft.timeoutMin;
+  // A routine kept before time limits existed has none: it gets the default.
+  next.timeoutMin ??= ROUTINE_TIMEOUT_DEFAULT_MIN;
   if (draft.enabled !== undefined) next.enabled = draft.enabled;
   if (draft.email !== undefined) {
     const seen = new Set<string>();
@@ -145,6 +150,9 @@ export function applyDraft(base: Routine, draft: RoutineDraft, now: Date): { ok:
   if (next.instruction.length < 10) return { ok: false, error: "Say what Pointer should do on each run, in at least 10 characters." };
   if (next.instruction.length > 8000) return { ok: false, error: "The instruction is limited to 8 000 characters." };
   if (!Number.isFinite(next.budgetUsd) || next.budgetUsd < 0.05 || next.budgetUsd > 20) return { ok: false, error: "The budget per run is from $0.05 to $20." };
+  if (!Number.isInteger(next.timeoutMin) || next.timeoutMin < 1 || next.timeoutMin > ROUTINE_TIMEOUT_MAX_MIN) {
+    return { ok: false, error: `The time limit per run is from 1 to ${ROUTINE_TIMEOUT_MAX_MIN} minutes.` };
+  }
   const preview = previewSchedule(next.schedule.cron, next.schedule.timezone, now);
   if (!preview.ok) return preview;
   next.schedule.timezone = preview.timezone;
@@ -258,6 +266,7 @@ export class RoutineService {
         schedule: { cron: "", timezone: c.timezone },
         deliver: { email: [], slack: "", console: true },
         budgetUsd: 1,
+        timeoutMin: ROUTINE_TIMEOUT_DEFAULT_MIN,
         enabled: true,
         createdBy: createdBy.slice(0, 120),
         createdAt: now.toISOString(),

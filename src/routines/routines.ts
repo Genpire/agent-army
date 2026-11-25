@@ -49,7 +49,7 @@ export function routineLine(r: RoutineView): string {
   const next = !r.enabled ? "paused" : r.nextRuns.length ? `next ${runTimes(r)}` : "no upcoming runs";
   const last = r.lastRun ? `last run ${r.lastRun.status} (${r.lastRun.startedAt.slice(0, 16).replace("T", " ")} UTC)` : "not run yet";
   return [
-    `- ${r.id} "${oneLine(r.name)}": ${r.scheduleText} (${r.schedule.timezone}, cron ${r.schedule.cron}); ${next}; reports to ${recipientsText(r)}; budget $${r.budgetUsd.toFixed(2)} per run; ${last}.${r.problem ? ` Problem: ${r.problem}` : ""}`,
+    `- ${r.id} "${oneLine(r.name)}": ${r.scheduleText} (${r.schedule.timezone}, cron ${r.schedule.cron}); ${next}; reports to ${recipientsText(r)}; budget $${r.budgetUsd.toFixed(2)} and ${r.timeoutMin} min per run; ${last}.${r.problem ? ` Problem: ${r.problem}` : ""}`,
     `  Instruction: ${oneLine(r.instruction).slice(0, 400)}`,
   ].join("\n");
 }

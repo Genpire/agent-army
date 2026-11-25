@@ -10,13 +10,15 @@ export interface SecretFieldProps {
   description?: string;
   placeholder?: string;
   isRequired?: boolean;
+  /** An error to show on the field (a required secret left empty). */
+  status?: { type: "error"; message: string };
 }
 
 /**
  * A credential input. The server never sends secrets back, so a saved one is
  * shown only by its last characters; typing a new value replaces it on save.
  */
-export function SecretField({ label, value, onChange, saved, description, placeholder, isRequired }: SecretFieldProps) {
+export function SecretField({ label, value, onChange, saved, description, placeholder, isRequired, status }: SecretFieldProps) {
   const savedNote = saved ? `Saved (${saved}). Paste a new one to replace it.` : undefined;
   return (
     <TextInput
@@ -29,6 +31,7 @@ export function SecretField({ label, value, onChange, saved, description, placeh
       description={[description, savedNote].filter(Boolean).join(" ") || undefined}
       placeholder={placeholder ?? (saved ? "Leave empty to keep the saved one" : undefined)}
       isRequired={isRequired && !saved}
+      status={status}
     />
   );
 }

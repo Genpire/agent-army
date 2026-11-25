@@ -235,6 +235,10 @@ function AddAppForm({
             ? "That is an email address, not a client ID. Copy the client ID from the OAuth app you registered."
             : undefined
         : undefined,
+    clientSecret:
+      choice === "oauth" && (manualClient || ownClient) && needsClientSecret(address) && !clientSecret.trim()
+        ? `Paste the client secret too: ${name.trim() || "Google"} refuses the sign-in without it.`
+        : undefined,
   };
   const invalid =
     Boolean(
@@ -242,7 +246,8 @@ function AddAppForm({
       problems.url ||
       problems.token ||
       problems.headers ||
-      problems.clientId,
+      problems.clientId ||
+      problems.clientSecret,
     ) || Object.values(problems.urlValues).some(Boolean);
   const status = (message: string | undefined) =>
     tried && message ? { type: "error" as const, message } : undefined;
@@ -570,6 +575,8 @@ function AddAppForm({
                     onClientId={edit(setClientId)}
                     onClientSecret={edit(setClientSecret)}
                     error={status(problems.clientId)?.message}
+                    secretRequired={needsClientSecret(address)}
+                    secretError={status(problems.clientSecret)?.message}
                   />
                 ) : (
                   <Collapsible
@@ -589,6 +596,8 @@ function AddAppForm({
                         clientSecret={clientSecret}
                         onClientId={edit(setClientId)}
                         onClientSecret={edit(setClientSecret)}
+                        secretRequired={needsClientSecret(address)}
+                        secretError={status(problems.clientSecret)?.message}
                       />
                     )}
                   </Collapsible>
@@ -644,7 +653,17 @@ export interface ClientFieldsProps {
   /** The client's secret is saved (an app being edited): shown by its mask. */
   savedSecret?: string | null;
   error?: string;
+  /** The vendor always asks for the secret (Google): no public-client option. */
+  secretRequired?: boolean;
+  secretError?: string;
 }
+
+/**
+ * Google's servers (Gmail, Calendar, Drive and the other Workspace MCP servers)
+ * always ask for the client secret when the sign-in finishes: without it the
+ * sign-in fails at the last step ("client_secret is missing").
+ */
+export const needsClientSecret = (address: string): boolean => /^https:\/\/[a-z0-9-]+\.googleapis\.com\//i.test(address.trim());
 
 /** A client registered by hand with the vendor (when it has no automatic registration), and the redirect address it must allow. */
 export function ClientFields({
@@ -656,6 +675,8 @@ export function ClientFields({
   onClientSecret,
   savedSecret,
   error,
+  secretRequired,
+  secretError,
 }: ClientFieldsProps) {
   return (
     <VStack gap={3}>
@@ -680,7 +701,13 @@ export function ClientFields({
         value={clientSecret}
         onChange={onClientSecret}
         saved={savedSecret}
-        description="Leave empty for a public client (PKCE only)."
+        description={
+          secretRequired
+            ? "Required: Google always asks for it. In Google Cloud, Google Auth Platform → Clients → your client → Add secret, and copy it straight away (Google shows it once)."
+            : "Leave empty for a public client (PKCE only)."
+        }
+        isRequired={secretRequired}
+        status={secretError ? { type: "error" as const, message: secretError } : undefined}
       />
     </VStack>
   );

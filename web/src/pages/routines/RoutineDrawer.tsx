@@ -28,7 +28,7 @@ import { WeekdayPicker } from "../../components/WeekdayPicker";
 import { api, errorMessage } from "../../lib/api";
 import { href } from "../../lib/router";
 import { useAction } from "../../lib/useAction";
-import { type RoutineBody, type RoutineView, type SchedulePreview, ROUTINES_PATH, routinePath, runTime } from "./model";
+import { type RoutineBody, type RoutineView, type SchedulePreview, ROUTINE_TIMEOUT_DEFAULT_MIN, ROUTINE_TIMEOUT_MAX_MIN, ROUTINES_PATH, routinePath, runTime } from "./model";
 import { RunHistory } from "./RunHistory";
 import { DEFAULT_FORM, PRESET_OPTIONS, type PresetKind, type ScheduleForm, cronFor, formFor } from "./schedule";
 
@@ -57,6 +57,7 @@ interface FormState {
   slack: string;
   console: boolean;
   budgetUsd: number;
+  timeoutMin: number;
 }
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -75,6 +76,7 @@ function initialForm(routine: RoutineView | undefined, timezone: string): FormSt
       slack: routine.deliver.slack,
       console: routine.deliver.console,
       budgetUsd: routine.budgetUsd,
+      timeoutMin: routine.timeoutMin ?? ROUTINE_TIMEOUT_DEFAULT_MIN,
     };
   }
   return {
@@ -86,6 +88,7 @@ function initialForm(routine: RoutineView | undefined, timezone: string): FormSt
     slack: "",
     console: true,
     budgetUsd: 1,
+    timeoutMin: ROUTINE_TIMEOUT_DEFAULT_MIN,
   };
 }
 
@@ -95,6 +98,7 @@ const bodyOf = (f: FormState): RoutineBody => ({
   schedule: { cron: cronFor(f.schedule), timezone: f.timezone },
   deliver: { email: f.emails.map((e) => e.label), slack: f.slack.trim(), console: f.console },
   budgetUsd: f.budgetUsd,
+  timeoutMin: f.timeoutMin,
 });
 
 /** The schedule in words and its next runs, asked from the server as the schedule changes. */
@@ -220,6 +224,7 @@ export function RoutineDrawer({ isOpen, routine, tab, onTabChange, timezone, ema
     slack: slack && !SLACK_RE.test(slack) ? "Slack ids look like C012ABCDEF (a channel) or U012ABCDEF (a person)." : undefined,
     deliver: !form.emails.length && !slack && !form.console ? "Choose at least one place for the reports." : undefined,
     budget: !(form.budgetUsd >= 0.05 && form.budgetUsd <= 20) ? "From $0.05 to $20." : undefined,
+    timeout: !(Number.isInteger(form.timeoutMin) && form.timeoutMin >= 1 && form.timeoutMin <= ROUTINE_TIMEOUT_MAX_MIN) ? `From 1 to ${ROUTINE_TIMEOUT_MAX_MIN} minutes.` : undefined,
   };
   const invalid = Object.values(errors).some(Boolean) || Boolean(emailError) || preview?.ok === false;
   const shown = (message: string | undefined) => (tried && message ? { type: "error" as const, message } : undefined);
@@ -363,6 +368,18 @@ export function RoutineDrawer({ isOpen, routine, tab, onTabChange, timezone, ema
                   hasNumberSteppers
                   description="A run stops when it has used this much. Runs count toward the monthly spending cap; a run is skipped when the cap is used up."
                   status={shown(errors.budget)}
+                />
+                <NumberInput
+                  label="Time limit per run"
+                  units="min"
+                  value={form.timeoutMin}
+                  onChange={(timeoutMin) => set({ timeoutMin })}
+                  min={1}
+                  max={ROUTINE_TIMEOUT_MAX_MIN}
+                  step={1}
+                  hasNumberSteppers
+                  description={`A run that takes longer stops and is marked failed. Chat replies have 8 minutes; a routine can have up to ${ROUTINE_TIMEOUT_MAX_MIN}, since nobody waits on it.`}
+                  status={shown(errors.timeout)}
                 />
                 {!isNew && routine.conversationId && (
                   <Text type="supporting">

@@ -1430,6 +1430,33 @@ describe("Pointer brain", () => {
     expect(reply.text).toMatch(/time/i);
   });
 
+  it("gives a routine run its own time limit, and keeps the chat limit for everything else", async () => {
+    const deps = await setup();
+    const waitForAbort = () =>
+      fakeQuery(async function* (call) {
+        const signal = call.options.abortController!.signal;
+        await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve()));
+        throw new Error("aborted");
+      }).queryFn;
+    // A routine with a 2-minute limit: the chat limit (20 ms here) does not stop it.
+    const routine = createPointerBrain(deps, { queryFn: waitForAbort(), timeoutMs: 20 }).reply(
+      { ...baseReq(), surface: "routine", userId: "routine", timeoutMs: 120_000 },
+      ctx,
+    );
+    const early = await Promise.race([routine.then(() => "ended"), new Promise((r) => setTimeout(() => r("still running"), 80))]);
+    expect(early).toBe("still running");
+    // A chat request carrying timeoutMs keeps the chat limit.
+    const chat = await createPointerBrain(deps, { queryFn: waitForAbort(), timeoutMs: 20 }).reply({ ...baseReq(), timeoutMs: 120_000 }, ctx);
+    expect(chat.text).toMatch(/1 min limit|time/i);
+    // A routine's own limit is what the message names.
+    const short = await createPointerBrain(deps, { queryFn: waitForAbort(), timeoutMs: 20 }).reply(
+      { ...baseReq(), surface: "routine", userId: "routine", timeoutMs: 30 },
+      ctx,
+    );
+    expect(short.isError).toBe(true);
+    expect(short.text).toMatch(/time/i);
+  });
+
   it("gives the tool server the request's startRepoTask, user and memory", async () => {
     const deps = await setup();
     const start = vi.fn<StartRepoTask>(async () => ({ ok: true, taskId: "t-9", repo: "acme/api" }));

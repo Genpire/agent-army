@@ -6,7 +6,7 @@
  */
 import { type Request, type Response, Router } from "express";
 import { z } from "zod";
-import { ROUTINE_ID_RE } from "../core/config.js";
+import { ROUTINE_ID_RE, ROUTINE_TIMEOUT_MAX_MIN } from "../core/config.js";
 import { RUN_ID_RE } from "../routines/runs.js";
 import { type RoutineDraft, type RoutineService, TICK_HEADER, TICK_PATH } from "../routines/service.js";
 import type { IntegrationRouteDeps } from "./types.js";
@@ -32,6 +32,12 @@ const DELIVER = z
   .optional();
 const BUDGET = z.number("The budget per run is a number of USD.").min(0.05, "The budget per run is at least $0.05.").max(20, "The budget per run is at most $20.");
 
+const TIME_LIMIT = z
+  .number("The time limit per run is a number of minutes.")
+  .int("The time limit per run is a whole number of minutes.")
+  .min(1, "The time limit per run is at least 1 minute.")
+  .max(ROUTINE_TIMEOUT_MAX_MIN, `The time limit per run is at most ${ROUTINE_TIMEOUT_MAX_MIN} minutes.`);
+
 /** A routine as the page sends it (the shape of config.routines). */
 const ROUTINE_BODY = z.object({
   name: z.string().max(200).optional(),
@@ -39,6 +45,7 @@ const ROUTINE_BODY = z.object({
   schedule: z.object({ cron: z.string().max(100).optional(), timezone: z.string().max(64).optional() }).optional(),
   deliver: DELIVER,
   budgetUsd: BUDGET.optional(),
+  timeoutMin: TIME_LIMIT.optional(),
   enabled: z.boolean().optional(),
 });
 const PREVIEW_BODY = z.object({ cron: z.string().max(100), timezone: z.string().max(64).optional() });
@@ -53,6 +60,7 @@ function toDraft(input: z.infer<typeof ROUTINE_BODY>): RoutineDraft {
   if (input.deliver?.slack !== undefined) draft.slack = input.deliver.slack;
   if (input.deliver?.console !== undefined) draft.console = input.deliver.console;
   if (input.budgetUsd !== undefined) draft.budgetUsd = input.budgetUsd;
+  if (input.timeoutMin !== undefined) draft.timeoutMin = input.timeoutMin;
   if (input.enabled !== undefined) draft.enabled = input.enabled;
   return draft;
 }

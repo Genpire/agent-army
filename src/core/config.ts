@@ -524,6 +524,10 @@ export const ROUTINE_ID_RE = /^rt-[a-z0-9][a-z0-9-]{1,40}$/;
  * summary by email, a weekly metrics report from the company's data… The run
  * only reads; its report goes only to the recipients set here.
  */
+/** A routine run's time limit: the default and the most a routine may set, in minutes. */
+export const ROUTINE_TIMEOUT_DEFAULT_MIN = 20;
+export const ROUTINE_TIMEOUT_MAX_MIN = 60;
+
 export const RoutineSchema = z.object({
   id: z.string().regex(ROUTINE_ID_RE),
   name: z.string().trim().min(1).max(80),
@@ -542,6 +546,12 @@ export const RoutineSchema = z.object({
     .default(() => ({ email: [], slack: "", console: true })),
   /** Spending cap per run, USD. */
   budgetUsd: z.number().min(0.05).max(20).default(1),
+  /**
+   * How long one run may take, in minutes. Longer than a chat reply's limit
+   * (8 min): nobody waits on a routine, and a digest over many repositories
+   * or inboxes needs the time.
+   */
+  timeoutMin: z.number().int().min(1).max(ROUTINE_TIMEOUT_MAX_MIN).default(ROUTINE_TIMEOUT_DEFAULT_MIN),
   enabled: z.boolean().default(true),
   createdBy: z.string().max(120).default(""),
   createdAt: z.string().optional(),

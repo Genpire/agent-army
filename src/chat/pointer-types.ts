@@ -146,6 +146,8 @@ export interface PointerRequest {
   surface?: "slack" | "web" | "routine";
   /** This request's own spending cap instead of Pointer's per-message budget (a routine's budgetUsd). */
   budgetUsd?: number;
+  /** This request's own time limit instead of a chat reply's (a routine's timeoutMin), in ms. Routine runs only. */
+  timeoutMs?: number;
   /**
    * A routine run only: the routine is the owner's and reports to them alone
    * (ownerRoutine in slack/user-account.ts), so it may read their Slack

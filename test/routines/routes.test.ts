@@ -50,6 +50,22 @@ describe("routines admin API", () => {
     }
   });
 
+  it("keeps a routine's time limit per run: 20 minutes by default, 1 to 60", async () => {
+    const created = await post("/api/routines", { ...body, name: "Long digest", deliver: { email: [], slack: "", console: true } });
+    expect(created.status).toBe(200);
+    const { routine } = await created.json();
+    expect(routine.timeoutMin).toBe(20);
+    const changed = await post(`/api/routines/${routine.id}`, { timeoutMin: 45 });
+    expect(changed.status).toBe(200);
+    expect((await changed.json()).routine.timeoutMin).toBe(45);
+    for (const bad of [0, 61, 2.5]) {
+      const res = await post(`/api/routines/${routine.id}`, { timeoutMin: bad });
+      expect(res.status, String(bad)).toBe(400);
+      expect((await res.json()).error).toMatch(/time limit per run/);
+    }
+    expect((await post(`/api/routines/${routine.id}/delete`)).status).toBe(200);
+  });
+
   it("creates, lists with the next runs, changes, runs and deletes", async () => {
     const created = await post("/api/routines", { ...body, deliver: { email: ["dana@acme.example"], slack: "C0ACMEDEV1", console: true }, budgetUsd: 0.5 });
     expect(created.status).toBe(200);

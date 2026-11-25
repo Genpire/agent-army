@@ -17,7 +17,7 @@ import { plural } from "../../../lib/format";
 import { useConfig } from "../../../lib/state";
 import { FormError, StatusLine } from "../parts";
 import { AccessField } from "./AccessField";
-import { ClientFields } from "./AddAppDrawer";
+import { ClientFields, needsClientSecret } from "./AddAppDrawer";
 import { AgentsField } from "./AgentsField";
 import { AppSignInPanel, AppToolList, useAppSettings } from "./AppSettings";
 import { type AppView, type CatalogApp, appStatus, headerOf, headerValue } from "./apps";
@@ -145,7 +145,15 @@ function AppForm({ app, preset, redirectUrl, onClose }: { app: AppView; preset?:
                       />
                     ))}
                   {app.auth.type === "oauth" && (
-                    <ClientFields appName={app.name} redirectUrl={redirectUrl} clientId={clientId} clientSecret={clientSecret} onClientId={setClientId} onClientSecret={setClientSecret} />
+                    <ClientFields
+                      appName={app.name}
+                      redirectUrl={redirectUrl}
+                      clientId={clientId}
+                      clientSecret={clientSecret}
+                      onClientId={setClientId}
+                      onClientSecret={setClientSecret}
+                      secretRequired={needsClientSecret(app.url)}
+                    />
                   )}
                 </Section>
               </>

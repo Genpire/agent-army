@@ -91,6 +91,7 @@ export function routineRequest(routine: Routine, input: RoutineRequestInput): Po
     history: [],
     surface: "routine",
     budgetUsd: routine.budgetUsd,
+    timeoutMs: routine.timeoutMin * 60_000,
     ...(input.ownerRoutine ? { ownerRoutine: true } : {}),
   };
 }

@@ -25,8 +25,14 @@ export interface RoutineBody {
   schedule: { cron: string; timezone: string };
   deliver: { email: string[]; slack: string; console: boolean };
   budgetUsd: number;
+  /** Minutes one run may take (1–60; the server's default is 20). */
+  timeoutMin?: number;
   enabled?: boolean;
 }
+
+/** A run's time limit: the default and the most, in minutes (config.ts ROUTINE_TIMEOUT_*). */
+export const ROUTINE_TIMEOUT_DEFAULT_MIN = 20;
+export const ROUTINE_TIMEOUT_MAX_MIN = 60;
 
 export const ROUTINES_PATH = "/api/routines";
 export const routinePath = (id: string) => `${ROUTINES_PATH}/${encodeURIComponent(id)}`;

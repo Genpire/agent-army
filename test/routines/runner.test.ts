@@ -250,6 +250,8 @@ describe("budget", () => {
     env.clock.set("2026-11-21T08:00:05Z");
     await (await env.service.scheduler.tick()).finished;
     expect(env.brain.requests.map((r) => r.budgetUsd)).toEqual([0.4, 0.4]);
+    // The default time limit: 20 minutes, longer than a chat reply's.
+    expect(env.brain.requests.map((r) => r.timeoutMs)).toEqual([20 * 60_000, 20 * 60_000]);
     expect(env.brain.requests[0]!.text).toContain("this is the first run, so the last 24 hours");
     expect(env.brain.requests[1]!.text).toContain("since the last successful run, Friday, November 20, 2026");
     expect(env.brain.requests[1]!.text).toContain("(2026-11-20T08:00:05.000Z)");
