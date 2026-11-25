@@ -219,6 +219,26 @@ describe("watching Claude Code's retries", () => {
     expect(hung.w.retryTrouble).toEqual({ kind: "overloaded", reason: "overloaded, no answer for 10 min" });
   });
 
+  it("count a quiet spell only when the retry says the provider left the request unanswered", () => {
+    // Without partial messages a healthy long answer (a big file written, long thinking) sends nothing for minutes:
+    // one transient server error after it does not stop the run.
+    const healthy = timed();
+    healthy.at(4 * 60_000, apiRetry({ error: "server_error", error_status: 500 }));
+    expect(healthy.w.retryTrouble).toBeUndefined();
+    const reset = timed();
+    reset.at(4 * 60_000, apiRetry({ error: "unknown", error_status: null }));
+    expect(reset.w.retryTrouble).toBeUndefined();
+    // No response headers in time, a 529 or a 504, or a stream's overload (no status): the provider was silent.
+    const noResponse = timed();
+    noResponse.at(4 * 60_000, apiRetry({ error: "unknown", error_status: null, no_response: { waited_ms: 240_000, retry_wait_ms: 240_000 } }));
+    expect(noResponse.w.retryTrouble?.reason).toBe("its requests kept failing, no answer for 4 min");
+    for (const patch of [{ error_status: 529, error: "overloaded" }, { error_status: 504, error: "server_error" }, { error_status: null, error: "overloaded" }]) {
+      const silent = timed();
+      silent.at(4 * 60_000, apiRetry(patch));
+      expect(silent.w.retryTrouble?.reason, JSON.stringify(patch)).toMatch(/, no answer for 4 min$/);
+    }
+  });
+
   it("let a brief rate limit (too many requests at once) pass", () => {
     const { w, at } = timed();
     for (let i = 1; i <= 3; i += 1) at(i * 1000, apiRetry({ error: "rate_limit", error_status: 429, retry_delay_ms: 1000, attempt: i }));

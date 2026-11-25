@@ -227,8 +227,12 @@ const OUTSIDE_MAX = 20;
  * - `count` retries in a row, with no answer from the provider between them;
  * - or one of the provider's own errors (TROUBLE_ERRORS) that asks for a wait
  *   of `longDelayMs` or more;
- * - or one after the run heard nothing for `quietMs`: the failed request hung
- *   that long, and its retry is likely to.
+ * - or one after the run heard nothing for `quietMs`, of a request the
+ *   provider itself left unanswered (silentRetry: no response at all, a 504
+ *   or 529, an overload): it hung that long, and its retry is likely to. Any
+ *   other error after a quiet spell does not count on its own: without
+ *   partial messages, a healthy long answer (a big file written, long
+ *   thinking) also sends nothing for minutes.
  * A rate limit that asks for a pause of `briefMs` or less does not count: too
  * many requests at once (the Gemini bridge answers a session so past its
  * requests in flight), a queue rather than an outage.
@@ -237,6 +241,14 @@ export const RETRY_TROUBLE = { count: 2, longDelayMs: 30_000, quietMs: 3 * 60_00
 
 /** The retried errors that are the provider's own trouble. */
 const TROUBLE_ERRORS = new Set<SDKAssistantMessageError>(["rate_limit", "overloaded", "server_error", "authentication_failed", "billing_error"]);
+
+/**
+ * A retry of a request the provider left unanswered: no response headers in
+ * time (no_response), a gateway timeout or an overload (504, 529, or
+ * "overloaded" from a stream's error event, which has no status; the Gemini
+ * bridge answers a silent Gemini so).
+ */
+const silentRetry = (m: ApiRetry): boolean => Boolean(m.no_response) || m.error_status === 504 || m.error_status === 529 || m.error === "overloaded";
 
 type ApiRetry = Extract<SDKMessage, { type: "system"; subtype: "api_retry" }>;
 
@@ -305,7 +317,7 @@ export class RunWatch {
     if (m.error === "rate_limit" && m.retry_delay_ms <= RETRY_TROUBLE.briefMs) return;
     this.retries += 1;
     const why =
-      quietMs >= RETRY_TROUBLE.quietMs
+      quietMs >= RETRY_TROUBLE.quietMs && silentRetry(m)
         ? "quiet"
         : TROUBLE_ERRORS.has(m.error) && m.retry_delay_ms >= RETRY_TROUBLE.longDelayMs
           ? "long"
