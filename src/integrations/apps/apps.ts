@@ -70,6 +70,27 @@ export interface RepoTaskApps {
 export type AppDeps = NetGuardOptions & Omit<FreshTokenDeps, keyof NetGuardOptions> & { configRepo?: ConfigRepo; proxy?: AppProxy };
 
 const messageOf = (err: unknown) => (err instanceof Error ? err.message : String(err));
+
+/**
+ * The part of a Google error worth logging: its status, reason(s) and message
+ * ("PERMISSION_DENIED · ACCESS_TOKEN_SCOPE_INSUFFICIENT · Request had
+ * insufficient authentication scopes."), else the text clipped. Google's
+ * error bodies carry no token or mail content.
+ */
+export function googleReason(message: string): string {
+  const json = message.slice(message.indexOf("{"));
+  try {
+    const body = JSON.parse(json) as { error?: { status?: unknown; message?: unknown; details?: { reason?: unknown }[]; errors?: { reason?: unknown }[] } };
+    const e = body.error;
+    if (e) {
+      const reasons = [...(e.details ?? []), ...(e.errors ?? [])].map((d) => d.reason).filter((r): r is string => typeof r === "string");
+      return [e.status, ...new Set(reasons), e.message].filter((p): p is string => typeof p === "string" && p.length > 0).join(" · ").slice(0, 300);
+    }
+  } catch {
+    // not JSON: the text as it is
+  }
+  return message.replace(/\s+/g, " ").slice(0, 300);
+}
 const unique = <T>(xs: T[]) => [...new Set(xs)];
 
 /** How the Agent SDK names MCP servers and tools: anything but letters, digits, _ and - becomes _. */
@@ -124,7 +145,12 @@ function toolListProblem(app: AppConnection, err: unknown, timeoutMs: number): s
   if (code === 401 || code === 403 || err instanceof UnauthorizedError || /\b(401|403)\b|unauthori[sz]ed|forbidden/i.test(message)) {
     // Google's Workspace MCP servers refuse a good sign-in when the project lacks the product's API or MCP service.
     const workspace = workspaceMcpRefusal(app);
-    if (workspace) return workspace;
+    if (workspace) {
+      // The advice replaces Google's own words for the owner; the log keeps them (its status and reason,
+      // e.g. PERMISSION_DENIED / ACCESS_TOKEN_SCOPE_INSUFFICIENT), which say which of the causes it is.
+      console.warn(`[apps] ${app.name}: refused${typeof code === "number" ? ` (HTTP ${code})` : ""}: ${googleReason(message)}`);
+      return workspace;
+    }
     return `${app.name} refused the sign-in. ${app.auth.type === "oauth" ? "Sign in again." : "Check the key, and that it may use the MCP server."}`;
   }
   if (/abort|timeout|timed out/i.test(message)) {

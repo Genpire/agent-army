@@ -1020,3 +1020,12 @@ describe("apps admin API", () => {
   });
 });
 
+
+describe("Google's reason for a refusal, for the log", () => {
+  it("keeps the status, the reasons and the message, and the text when it is not JSON", async () => {
+    const { googleReason } = await import("../../../src/integrations/apps/apps.js");
+    const body = JSON.stringify({ error: { code: 403, status: "PERMISSION_DENIED", message: "Request had insufficient authentication scopes.", details: [{ reason: "ACCESS_TOKEN_SCOPE_INSUFFICIENT" }] } });
+    expect(googleReason(`Error POSTing to endpoint (HTTP 403): ${body}`)).toBe("PERMISSION_DENIED · ACCESS_TOKEN_SCOPE_INSUFFICIENT · Request had insufficient authentication scopes.");
+    expect(googleReason("Error POSTing to endpoint (HTTP 401): Unauthorized")).toBe("Error POSTing to endpoint (HTTP 401): Unauthorized");
+  });
+});
