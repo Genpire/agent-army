@@ -15,7 +15,7 @@
  * `undici` package (which could give fetch a client with other limits) is not
  * a dependency, and Node's own copy cannot be imported.
  */
-import { type FetchLike, pinnedFetch } from "../../integrations/apps/apps-net.js";
+import { type FetchLike, nodeFetch } from "../../integrations/apps/apps-net.js";
 import { BridgeError, errorCode, geminiError, silenceError } from "./errors.js";
 
 export const GEMINI_API_ORIGIN = "https://generativelanguage.googleapis.com";
@@ -35,12 +35,14 @@ export interface UpstreamOptions {
 }
 
 /**
- * The fetch for Gemini calls: over node:https, which has no time limit of its
- * own (the bridge's deadlines stop a call), with the network guard's lookup
- * (apps-net.ts: the address checked is the one connected to; Google's are
- * public). It follows no redirect: one comes back as an error answer.
+ * The fetch for Gemini calls: over node:https (apps-net.ts nodeFetch), which
+ * has no time limit of its own (the bridge's deadlines stop a call), with
+ * Node's own name lookup: the host is fixed, so the apps' address guard has
+ * nothing to check, and a network that reaches Google's APIs on a private
+ * address (a private endpoint) keeps working. It follows no redirect: one
+ * comes back as an error answer.
  */
-export const geminiFetch = (): FetchLike => pinnedFetch();
+export const geminiFetch = (): FetchLike => nodeFetch();
 
 /** "600 s", "1.5 s": for the deadlines' messages. */
 const seconds = (ms: number): string => `${Math.round(ms / 100) / 10} s`;

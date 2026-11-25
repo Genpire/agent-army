@@ -186,7 +186,17 @@ function encodeBody(body: RequestInit["body"]): { data?: string | Uint8Array; ty
  * checking them) and streams the response body.
  */
 export function pinnedFetch(opts: Pick<NetGuardOptions, "lookup"> = {}): FetchLike {
-  const lookup = guardedLookup(opts.lookup ?? systemLookup);
+  return nodeFetch(guardedLookup(opts.lookup ?? systemLookup));
+}
+
+/**
+ * fetch over node:http(s), resolving names with `lookup` (Node's own when
+ * absent). Unlike the global fetch (undici, which gives up on an answer whose
+ * headers or next bytes take 5 minutes), it has no time limit of its own:
+ * the caller's signal stops it. It never follows redirects (a redirect comes
+ * back as the answer) and streams the response body.
+ */
+export function nodeFetch(lookup?: ReturnType<typeof guardedLookup>): FetchLike {
   return (input, init = {}) =>
     new Promise<Response>((resolve, reject) => {
       const url = new URL(String(input));
@@ -196,7 +206,7 @@ export function pinnedFetch(opts: Pick<NetGuardOptions, "lookup"> = {}): FetchLi
       if (type && !headers["content-type"]) headers["content-type"] = type;
       if (data !== undefined) headers["content-length"] = String(Buffer.byteLength(data));
       const method = (init.method ?? "GET").toUpperCase();
-      const req = send(url, { method, headers, lookup, ...(init.signal ? { signal: init.signal } : {}) }, (res) => {
+      const req = send(url, { method, headers, ...(lookup ? { lookup } : {}), ...(init.signal ? { signal: init.signal } : {}) }, (res) => {
         const status = res.statusCode ?? 502;
         const responseHeaders = new Headers();
         for (const [name, value] of Object.entries(res.headers)) {
