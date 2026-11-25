@@ -94,8 +94,8 @@ export class SpendTracker {
   private readonly delegations = new Map<string, string>();
   /** A subagent's own id (agent_id) → the agent, for hooks that only carry it. */
   private readonly subagentIds = new Map<string, string>();
-  /** Assistant messages by id: one response streams as several messages sharing it, usage growing. */
-  private readonly responses = new Map<string, { agent: string; model: string; tokens: TokenCounts }>();
+  /** Assistant messages by id: one response streams as several messages sharing it, usage growing. `main`: the main agent's own (not a subagent's). */
+  private readonly responses = new Map<string, { agent: string; model: string; tokens: TokenCounts; main: boolean }>();
   private readonly engineRuns: EngineRun[] = [];
 
   constructor(opts: SpendTrackerOptions) {
@@ -150,7 +150,7 @@ export class SpendTracker {
       };
       const seen = this.responses.get(id);
       if (!seen) {
-        this.responses.set(id, { agent, model, tokens });
+        this.responses.set(id, { agent, model, tokens, main: m.parent_tool_use_id === null });
         return;
       }
       // Later frames of the same response: its usage only grows.
@@ -182,6 +182,24 @@ export class SpendTracker {
         else if (tokens) delete run.usd;
       },
     };
+  }
+
+  /**
+   * Claude Code's own spend in this query so far, at list prices (engine runs
+   * are not in it, as they are not in a result's total_cost_usd), USD: the
+   * cost of a query that stopped before its result.
+   */
+  claudeUsd(): number {
+    let total = 0;
+    for (const r of this.responses.values()) total += costOf(r.tokens, this.priceOf(r.model));
+    return round(total);
+  }
+
+  /** The main agent's responses so far (one per turn, subagents' not counted): the turns of a query that stopped before its result. */
+  leadTurns(): number {
+    let n = 0;
+    for (const r of this.responses.values()) if (r.main) n += 1;
+    return n;
   }
 
   /** What `agent` has spent in this query so far, USD: its Claude tokens at list prices and its engine runs' estimates. */

@@ -3,13 +3,15 @@ import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promi
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { afterEach, describe, expect, it } from "vitest";
 import { anthropicRuntime, buildRuntime } from "../../src/ai/ai-providers.js";
 import type { ProviderRuntime } from "../../src/ai/ai-providers.js";
 import type { FallbackNote } from "../../src/ai/routing.js";
 import { type Config, ConfigSchema } from "../../src/core/config.js";
 import { MIN_TASK_USD } from "../../src/spending/budget.js";
-import { type RouteRun, onboardingError, runOnRoute, takeOverPrompt } from "../../src/tasks/worker.js";
+import { type RouteRun, onboardingError, runOnRoute, takeOverPrompt, unfinishedRunTotals } from "../../src/tasks/worker.js";
+import { SpendTracker } from "../../src/spending/attribution.js";
 
 const KIMI_KEY = "sk-kimi-route-secret-0042";
 const kimi = buildRuntime("kimi", { secrets: { apiKey: KIMI_KEY }, settings: {}, models: {} });
@@ -116,6 +118,37 @@ describe("the team's first run on the task route (real git)", () => {
     expect(r.seen[1]!.budgetUsd).toBe(8.75);
     expect(out).toMatchObject({ costUsd: 3.25, turns: 10, fallback: [{ from: "kimi", to: "anthropic", reason: "rate limited" }] });
     expect(out.run.providerFailure).toBeUndefined();
+  });
+
+  it("counts what a run stopped before its result spent: the next provider gets only what is really left", async () => {
+    // A run stopped over its provider's retries has no result: its messages say what it spent.
+    const tracker = new SpendTracker({ agents: ["coder"], price: () => ({ input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 }) });
+    const reply = (id: string, parent: string | null, input: number, output: number) =>
+      ({
+        type: "assistant",
+        parent_tool_use_id: parent,
+        uuid: `${id}-${input}-${output}`,
+        message: { id, model: "claude-opus-5-5", content: [], usage: { input_tokens: input, output_tokens: output } },
+      }) as unknown as SDKMessage;
+    tracker.feed(reply("msg_1", null, 100_000, 20_000));
+    // The same response streamed on: its usage grows, it is one turn.
+    tracker.feed(reply("msg_1", null, 100_000, 40_000));
+    tracker.feed(reply("msg_2", null, 200_000, 0));
+    // A subagent's response costs too, but is not one of the lead's turns.
+    tracker.feed(reply("msg_3", "toolu_coder", 100_000, 0));
+    const stopped = unfinishedRunTotals(tracker);
+    expect(stopped).toEqual({ costUsd: 6, turns: 2 });
+
+    const r = route([claude, kimi], {
+      anthropic: async () => ({ ...stopped, providerFailure: { kind: "overloaded", reason: "overloaded, 2 retries" } }),
+      kimi: async () => ({ costUsd: 1, turns: 2 }),
+    });
+    const out = await runOnRoute(r.options({ budgetUsd: 10 }));
+    expect(r.seen.map((s) => [s.provider, s.budgetUsd])).toEqual([
+      ["anthropic", 10],
+      ["kimi", 4],
+    ]);
+    expect(out).toMatchObject({ costUsd: 7, turns: 4 });
   });
 
   it("goes down the whole route while providers fail, and ends with the last run", async () => {

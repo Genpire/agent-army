@@ -16,7 +16,7 @@ import {
 } from "../team/agents.js";
 import { AttachmentRepo, type ThreadRef, classify, expandZip } from "../chat/attachments.js";
 import { MIN_TASK_USD, Spending, agentNamer, perTaskCapUsd, teamWithout } from "../spending/budget.js";
-import { LEAD_AGENT_ID } from "../spending/attribution.js";
+import { LEAD_AGENT_ID, type SpendTracker } from "../spending/attribution.js";
 import { providerLabel, runtimePrices } from "../spending/prices.js";
 import { TaskSpend } from "../spending/task-spend.js";
 import { BROWSER_ACTION_TOOLS, type Screenshot, browserAvailable, browserServer, collectScreenshots } from "./browser.js";
@@ -550,6 +550,19 @@ export interface RouteRun {
   /** With providerFailure: the calls with effects outside the checkout the failed run made (RunWatch). */
   outside?: OutsideCalls;
 }
+
+/**
+ * The cost and turns of a team run that stopped before its result (stopped
+ * over its provider's retries, out of time): Claude Code's spend its messages
+ * show, at the provider's list prices (as the agents' shares are then
+ * counted), and the lead's turns. Without it the run counted $0: the next
+ * provider of the route was given the whole budget again, and the provider's
+ * cap and the task's total missed it.
+ */
+export const unfinishedRunTotals = (tracker: Pick<SpendTracker, "claudeUsd" | "leadTurns">): { costUsd: number; turns: number } => ({
+  costUsd: tracker.claudeUsd(),
+  turns: tracker.leadTurns(),
+});
 
 /** Rounded down to the cent. */
 const cents = (usd: number): number => Math.floor(usd * 100) / 100;
@@ -1996,6 +2009,9 @@ export async function main(): Promise<void> {
         // No progress save may land after the final status below.
         clearInterval(updateTimer);
         await updating;
+        // A run stopped before its result (its provider's retries, the time limit) spent too: what its messages
+        // show, so the task's total, the provider's cap and what the next provider may spend all count it.
+        if (!result) ({ costUsd, turns } = unfinishedRunTotals(spendTracker));
         // Claude Code's own cost per model, shared out between the agents.
         task.agentCosts = spend.endRun(result);
         // And on the provider it ran on, for that provider's cap (usage.ts providerTotals).
