@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BridgeError, geminiError, toBridgeError } from "../../src/ai/gemini-bridge/errors.js";
+import { BridgeError, errorCode, geminiError, toBridgeError } from "../../src/ai/gemini-bridge/errors.js";
 import { MAX_OUTPUT_TOKENS, SKIP_SIGNATURE, countTokensBody, geminiToolName, resolveModel, thinkingFor, translateRequest } from "../../src/ai/gemini-bridge/request.js";
 import { StreamTranslator, stopFor, translateResponse } from "../../src/ai/gemini-bridge/response.js";
 import { SessionRegistry, ToolCallMemory } from "../../src/ai/gemini-bridge/sessions.js";
@@ -512,9 +512,27 @@ describe("Gemini's errors as Anthropic's", () => {
     expect(toBridgeError(new Error(`connect failed for ${KEY}`), redact).message).not.toContain(KEY);
   });
 
-  it("turn a timeout and an unreachable Gemini into a timeout and a server error", () => {
-    expect(toBridgeError(new DOMException("late", "TimeoutError"))).toMatchObject({ status: 504, type: "timeout_error" });
-    expect(toBridgeError(new Error("ECONNRESET"))).toMatchObject({ status: 500, type: "api_error" });
+  it("turn a timeout into overloaded and an unreachable Gemini into a server error, each with the network error's code", () => {
+    expect(toBridgeError(new DOMException("late", "TimeoutError"))).toMatchObject({ status: 529, type: "overloaded_error" });
+    expect(toBridgeError(new Error("ECONNRESET"))).toMatchObject({ status: 500, type: "api_error", code: undefined });
+    // Node's global fetch: "fetch failed", with undici's code on the cause.
+    const failed = (code: string) => new TypeError("fetch failed", { cause: Object.assign(new Error(`socket said ${KEY}`), { code }) });
+    for (const code of ["UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT", "UND_ERR_CONNECT_TIMEOUT", "ETIMEDOUT"]) {
+      expect(toBridgeError(failed(code), redact), code).toMatchObject({ status: 529, type: "overloaded_error", code, message: expect.stringContaining("sent nothing for too long") });
+    }
+    const reset = toBridgeError(failed("ECONNRESET"), redact);
+    expect(reset).toMatchObject({ status: 500, type: "api_error", code: "ECONNRESET", message: "Could not reach the Gemini API (ECONNRESET): fetch failed" });
+    // node:https puts the code on the error itself.
+    expect(toBridgeError(Object.assign(new Error("getaddrinfo ENOTFOUND"), { code: "ENOTFOUND" }))).toMatchObject({ status: 500, code: "ENOTFOUND" });
+  });
+
+  it("take only a code-shaped code from an error, never other text", () => {
+    expect(errorCode(Object.assign(new Error("x"), { code: "ECONNRESET" }))).toBe("ECONNRESET");
+    expect(errorCode(new TypeError("fetch failed", { cause: { code: "UND_ERR_SOCKET" } }))).toBe("UND_ERR_SOCKET");
+    expect(errorCode(Object.assign(new Error("x"), { code: `key ${KEY}` }))).toBeUndefined();
+    expect(errorCode(Object.assign(new Error("x"), { code: 42 }))).toBeUndefined();
+    expect(errorCode("ECONNRESET")).toBeUndefined();
+    expect(errorCode(undefined)).toBeUndefined();
   });
 });
 

@@ -1,8 +1,9 @@
-import { request as httpRequest } from "node:http";
-import { connect } from "node:net";
+import { createServer, request as httpRequest } from "node:http";
+import { type AddressInfo, connect } from "node:net";
 import { networkInterfaces } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import { type BridgeHandle, GeminiBridge, type GeminiBridgeOptions } from "../../src/ai/gemini-bridge/server.js";
+import { geminiFetch } from "../../src/ai/gemini-bridge/upstream.js";
 
 const KEY = "AQ.Ab8-bridge-server-test-key-0123456789";
 const MODELS = { main: "gemini-4-carbon", opus: "gemini-4-carbon", sonnet: "gemini-4-neon", haiku: "gemini-3.5-flash-lite", subagent: "gemini-4-hydrogen" };
@@ -222,18 +223,51 @@ describe("the Gemini bridge, end to end with a fake Gemini", () => {
     expect(events.at(-1)).toEqual({ event: "error", data: { type: "error", error: { type: "overloaded_error", message: expect.stringContaining("UNAVAILABLE") } } });
   });
 
-  it("times out a Gemini call that does not answer, and a stream that stops sending", async () => {
+  it("times out a Gemini call that does not answer, and a stream that stops sending, as overloaded (what Claude Code retries and routing falls back on)", async () => {
     const hang = (call: UpstreamCall) =>
       new Promise<Response>((_resolve, reject) => call.signal?.addEventListener("abort", () => reject(call.signal?.reason), { once: true }));
     const slow = await startBridge(hang, { timeoutMs: 50 });
     const res = await post(slow.handle, "/v1/messages", { model: "gemini-4-carbon", max_tokens: 10, messages: [{ role: "user", content: "hi" }] });
-    expect(res.status).toBe(504);
-    expect(await res.json()).toMatchObject({ error: { type: "timeout_error" } });
+    expect(res.status).toBe(529);
+    expect(await res.json()).toMatchObject({ error: { type: "overloaded_error", message: "The Gemini API did not answer within 0.1 s." } });
+
+    // Before the stream starts: a plain 529 that says how long Gemini was silent.
+    const silent = await startBridge(hang, { timeoutMs: 50, streamStartMs: 1000 });
+    const quiet = await post(silent.handle, "/v1/messages", { model: "gemini-4-carbon", max_tokens: 10, stream: true, messages: [{ role: "user", content: "hi" }] });
+    expect(quiet.status).toBe(529);
+    expect(await quiet.json()).toMatchObject({ error: { type: "overloaded_error", message: "The Gemini API sent nothing for 0.1 s." } });
 
     const stalled = await startBridge(() => sseResponse([{ candidates: [{ content: { parts: [{ text: "Hal" }] } }] }], { hangAfter: true }), { idleTimeoutMs: 50, pingMs: 10 });
     const stream = await post(stalled.handle, "/v1/messages", { model: "gemini-4-carbon", max_tokens: 10, stream: true, messages: [{ role: "user", content: "hi" }] });
     const events = parseSse(await stream.text());
-    expect(events.at(-1)!.data).toMatchObject({ type: "error", error: { type: "timeout_error" } });
+    // In a stream, only the type travels: Claude Code reads overloaded_error from the event's text.
+    expect(events.at(-1)!.data).toEqual({ type: "error", error: { type: "overloaded_error", message: "The Gemini API sent nothing for 0.1 s in the middle of its answer." } });
+    expect(stalled.logs).toEqual(["[gemini-bridge] stream failed: 529 overloaded_error: The Gemini API sent nothing for 0.1 s in the middle of its answer."]);
+  });
+
+  it("tells a connection that gave up waiting from one that broke, and logs the network error's code only", async () => {
+    // What Node's global fetch throws when undici's own 300 s limits run out, and when the connection is reset.
+    const undiciError = (code: string, message: string) => new TypeError("fetch failed", { cause: Object.assign(new Error(`${message} ${KEY}`), { code }) });
+    const thinking = async () => {
+      await new Promise((r) => setTimeout(r, 30));
+      throw undiciError("UND_ERR_HEADERS_TIMEOUT", "Headers Timeout Error");
+    };
+    const late = await startBridge(thinking, { streamStartMs: 5, pingMs: 10 });
+    const res = await post(late.handle, "/v1/messages", { model: "gemini-4-carbon", max_tokens: 10, stream: true, messages: [{ role: "user", content: "hi" }] });
+    expect(parseSse(await res.text()).at(-1)!.data).toEqual({
+      type: "error",
+      error: { type: "overloaded_error", message: "The Gemini API sent nothing for too long, and the connection gave up waiting (UND_ERR_HEADERS_TIMEOUT)." },
+    });
+    expect(late.logs).toEqual([
+      "[gemini-bridge] stream failed: 529 overloaded_error (cause UND_ERR_HEADERS_TIMEOUT): The Gemini API sent nothing for too long, and the connection gave up waiting (UND_ERR_HEADERS_TIMEOUT).",
+    ]);
+
+    const broken = await startBridge(() => Promise.reject(undiciError("ECONNRESET", "read ECONNRESET")));
+    const failed = await post(broken.handle, "/v1/messages", { model: "gemini-4-carbon", max_tokens: 10, messages: [{ role: "user", content: "hi" }] });
+    expect(failed.status).toBe(500);
+    expect(await failed.json()).toMatchObject({ error: { type: "api_error", message: "Could not reach the Gemini API (ECONNRESET): fetch failed" } });
+    expect(broken.logs).toEqual(["[gemini-bridge] 500 api_error (cause ECONNRESET): Could not reach the Gemini API (ECONNRESET): fetch failed"]);
+    expect([...late.logs, ...broken.logs].join("\n")).not.toContain(KEY);
   });
 
   it("starts the stream and pings while Gemini thinks, and then reports a failure as the stream's error event", async () => {
@@ -271,6 +305,55 @@ describe("the Gemini bridge, end to end with a fake Gemini", () => {
     client.abort();
     await pending;
     await expect.poll(() => upstreamSignal?.aborted).toBe(true);
+  });
+});
+
+describe("the bridge's own fetch (geminiFetch)", () => {
+  it("POSTs over node:http(s), streams the answer as it comes, follows no redirect and stops with its signal", async () => {
+    let second: (() => void) | undefined;
+    let seen: { method?: string; key?: string; body: string } | undefined;
+    const server = createServer((req, res) => {
+      let body = "";
+      req.on("data", (chunk: Buffer) => (body += chunk.toString()));
+      req.on("end", () => {
+        seen = { method: req.method, key: String(req.headers["x-goog-api-key"]), body };
+        if (req.url === "/moved") {
+          res.writeHead(302, { location: "http://127.0.0.1:1/elsewhere" });
+          res.end();
+          return;
+        }
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.write("data: 1\n\n");
+        // The rest only once the first event was read: the answer is streamed, not buffered.
+        second = () => res.end("data: 2\n\n");
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const { port } = server.address() as AddressInfo;
+      const res = await geminiFetch()(`http://127.0.0.1:${port}/stream`, { method: "POST", headers: { "x-goog-api-key": KEY }, body: '{"a":1}' });
+      expect(seen).toEqual({ method: "POST", key: KEY, body: '{"a":1}' });
+      const reader = res.body!.getReader();
+      expect(new TextDecoder().decode((await reader.read()).value)).toBe("data: 1\n\n");
+      second!();
+      expect(new TextDecoder().decode((await reader.read()).value)).toBe("data: 2\n\n");
+      expect((await reader.read()).done).toBe(true);
+
+      const moved = await geminiFetch()(`http://127.0.0.1:${port}/moved`, { method: "POST", body: "{}" });
+      expect(moved.status).toBe(302);
+      await moved.body?.cancel();
+
+      const stop = new AbortController();
+      const pending = geminiFetch()(`http://127.0.0.1:${port}/stream`, { method: "POST", body: "{}", signal: stop.signal });
+      const open = await pending;
+      const read = open.body!.getReader();
+      await read.read();
+      stop.abort(new DOMException("late", "TimeoutError"));
+      await expect(read.read()).rejects.toThrow();
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });
 

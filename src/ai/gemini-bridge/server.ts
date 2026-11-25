@@ -17,8 +17,13 @@
  *   its stride (model discovery and managed settings are opt-in or https only).
  *   A stream pings every 15 s, as Anthropic's do: Claude Code gives up on a
  *   stream that sends nothing for a few minutes, and Gemini may think longer.
- * - Request bodies up to 32 MB. Gemini calls have deadlines (upstream.ts) and
- *   stop when Claude Code hangs up. Nothing logged holds the key or a token.
+ * - Request bodies up to 32 MB. Gemini calls have deadlines (upstream.ts), the
+ *   only time limits they have (they go over node:https, not the global
+ *   fetch, which gives up after 5 minutes without a byte), and stop when
+ *   Claude Code hangs up. When Gemini sends nothing for too long, the answer
+ *   is a 529 overloaded_error (errors.ts silenceError); when it cannot be
+ *   reached, a 500 api_error with the network error's code. Nothing logged
+ *   holds the key, a token or what was sent.
  * - Each session has limits of its own: requests in flight at once, and
  *   requests in all. Its token is in the environment of everything the query
  *   runs, a repo task's shell included, where the checkout's own (untrusted)
@@ -36,10 +41,10 @@ import { type Translated, countTokensBody, translateRequest } from "./request.js
 import { type ResponseContext, StreamTranslator, newId, translateResponse } from "./response.js";
 import { type BridgeSession, SessionRegistry } from "./sessions.js";
 import { type MessagesRequest, MessagesRequestSchema } from "./types.js";
-import { Deadline, type UpstreamOptions, callGemini, sseJson, timeoutOr } from "./upstream.js";
+import { Deadline, type UpstreamOptions, callGemini, geminiFetch, sseJson, timeoutOr } from "./upstream.js";
 
 export interface GeminiBridgeOptions {
-  /** The fetch for Gemini calls (tests pass a fake). Default: the global fetch at call time. */
+  /** The fetch for Gemini calls (tests pass a fake). Default: geminiFetch (node:https, no time limit but the deadlines below). */
   fetch?: FetchLike;
   /** A whole Gemini call, or the wait for a stream to start (default 10 minutes, as Claude Code's own). */
   timeoutMs?: number;
@@ -81,7 +86,9 @@ export const MAX_CONCURRENT = 8;
 export const MAX_REQUESTS = 10_000;
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
-const isLoopback = (address: string | undefined) => !!address && /^(?:::ffff:)?127\.\d{1,3}\.\d{1,3}\.\d{1,3}$|^::1$/.test(address);
+/** A failure for the log: status, type, the network error's code when there was one, and the (redacted) message. */
+const failureLine = (e: BridgeError): string => `${e.status} ${e.type}${e.code ? ` (cause ${e.code})` : ""}: ${e.message.slice(0, 200)}`;
+const isLoopback =(address: string | undefined) => !!address && /^(?:::ffff:)?127\.\d{1,3}\.\d{1,3}\.\d{1,3}$|^::1$/.test(address);
 
 /** The token Claude Code sends: a Bearer token (ANTHROPIC_AUTH_TOKEN) or x-api-key (ANTHROPIC_API_KEY). */
 function tokenOf(req: IncomingMessage): string | undefined {
@@ -139,7 +146,7 @@ export class GeminiBridge {
 
   constructor(opts: GeminiBridgeOptions = {}) {
     this.upstream = {
-      fetch: opts.fetch ?? ((input, init) => globalThis.fetch(input, init)),
+      fetch: opts.fetch ?? geminiFetch(),
       timeoutMs: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       idleTimeoutMs: opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS,
     };
@@ -209,7 +216,7 @@ export class GeminiBridge {
       throw new BridgeError(404, "not_found_error", "The Gemini bridge serves POST /v1/messages and /v1/messages/count_tokens only.");
     } catch (err) {
       const e = toBridgeError(err, session?.redact);
-      if (e.status >= 500 || e.status === 429) this.log(`[gemini-bridge] ${e.status} ${e.type}: ${e.message.slice(0, 200)}`);
+      if (e.status >= 500 || e.status === 429) this.log(`[gemini-bridge] ${failureLine(e)}`);
       // A body left unread (too large) is not drained: the connection closes after the answer.
       sendJson(res, e.status, errorBody(e.type, e.message), { ...e.headers, ...(e.status === 413 ? { connection: "close" } : {}) });
     }
@@ -314,7 +321,7 @@ export class GeminiBridge {
       const e = toBridgeError(timeoutOr(err, deadline, session.redact), session.redact);
       if (!res.headersSent) throw e;
       if (!res.destroyed) {
-        this.log(`[gemini-bridge] stream failed: ${e.status} ${e.type}: ${e.message.slice(0, 200)}`);
+        this.log(`[gemini-bridge] stream failed: ${failureLine(e)}`);
         write(stream.error(e.type, e.message));
       }
     } finally {

@@ -10,6 +10,12 @@
  * know comes back as 400 INVALID_ARGUMENT (reason API_KEY_INVALID), which is
  * an authentication error here, and 503 UNAVAILABLE is Anthropic's 529
  * overloaded_error, which is what Claude Code waits out and retries.
+ *
+ * No answer at all is one of two things: Gemini sent nothing for too long
+ * (the bridge's own deadline, or the connection's), a 529 overloaded_error
+ * (silenceError), or Gemini could not be reached (a refused, reset or
+ * unresolved connection), a 500 api_error. Both name the network error's code
+ * (ECONNRESET, UND_ERR_BODY_TIMEOUT) for the log, never what it said.
  */
 
 /** Anthropic's error types (https://platform.claude.com/docs/en/api/errors). */
@@ -33,6 +39,8 @@ export class BridgeError extends Error {
     message: string,
     /** Extra response headers (retry-after). */
     readonly headers: Record<string, string> = {},
+    /** For the log only: the network error's code (ECONNRESET, UND_ERR_BODY_TIMEOUT), never anything it said. */
+    readonly code?: string,
   ) {
     super(message);
     this.name = "BridgeError";
@@ -96,11 +104,36 @@ export function geminiError(status: number, body: unknown, redact: (text: string
   return new BridgeError(code, type, out, retryAfter ? { "retry-after": retryAfter } : {});
 }
 
+/** A network error's code as Node and fetch give it (on the error, or on its cause): capitals, digits and underscores only. */
+export function errorCode(err: unknown): string | undefined {
+  let at: unknown = err;
+  for (let depth = 0; depth < 3 && isObject(at); depth += 1) {
+    if (typeof at.code === "string" && /^[A-Z][A-Z0-9_]{1,40}$/.test(at.code)) return at.code;
+    at = at.cause;
+  }
+  return undefined;
+}
+
+/** Codes of a wait that ran out (undici's headers and body timeouts, a socket's), not of a refused or broken connection. */
+const TIMEOUT_CODES = new Set(["UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT", "UND_ERR_CONNECT_TIMEOUT", "ETIMEDOUT", "ESOCKETTIMEDOUT"]);
+
+/**
+ * Gemini sent nothing for too long: 529 overloaded_error. That is what Claude
+ * Code waits out and retries, and what it calls "overloaded" both as a status
+ * (before a stream starts) and as a stream's error event (which has no status:
+ * Claude Code reads overloaded_error from its text, and has no such reading
+ * for timeout_error), so routing.ts sees the provider's trouble either way.
+ */
+export const silenceError = (message: string, code?: string): BridgeError => new BridgeError(529, "overloaded_error", message, {}, code);
+
 /** Anything thrown while calling Gemini (no answer, a timeout, a bug) as an error to send back. */
 export function toBridgeError(err: unknown, redact: (text: string) => string = (t) => t): BridgeError {
   if (err instanceof BridgeError) return err;
   const name = err instanceof Error ? err.name : "";
-  if (name === "TimeoutError") return new BridgeError(504, "timeout_error", "The Gemini API did not answer in time.");
+  if (name === "TimeoutError") return silenceError("The Gemini API did not answer in time.");
+  const code = errorCode(err);
+  if (code && TIMEOUT_CODES.has(code)) return silenceError(`The Gemini API sent nothing for too long, and the connection gave up waiting (${code}).`, code);
   const text = err instanceof Error ? err.message : String(err);
-  return new BridgeError(500, "api_error", redact(`Could not reach the Gemini API: ${text}`).replace(/\s+/g, " ").slice(0, MESSAGE_MAX));
+  const out = redact(`Could not reach the Gemini API${code ? ` (${code})` : ""}: ${text}`).replace(/\s+/g, " ").slice(0, MESSAGE_MAX);
+  return new BridgeError(500, "api_error", out, {}, code);
 }

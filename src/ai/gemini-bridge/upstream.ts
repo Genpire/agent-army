@@ -5,9 +5,18 @@
  * redirects followed, and a deadline: the whole call for generateContent and
  * countTokens, the wait for the answer to start and then each gap between
  * chunks for a stream.
+ *
+ * Those deadlines are the only time limits. The calls go over node:https
+ * (geminiFetch), not Node's global fetch: its undici client gives up on an
+ * answer whose headers, or whose next bytes, take more than 300 s
+ * (headersTimeout and bodyTimeout), and a Gemini model thinking that long
+ * sends nothing until it is done. Each such call failed after five minutes
+ * as "fetch failed", and Claude Code's retries failed the same way. The
+ * `undici` package (which could give fetch a client with other limits) is not
+ * a dependency, and Node's own copy cannot be imported.
  */
-import type { FetchLike } from "../../integrations/apps/apps-net.js";
-import { BridgeError, geminiError } from "./errors.js";
+import { type FetchLike, pinnedFetch } from "../../integrations/apps/apps-net.js";
+import { BridgeError, errorCode, geminiError, silenceError } from "./errors.js";
 
 export const GEMINI_API_ORIGIN = "https://generativelanguage.googleapis.com";
 
@@ -25,6 +34,17 @@ export interface UpstreamOptions {
   idleTimeoutMs: number;
 }
 
+/**
+ * The fetch for Gemini calls: over node:https, which has no time limit of its
+ * own (the bridge's deadlines stop a call), with the network guard's lookup
+ * (apps-net.ts: the address checked is the one connected to; Google's are
+ * public). It follows no redirect: one comes back as an error answer.
+ */
+export const geminiFetch = (): FetchLike => pinnedFetch();
+
+/** "600 s", "1.5 s": for the deadlines' messages. */
+const seconds = (ms: number): string => `${Math.round(ms / 100) / 10} s`;
+
 /** A deadline that can be pushed back (each chunk of a stream), on top of the caller's own abort. */
 export class Deadline {
   readonly controller = new AbortController();
@@ -39,10 +59,10 @@ export class Deadline {
     return this.controller.signal;
   }
 
-  /** Aborts with a TimeoutError in `ms` unless pushed back again. */
-  arm(ms: number): void {
+  /** Aborts with a TimeoutError saying `message` in `ms` unless pushed back again. */
+  arm(ms: number, message = "The Gemini API did not answer in time."): void {
     this.clear();
-    this.timer = setTimeout(() => this.controller.abort(new DOMException("The Gemini API did not answer in time.", "TimeoutError")), ms);
+    this.timer = setTimeout(() => this.controller.abort(new DOMException(message, "TimeoutError")), ms);
     this.timer.unref();
   }
 
@@ -66,7 +86,13 @@ export async function callGemini(
   deadline: Deadline,
   redact: (text: string) => string,
 ): Promise<Response> {
-  deadline.arm(opts.timeoutMs);
+  // A stream's answer starts when Gemini has something to say; a whole answer comes at the end.
+  deadline.arm(
+    opts.timeoutMs,
+    method === "streamGenerateContent"
+      ? `The Gemini API sent nothing for ${seconds(opts.timeoutMs)}.`
+      : `The Gemini API did not answer within ${seconds(opts.timeoutMs)}.`,
+  );
   let res: Response;
   try {
     res = await opts.fetch(geminiUrl(model, method), {
@@ -91,13 +117,14 @@ export async function callGemini(
   throw geminiError(res.status, parsed, redact, res.headers.get("retry-after"));
 }
 
-/** An abort by the deadline as a timeout; anything else as it was. */
+/** An abort by the deadline as Gemini's silence (errors.ts silenceError, with the deadline's words); anything else as it was. */
 export function timeoutOr(err: unknown, deadline: Deadline, redact: (text: string) => string): unknown {
   const reason: unknown = deadline.signal.aborted ? deadline.signal.reason : undefined;
-  if (reason instanceof DOMException && reason.name === "TimeoutError") return new BridgeError(504, "timeout_error", "The Gemini API did not answer in time.");
+  if (reason instanceof DOMException && reason.name === "TimeoutError") return silenceError(reason.message);
   if (err instanceof BridgeError || !(err instanceof Error)) return err;
-  // A fetch error can quote what it was given: only its redacted text goes on.
-  const out = new Error(redact(err.message));
+  // A fetch error can quote what it was given: only its redacted text goes on, and its code (for the log).
+  const code = errorCode(err);
+  const out = new Error(redact(err.message), code ? { cause: { code } } : undefined);
   out.name = err.name;
   return out;
 }
@@ -138,9 +165,10 @@ export async function* sseJson(body: ReadableStream<Uint8Array>, deadline: Deadl
   // A read waiting on a body that never ends must end with the deadline too, whatever fetch made the body.
   const onAbort = () => void reader.cancel().catch(() => undefined);
   deadline.signal.addEventListener("abort", onAbort, { once: true });
+  const silent = `The Gemini API sent nothing for ${seconds(idleTimeoutMs)} in the middle of its answer.`;
   try {
     for (;;) {
-      deadline.arm(idleTimeoutMs);
+      deadline.arm(idleTimeoutMs, silent);
       const { done, value } = await reader.read();
       if (deadline.signal.aborted) throw deadline.signal.reason ?? new Error("The Gemini stream was stopped.");
       if (done) break;
