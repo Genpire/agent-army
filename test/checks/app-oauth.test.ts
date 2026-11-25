@@ -6,7 +6,7 @@ import { AppConnectionSchema, ConfigRepo } from "../../src/core/config.js";
 import { deriveKey } from "../../src/core/crypto.js";
 import { FsStore } from "../../src/core/store.js";
 import type { FetchLike } from "../../src/integrations/apps/apps-net.js";
-import { completeAppSignIn, startAppSignIn } from "../../src/integrations/apps/apps-oauth.js";
+import { completeAppSignIn, freshAccessToken, startAppSignIn, withOfflineAccess } from "../../src/integrations/apps/apps-oauth.js";
 
 /**
  * An app's OAuth sign-in outside tests (env {}): discovery, registration and
@@ -73,6 +73,53 @@ describe("app sign-in through the network guard", () => {
       if (ok) await expect(done).resolves.toEqual({ appId: "app-tracker" });
       else await expect(done).rejects.toMatchObject({ reason: "failed" });
     }
+  });
+});
+
+describe("a sign-in that renews itself", () => {
+  it("asks Google for a refresh token, even when the owner approved the app before", () => {
+    const url = withOfflineAccess(new URL("https://accounts.google.com/o/oauth2/v2/auth?client_id=c&scope=openid&prompt=select_account"));
+    expect(url.searchParams.get("access_type")).toBe("offline");
+    expect(url.searchParams.get("prompt")).toBe("consent");
+    expect(url.searchParams.get("scope")).toBe("openid");
+  });
+
+  it("adds offline_access only where the server lists it, and only to a scope list", () => {
+    const listed = { authorizationServerMetadata: { scopes_supported: ["read", "offline_access"] } };
+    expect(withOfflineAccess(new URL("https://auth.example.com/a?scope=read"), listed).searchParams.get("scope")).toBe("read offline_access");
+    expect(withOfflineAccess(new URL("https://auth.example.com/a?scope=read+offline_access"), listed).searchParams.get("scope")).toBe("read offline_access");
+    // No scope asked for: adding one could narrow the grant.
+    expect(withOfflineAccess(new URL("https://auth.example.com/a"), listed).searchParams.has("scope")).toBe(false);
+    // Not listed: unchanged.
+    expect(withOfflineAccess(new URL("https://auth.example.com/a?scope=read"), { authorizationServerMetadata: { scopes_supported: ["read"] } }).href).toBe("https://auth.example.com/a?scope=read");
+  });
+
+  it("keeps the refresh token when a renewal does not send a new one", async () => {
+    const configRepo = await repoWithApp();
+    let renewals = 0;
+    const base = fakeAuthServer();
+    // Like Google: the renewal answers with a new access token and no refresh token.
+    const fetch: FetchLike = async (input, init) => {
+      const u = new URL(String(input));
+      if (u.host === "auth.example.com" && u.pathname === "/token" && String(init?.body).includes("grant_type=refresh_token")) {
+        renewals++;
+        return Response.json({ access_token: `access-renewed-${renewals}`, expires_in: 3600, token_type: "Bearer" });
+      }
+      return base(input, init);
+    };
+    const deps = { configRepo, baseUrl: BASE, fetch, env: {}, lookup: async () => PUBLIC };
+    const state = new URL(await startAppSignIn("app-tracker", deps)).searchParams.get("state")!;
+    await completeAppSignIn({ state, code: "good-code" }, deps);
+    let clock = Date.now();
+    for (const n of [1, 2]) {
+      // An hour later the access token has expired: it is renewed with the same refresh token.
+      clock += 2 * 3600_000;
+      const app = (await configRepo.load(true)).apps.find((a) => a.id === "app-tracker")!;
+      expect(await freshAccessToken(app, { ...deps, now: () => clock })).toBe(`access-renewed-${n}`);
+      const saved = (await configRepo.load(true)).apps.find((a) => a.id === "app-tracker")!;
+      expect(saved.auth.type === "oauth" && saved.auth.oauth.tokens?.refresh_token).toBe("refresh-token-1");
+    }
+    expect(renewals).toBe(2);
   });
 });
 
