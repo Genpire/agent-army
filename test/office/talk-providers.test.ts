@@ -183,6 +183,18 @@ describe("chatTalk", () => {
     expect(k.calls[0]!.options!.model).toBe("haiku");
   });
 
+  it("falls back to the cheapest model, not the Claude card's, when the owner's model is another provider's", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    // Claude with the card set to Opus, and the office's model set to Gemini (for the Gemini talk provider).
+    const claude = buildRuntime("anthropic", { secrets: { apiKey: ANTHROPIC_KEY }, settings: {}, models: { main: "claude-opus-5-5" } });
+    const q = fakeQuery([result({ structured_output: LINES })]);
+    await chatTalk(claude, { ...CALL, model: "gemini-3.5-flash-lite" }, { queryFn: q.queryFn });
+    const warned = warn.mock.calls.map((c) => String(c[0]));
+    warn.mockRestore();
+    expect(q.calls[0]!.options!.model).toBe(SIZING_MODEL);
+    expect(warned.some((line) => line.startsWith("[models] The office's talk model is ignored on Claude"))).toBe(true);
+  });
+
   it("reports a failed or thrown call, keeping its cost", async () => {
     const failed = await chatTalk(anthropicRuntime(ANTHROPIC_KEY), CALL, {
       queryFn: fakeQuery([result({ subtype: "error_max_budget_usd", total_cost_usd: 0.05 })]).queryFn,

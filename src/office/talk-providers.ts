@@ -193,8 +193,10 @@ export async function chatTalk(route: ProviderRuntime | ProviderRuntime[], call:
 async function chatTalkOn(runtime: ProviderRuntime, call: TalkCall, opts: TalkCallOptions): Promise<{ value: TalkOutcome; failure?: ProviderFailure }> {
   const queryFn: QueryFn = opts.queryFn ?? query;
   const watch = new RunWatch();
-  // The owner's model, else the cheapest (also when the owner's is another provider's: the log says so once).
-  const model = configuredModel(runtime, call.model, "The office's talk model") ?? runtime.model(SIZING_MODEL);
+  // The owner's model, else the cheapest: also when the owner's is another provider's (the log says so once), which
+  // would otherwise run as the provider's main tier (on Claude, the Claude card's model).
+  const owners = configuredModel(runtime, call.model, "The office's talk model");
+  const model = (call.model && !runtime.foreignModel(call.model) ? owners : undefined) ?? runtime.model(SIZING_MODEL);
   const effort = runtime.effort("low");
   const asked = model ?? "";
   let outcome: TalkOutcome = { model: asked, costUsd: 0, tokens: 0, error: "no answer" };
