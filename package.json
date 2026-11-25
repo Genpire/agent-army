@@ -42,23 +42,23 @@
     "demo": "npm run build:web && tsx demo/demo.ts"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.326",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.330",
     "@google-cloud/run": "^4.2.0",
     "@google-cloud/storage": "^9.0.0",
     "@modelcontextprotocol/sdk": "1.32.2",
-    "@playwright/mcp": "0.0.85",
-    "@slack/web-api": "^8.4.0",
+    "@playwright/mcp": "0.0.86",
+    "@slack/web-api": "^8.5.0",
     "express": "^5.3.0",
     "fflate": "0.8.3",
-    "nodemailer": "10.3.1",
+    "nodemailer": "10.6.1",
     "pg": "8.23.1",
     "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@astryxdesign/build": "0.7.16",
-    "@astryxdesign/cli": "0.7.16",
-    "@astryxdesign/core": "0.7.16",
-    "@astryxdesign/theme-neutral": "0.7.16",
+    "@astryxdesign/build": "0.7.17",
+    "@astryxdesign/cli": "0.7.17",
+    "@astryxdesign/core": "0.7.17",
+    "@astryxdesign/theme-neutral": "0.7.17",
     "@babel/core": "7.29.7",
     "@dicebear/core": "9.4.3",
     "@dicebear/notionists": "9.4.2",
@@ -80,6 +80,6 @@
     "typescript": "^7.0.2",
     "unplugin": "2.3.11",
     "vite": "8.3.8",
-    "vitest": "^5.1.0"
+    "vitest": "^5.1.1"
   }
 }
