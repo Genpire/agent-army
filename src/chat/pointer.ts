@@ -11,7 +11,7 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import type { ContentBlockParam } from "@anthropic-ai/sdk/resources";
 import { type ProviderRuntime, type ProviderSession, chatModelOf, configuredModel, fitContentBlocks } from "../ai/ai-providers.js";
-import { type FallbackNote, RunWatch, fallbackLine, routeRuntimes } from "../ai/routing.js";
+import { type FallbackNote, RunWatch, type RunSnapshot, durationText, fallbackLine, routeRuntimes } from "../ai/routing.js";
 import { type AttachmentInfo, type AttachmentRepo, type PromptFile, type ThreadRef, classify, toContentBlocks } from "./attachments.js";
 import { type ChatIntegration, chatIntegrations, subagentIntegrationTools } from "./chat-integrations.js";
 import { PendingActions, afterInboxGate, confirmGate, conversationKey, gatedInputs, gatedTools, takeConfirmation } from "./confirm-gate.js";
@@ -64,6 +64,13 @@ const CHAT_BUILTIN_TOOLS = ["WebSearch", "WebFetch", "Agent", "Task"];
 /** Belt and braces on top of `tools`: these never load in chat mode. */
 const CHAT_BLOCKED_TOOLS = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "NotebookEdit"];
 const RUN_TIMEOUT_MS = 8 * 60_000;
+/**
+ * How long a provider may send nothing (no token, no thinking, no tool call)
+ * before the next provider of the route answers instead, while nothing
+ * changed yet: someone waits on a chat reply; a routine has more time.
+ */
+const CHAT_SILENCE_MS = 2 * 60_000;
+const ROUTINE_SILENCE_MS = 4 * 60_000;
 const HISTORY_ITEM_MAX = 4_000;
 
 export interface PointerPromptInput {
@@ -502,6 +509,15 @@ const noRepoTasks: PointerContext["startRepoTask"] = async () => ({ ok: false, e
 interface ReplyAttempt {
   reply?: PointerReply;
   watch: RunWatch;
+  /** Where it was when the reply's time ran out (that limit stopped it). */
+  atLimit?: RunSnapshot;
+}
+
+/** The log line when a reply runs out of time: what it was waiting on, and the tools it called (names only). */
+export function outOfTimeLine(label: string, minutes: number, end: RunSnapshot): string {
+  const waiting = end.running.length ? `${end.running.join(", ")} still running` : `nothing from ${label} for ${durationText(end.silentMs)}`;
+  const calls = end.calls.length ? end.calls.map((c) => (c.count > 1 ? `${c.tool} ×${c.count}` : c.tool)).join(", ") : "none";
+  return `out of time (${minutes} min) on ${label}: ${waiting}; tools called: ${calls}`;
 }
 
 export function createPointerBrain(
@@ -513,6 +529,8 @@ export function createPointerBrain(
     skills?: () => Promise<TeamSkills | undefined>;
     /** Writes waiting for the user's yes (confirm-gate.ts); one store per brain. Tests pass their own clock. */
     pending?: PendingActions;
+    /** How long a provider may send nothing before the next one of the route answers (CHAT_SILENCE_MS; tests pass less). */
+    silenceMs?: number;
   } = {},
 ): PointerBrain {
   const queryFn: QueryFn = opts.queryFn ?? query;
@@ -572,6 +590,7 @@ export function createPointerBrain(
       const budgetUsd = routineRun && req.budgetUsd !== undefined ? req.budgetUsd : team.pointer.budgetUsd;
       // A routine run has its own time limit (nobody waits on it); a chat reply keeps the chat limit.
       const limitMs = routineRun && req.timeoutMs !== undefined && req.timeoutMs > 0 ? req.timeoutMs : timeoutMs;
+      const silenceMs = opts.silenceMs ?? (routineRun ? ROUTINE_SILENCE_MS : CHAT_SILENCE_MS);
       const limits = { maxTurns: team.pointer.maxTurns, budgetUsd };
       // Outside content Pointer relayed since the person's previous message here (an answer passed on, a report): the
       // reply starts as if it had read it; "inbox" also as if it had read the owner's inbox (confirm-gate.ts).
@@ -602,15 +621,23 @@ export function createPointerBrain(
        * outside any checkout until the attempt ends), its own spend.
        *
        * It stops when the reply's time is up (`replyAbort`), and on its own
-       * when Claude Code's retries show the provider in trouble (routing.ts
-       * RETRY_TROUBLE) while the next provider can still take over
-       * (`mayMoveOn`, and no tool ran yet). That stop is this attempt's alone:
-       * the reply's time limit keeps running for the next one.
+       * while the next provider can still take over (`mayMoveOn`, and nothing
+       * changed yet: only tools that look things up ran) when Claude Code's
+       * retries show the provider in trouble (routing.ts RETRY_TROUBLE), or
+       * when the provider has sent nothing for `silenceMs` (a Gemini model
+       * can think or hang for many minutes without a byte, and the Gemini
+       * bridge keeps Claude Code waiting meanwhile). That stop is this
+       * attempt's alone: the reply's time limit keeps running for the next one.
        */
       const attempt = async (runtime: ProviderRuntime, replyAbort: AbortSignal, mayMoveOn: boolean): Promise<ReplyAttempt> => {
-        const watch = new RunWatch();
         const abort = new AbortController();
-        const replyOver = () => abort.abort();
+        // Where the attempt was when the reply's time ran out.
+        let atLimit: RunSnapshot | undefined;
+        let watch: RunWatch | undefined;
+        const replyOver = () => {
+          atLimit = watch?.snapshot();
+          abort.abort();
+        };
         if (replyAbort.aborted) abort.abort();
         else replyAbort.addEventListener("abort", replyOver, { once: true });
         const tools = createPointerToolServer({
@@ -642,11 +669,33 @@ export function createPointerBrain(
           redact,
         });
         const connected = integrations.filter((i) => i.server);
+        // The tools that only look things up. Any other call changes something (a message sent, a fact saved, a task
+        // started): an "outside" call to the watch, after which the next provider cannot take over (it could repeat it).
+        const readOnlyTools = new Set([...builtins, ...tools.readOnlyToolNames, ...connected.flatMap((i) => i.readOnlyToolNames)]);
+        // repo_task_status only reads too (it is not a subagent's, so not among the read-only tools above).
+        const lookups = new Set([...readOnlyTools, "mcp__pointer__repo_task_status"]);
+        const run = new RunWatch((name) => (lookups.has(name) ? undefined : "app"));
+        watch = run;
 
         const tmp = await mkdtemp(join(tmpdir(), "pointer-"));
         let reply: PointerReply | undefined;
         let session: ProviderSession | undefined;
+        let silence: NodeJS.Timeout | undefined;
         try {
+          // A provider silent for too long, before anything changed: stopped, for the next one to answer in the time left.
+          if (mayMoveOn) {
+            silence = setInterval(
+              () => {
+                const silentMs = run.silentMs();
+                if (abort.signal.aborted || run.reachedOutside || silentMs < silenceMs) return;
+                const failure = run.stopForSilence(silentMs);
+                console.warn(`[pointer] ${runtime.label} is stopped: it ${failure.reason}, for the next provider of the route.`);
+                abort.abort();
+              },
+              Math.max(10, Math.min(5_000, silenceMs / 4)),
+            );
+            silence.unref();
+          }
           session = await runtime.session();
           const subagentTools = ["WebSearch", "WebFetch", ...tools.readOnlyToolNames, ...subagentIntegrationTools(connected)];
           // Integrations given to some agents only (apps assigned to agents): their read-only tools, per agent.
@@ -657,7 +706,6 @@ export function createPointerBrain(
           const allTools = [...builtins, ...tools.allToolNames, ...connected.flatMap((i) => i.allToolNames)];
           // A routine run is offered only the read-only tools, and the writes that only add to the owner's own list
           // (followups_add in their routine); the rest are not loaded at all.
-          const readOnlyTools = new Set([...builtins, ...tools.readOnlyToolNames, ...connected.flatMap((i) => i.readOnlyToolNames)]);
           const ownListWrites = new Set(connected.flatMap((i) => i.routineToolNames ?? []).filter((t) => allTools.includes(t)));
           const routineTools = new Set([...readOnlyTools, ...ownListWrites]);
           const writeTools = allTools.filter((t) => !routineTools.has(t));
@@ -741,21 +789,22 @@ export function createPointerBrain(
               ...session.env,
               CLAUDE_AGENT_SDK_CLIENT_APP: "agent-army-pointer/0.2.0",
             },
-            // The console shows the answer as it is written; Slack posts it once.
-            ...(onActivity ? { includePartialMessages: true } : {}),
+            // The console shows the answer as it is written (Slack posts it once); and a provider's silence shows only
+            // with partial messages: without them a healthy answer sends nothing until a whole block is written.
+            includePartialMessages: true,
           };
           const mapper = onActivity ? new ActivityMapper(team) : undefined;
           // Who spent what: Pointer and the team members it asked (attribution.ts), for the per-agent and per-provider caps.
           const spend = new SpendTracker({ agents: team.agents.map((a) => a.id), price: runtimePrices(runtime) });
           for await (const message of queryFn({ prompt: promptFor(runtime), options })) {
             spend.feed(message);
-            watch.feed(message);
+            run.feed(message);
             if (message.type === "result") {
               reply = { ...mapResult(message, limits), agentCosts: spend.costs(message), provider: runtime.provider };
             }
             if (mapper) for (const activity of mapper.feed(message)) tell(activity);
-            // Claude Code keeps retrying a provider in trouble: the next provider answers instead, while nothing has run.
-            const trouble = mayMoveOn && !watch.toolRan && !abort.signal.aborted ? watch.stopForRetries() : undefined;
+            // Claude Code keeps retrying a provider in trouble: the next provider answers instead, while nothing changed.
+            const trouble = mayMoveOn && !run.reachedOutside && !abort.signal.aborted ? run.stopForRetries() : undefined;
             if (trouble) {
               console.warn(`[pointer] ${runtime.label} is stopped after Claude Code's retries (${trouble.reason}), for the next provider of the route.`);
               abort.abort();
@@ -763,22 +812,24 @@ export function createPointerBrain(
             }
           }
         } catch (err) {
-          watch.thrown(err);
+          run.thrown(err);
           const why = redact(err instanceof Error ? err.message : String(err));
-          // A stop over the retries was said above; the SDK's "aborted" after it is no news.
-          if (!watch.stoppedForRetries) console.error("[pointer] query failed:", why.slice(0, 300));
+          // A stop over the retries or the silence was said above, and running out of time is said below:
+          // the SDK's "aborted" after them is no news.
+          if (!run.stoppedEarly && !atLimit) console.error("[pointer] query failed:", why.slice(0, 300));
           // The SDK also throws after an error result; keep the more specific message.
           reply ??= { text: `Something went wrong: ${why}`, isError: true };
         } finally {
+          clearInterval(silence);
           replyAbort.removeEventListener("abort", replyOver);
           await session?.dispose();
           await rm(tmp, { recursive: true, force: true }).catch(() => {});
         }
-        return { reply, watch };
+        return { reply, watch: run, ...(atLimit ? { atLimit } : {}) };
       };
 
       // One time limit for the whole reply, whichever providers answer it. An attempt stopped over its
-      // provider's retries stops alone (its own controller): the next one has the time that is left.
+      // provider's retries or silence stops alone (its own controller): the next one has the time that is left.
       const abort = new AbortController();
       const timer = setTimeout(() => abort.abort(), limitMs);
       const attempts: ReplyAttempt[] = [];
@@ -794,9 +845,10 @@ export function createPointerBrain(
           const failure = run.watch.failure;
           const next = route.runtimes[i + 1];
           if (!failure || !next || abort.signal.aborted) break;
-          if (run.watch.toolRan) {
-            // A tool may have done something already (a message sent, a ticket made): running the request again could do it twice.
-            heldBack = `${last.label} failed (${failure.reason}) after it had started using tools, so ${next.label} did not take over: running the request again could repeat what was already done.`;
+          if (run.watch.reachedOutside) {
+            // A tool may have changed something already (a message sent, a ticket made): running the request again could do it twice.
+            // Lookups alone are no reason to stay: the next provider looks again.
+            heldBack = `${last.label} failed (${failure.reason}) after it had used a tool that changes things, so ${next.label} did not take over: running the request again could repeat what was already done.`;
             break;
           }
           const note: FallbackNote = { from: last.provider, to: next.provider, reason: failure.reason };
@@ -830,7 +882,12 @@ export function createPointerBrain(
       }
       if (abort.signal.aborted) {
         const minutes = Math.round(limitMs / 60_000) || 1;
-        reply = { ...reply, text: `I ran out of time (${minutes} min limit) on this one.`, costUsd: reply?.costUsd, isError: true };
+        const end = attempts.at(-1)?.atLimit;
+        // What it was doing when the time ran out: waiting on a provider that sent nothing is worth saying (another
+        // provider first on the route would answer); a tool still running is for the log only.
+        const silent = end && end.silentMs >= silenceMs ? ` ${last.label} had sent nothing for the last ${durationText(end.silentMs)}.` : "";
+        if (end) console.warn(`[pointer] ${outOfTimeLine(last.label, minutes, end)}`);
+        reply = { ...reply, text: `I ran out of time (${minutes} min limit) on this one.${silent}`, costUsd: reply?.costUsd, isError: true };
       }
       reply ??= { text: "I finished without an answer. Please try again.", isError: true };
       // An error says what happened on the way; an answer only records it (Slack shows the answer alone).

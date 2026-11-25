@@ -264,6 +264,19 @@ function retryFailure(m: ApiRetry, retries: number, why: "count" | "long" | "qui
   return { kind: m.error, reason: `${base}, ${detail}` };
 }
 
+/** The tools a run's snapshot names, at most. */
+const CALLS_MAX = 30;
+
+/** "40 s", "3 min". */
+export const durationText = (ms: number): string => (ms < 60_000 ? `${Math.max(1, Math.round(ms / 1000))} s` : `${Math.round(ms / 60_000)} min`);
+
+/** Where a run is: how long its provider has sent nothing, the tools running now and the tools it called. */
+export interface RunSnapshot {
+  silentMs: number;
+  running: string[];
+  calls: { tool: string; count: number }[];
+}
+
 /**
  * Follows one run's messages: whether a tool may have run (a tool use by the
  * main agent or by a subagent, so running the work again could repeat it),
@@ -276,7 +289,9 @@ function retryFailure(m: ApiRetry, retries: number, why: "count" | "long" | "qui
  * It also follows Claude Code's retries (RETRY_TROUBLE): `retryTrouble` says
  * when they show the provider in trouble, and a caller that can hand the work
  * to the next provider stops the run (stopForRetries), which then ends on
- * that failure.
+ * that failure. And how long the provider has sent nothing (`silentMs`): a
+ * caller that streams partial messages can stop a provider silent too long
+ * (stopForSilence) the same way.
  */
 export class RunWatch {
   toolRan = false;
@@ -289,6 +304,10 @@ export class RunWatch {
   private stopped = false;
   private readonly now: () => number;
   private lastAt: number;
+  /** The main agent's tool calls asked for and not answered yet, by id: the tool's name. */
+  private readonly running = new Map<string, string>();
+  /** Every tool called (main agent and subagents), with how many times, in the order first called. */
+  private readonly calls = new Map<string, number>();
 
   constructor(
     private readonly effectOf?: (toolName: string) => OutsideEffect | undefined,
@@ -304,7 +323,9 @@ export class RunWatch {
   }
 
   private called(name: unknown): void {
-    if (typeof name !== "string" || !this.effectOf) return;
+    if (typeof name !== "string") return;
+    if (this.calls.has(name) || this.calls.size < CALLS_MAX) this.calls.set(name, (this.calls.get(name) ?? 0) + 1);
+    if (!this.effectOf) return;
     const kind = this.effectOf(name);
     if (!kind) return;
     const calls = this.outside[kind];
@@ -345,12 +366,22 @@ export class RunWatch {
       if (event.type === "content_block_start" && TOOL_BLOCKS.has(event.content_block.type)) this.toolRan = true;
       return;
     }
+    // The main agent's tool answers: those tools are done.
+    if (message.type === "user") {
+      const content = message.parent_tool_use_id === null ? message.message.content : undefined;
+      if (Array.isArray(content)) {
+        for (const block of content) if (block.type === "tool_result") this.running.delete(block.tool_use_id);
+      }
+      return;
+    }
     if (message.type === "assistant") {
       for (const block of message.message.content) {
         if (!TOOL_BLOCKS.has(block.type)) continue;
         this.toolRan = true;
         // A call's name is in the whole message (a stream's start event may come without it).
         if ("name" in block) this.called(block.name);
+        // A tool of the main agent's own (a server tool answers in the same message): running until its answer.
+        if (message.parent_tool_use_id === null && block.type === "tool_use") this.running.set(block.id, block.name);
       }
       const failure = message.parent_tool_use_id === null ? providerFailure(message) : undefined;
       if (failure) this.seen = failure;
@@ -387,9 +418,33 @@ export class RunWatch {
     return this.trouble;
   }
 
-  /** Whether the caller stopped the run over its retries. */
-  get stoppedForRetries(): boolean {
+  /**
+   * How long the provider has sent nothing: since the run's last message,
+   * while no tool of the main agent's is running (a tool's own time is not
+   * the provider's silence; a subagent's messages count as the run's). 0
+   * while one runs. Meaningful with partial messages only: without them a
+   * healthy answer also sends nothing until a whole block is written.
+   */
+  silentMs(): number {
+    return this.running.size ? 0 : Math.max(0, this.now() - this.lastAt);
+  }
+
+  /** The caller stops a provider that has sent nothing for `silentMs` (it aborts the query next): the run ends on that failure. */
+  stopForSilence(silentMs: number): ProviderFailure {
+    const failure: ProviderFailure = { kind: "server_error", reason: `sent nothing for ${durationText(silentMs)}` };
+    this.seen = failure;
+    this.stopped = true;
+    return failure;
+  }
+
+  /** Whether the caller stopped the run early: over its retries, or over the provider's silence. */
+  get stoppedEarly(): boolean {
     return this.stopped;
+  }
+
+  /** Where the run is now, for a log line or a message (tool names only, never their inputs). */
+  snapshot(): RunSnapshot {
+    return { silentMs: this.silentMs(), running: [...new Set(this.running.values())], calls: [...this.calls].map(([tool, count]) => ({ tool, count })) };
   }
 
   /** The provider failure the run ended on, or undefined. */

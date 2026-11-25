@@ -4,6 +4,7 @@ import { type Config, ConfigSchema, isChatReady, isReady, publicView } from "../
 import {
   RunWatch,
   acrossRoute,
+  durationText,
   errorFailure,
   fallbackLine,
   isRouteReady,
@@ -251,14 +252,66 @@ describe("watching Claude Code's retries", () => {
   it("end the run on the trouble once the caller stops it, whatever the stop throws or the result says", () => {
     const { w, at } = timed();
     expect(w.stopForRetries()).toBeUndefined();
-    expect(w.stoppedForRetries).toBe(false);
+    expect(w.stoppedEarly).toBe(false);
     at(1000, apiRetry({ error: "server_error", error_status: 500 }));
     at(2000, apiRetry({ error: "server_error", error_status: 500, attempt: 2 }));
     expect(w.stopForRetries()?.reason).toBe("a server error, 2 retries");
-    expect(w.stoppedForRetries).toBe(true);
+    expect(w.stoppedEarly).toBe(true);
     w.thrown(new Error("Claude Code process aborted by user"));
     at(3000, result({ subtype: "error_during_execution", is_error: true }));
     expect(w.failure).toEqual({ kind: "server_error", reason: "a server error, 2 retries" });
+  });
+});
+
+describe("a provider's silence", () => {
+  const timed = () => {
+    let now = 0;
+    const w = new RunWatch(undefined, { now: () => now });
+    return { w, at: (ms: number, m?: SDKMessage) => ((now = ms), m && w.feed(m)), tick: (ms: number) => (now = ms) };
+  };
+  const toolUse = (id: string, name: string, parent: string | null = null) =>
+    ({ type: "assistant", parent_tool_use_id: parent, message: { content: [{ type: "tool_use", id, name, input: {} }] } }) as unknown as SDKMessage;
+  const toolResult = (id: string) =>
+    ({ type: "user", parent_tool_use_id: null, message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: "ok" }] } }) as unknown as SDKMessage;
+  const delta = { type: "stream_event", parent_tool_use_id: null, event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "a" } } } as unknown as SDKMessage;
+
+  it("counts from the run's last message, and not while a tool of the main agent runs", () => {
+    const { w, at, tick } = timed();
+    at(1000, delta);
+    tick(61_000);
+    expect(w.silentMs()).toBe(60_000);
+    // A tool runs: its time is not the provider's silence.
+    at(62_000, toolUse("t1", "WebFetch"));
+    tick(400_000);
+    expect(w.silentMs()).toBe(0);
+    expect(w.snapshot().running).toEqual(["WebFetch"]);
+    // A subagent's messages are the run's too; its own tools do not hold the clock.
+    at(401_000, toolUse("s1", "WebSearch", "t1"));
+    expect(w.snapshot().running).toEqual(["WebFetch"]);
+    // The tool answered: the provider's turn again, counted from that answer.
+    at(402_000, toolResult("t1"));
+    tick(432_000);
+    expect(w.silentMs()).toBe(30_000);
+    expect(w.snapshot()).toEqual({
+      silentMs: 30_000,
+      running: [],
+      calls: [
+        { tool: "WebFetch", count: 1 },
+        { tool: "WebSearch", count: 1 },
+      ],
+    });
+  });
+
+  it("ends the run on the silence once the caller stops it, whatever the stop throws", () => {
+    const { w, at, tick } = timed();
+    at(1000, delta);
+    tick(181_000);
+    expect(w.stopForSilence(w.silentMs())).toEqual({ kind: "server_error", reason: "sent nothing for 3 min" });
+    expect(w.stoppedEarly).toBe(true);
+    w.thrown(new Error("Claude Code process aborted by user"));
+    expect(w.failure?.reason).toBe("sent nothing for 3 min");
+    expect(durationText(40_000)).toBe("40 s");
+    expect(durationText(10)).toBe("1 s");
   });
 });
 

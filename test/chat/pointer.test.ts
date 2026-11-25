@@ -2449,7 +2449,7 @@ describe("Pointer brain: routes and fallback", () => {
     expect(reply.provider).toBe("kimi");
     expect(reply.fallback).toBeUndefined();
     expect(reply.text).toContain("API Error: 429");
-    expect(reply.text).toContain("Kimi failed (rate limited) after it had started using tools, so Claude did not take over");
+    expect(reply.text).toContain("Kimi failed (rate limited) after it had used a tool that changes things, so Claude did not take over");
   });
 
   /** Claude Code's system/api_retry message. */
@@ -2537,18 +2537,110 @@ describe("Pointer brain: routes and fallback", () => {
     expect(recovered.calls[0]!.options.abortController?.signal.aborted).toBe(false);
     expect(waited).toMatchObject({ text: "Here is the answer.", isError: false, provider: "kimi" });
 
-    // A tool ran: running the request again could repeat it, so the retries are waited out here too.
+    // A tool that changes something ran: running the request again could repeat it, so the retries are waited out here too.
     const used = fakeQuery(async function* () {
-      yield { type: "assistant", parent_tool_use_id: null, message: { content: [{ type: "tool_use", id: "toolu_1", name: "WebFetch", input: {} }] } };
+      yield { type: "assistant", parent_tool_use_id: null, message: { content: [{ type: "tool_use", id: "toolu_1", name: "mcp__pointer__memory_save", input: {} }] } };
+      yield { type: "user", parent_tool_use_id: null, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "saved" }] } };
       yield apiRetry(1);
       yield apiRetry(2);
       yield result();
     });
     const after = await createPointerBrain(deps, { queryFn: used.queryFn }).reply(baseReq(), ctx);
-    restore();
     expect(used.calls).toHaveLength(1);
     expect(after).toMatchObject({ text: "Here is the answer.", isError: false, provider: "kimi" });
     expect(after.fallback).toBeUndefined();
+
+    // Only lookups ran: the next provider looks again, so it takes over.
+    const looked = fakeQuery(async function* (call) {
+      if (onKimi(call)) {
+        yield { type: "assistant", parent_tool_use_id: null, message: { content: [{ type: "tool_use", id: "toolu_1", name: "WebFetch", input: {} }] } };
+        yield { type: "user", parent_tool_use_id: null, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "page" }] } };
+        yield apiRetry(1);
+        yield apiRetry(2);
+        await untilStopped(call);
+        return;
+      }
+      yield result();
+    });
+    const lookedUp = await createPointerBrain(deps, { queryFn: looked.queryFn }).reply(baseReq(), ctx);
+    restore();
+    expect(looked.calls).toHaveLength(2);
+    expect(lookedUp).toMatchObject({ text: "Here is the answer.", isError: false, provider: "anthropic", fallback: [{ from: "kimi", to: "anthropic", reason: "overloaded, 2 retries" }] });
+  });
+
+  it("hands a provider that sends nothing to the next one, after lookups too, in the reply's time", async () => {
+    const deps = await routed();
+    const { queryFn, calls } = fakeQuery(async function* (call) {
+      if (onKimi(call)) {
+        yield { type: "system", subtype: "init" };
+        yield { type: "assistant", parent_tool_use_id: null, message: { content: [{ type: "tool_use", id: "toolu_1", name: "mcp__pointer__repo_task_status", input: {} }] } };
+        yield { type: "user", parent_tool_use_id: null, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "stopped" }] } };
+        // Then nothing: Gemini thinking, or hanging, while the bridge keeps Claude Code waiting.
+        await untilStopped(call);
+        throw new Error("Claude Code process aborted by user");
+      }
+      yield result();
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const reply = await createPointerBrain(deps, { queryFn, timeoutMs: 60_000, silenceMs: 40 }).reply(baseReq(), ctx);
+    const warned = warn.mock.calls.map((c) => String(c[0]));
+    const errors = error.mock.calls.length;
+    warn.mockRestore();
+    error.mockRestore();
+
+    expect(calls).toHaveLength(2);
+    expect(calls[0]!.options.includePartialMessages).toBe(true);
+    expect(calls[0]!.options.abortController?.signal.aborted).toBe(true);
+    expect(calls[1]!.options.abortController?.signal.aborted).toBe(false);
+    expect(reply).toMatchObject({ text: "Here is the answer.", isError: false, provider: "anthropic" });
+    expect(reply.fallback).toEqual([{ from: "kimi", to: "anthropic", reason: expect.stringMatching(/^sent nothing for \d+ s$/) }]);
+    expect(warned.some((w) => /^\[pointer\] Kimi is stopped: it sent nothing for \d+ s, for the next provider of the route\.$/.test(w))).toBe(true);
+    expect(errors).toBe(0);
+  });
+
+  it("keeps waiting on a silent provider while a tool runs, after a change, or with no provider after it", async () => {
+    const restore = quiet();
+    const deps = await routed();
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    // A slow tool: its time is not the provider's silence.
+    const slowTool = fakeQuery(async function* () {
+      yield { type: "assistant", parent_tool_use_id: null, message: { content: [{ type: "tool_use", id: "toolu_1", name: "WebFetch", input: {} }] } };
+      await sleep(150);
+      yield { type: "user", parent_tool_use_id: null, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "page" }] } };
+      yield result();
+    });
+    const tooled = await createPointerBrain(deps, { queryFn: slowTool.queryFn, silenceMs: 40 }).reply(baseReq(), ctx);
+    expect(slowTool.calls).toHaveLength(1);
+    expect(tooled).toMatchObject({ text: "Here is the answer.", provider: "kimi" });
+
+    // Something changed: running the request again could repeat it.
+    const changed = fakeQuery(async function* () {
+      yield { type: "assistant", parent_tool_use_id: null, message: { content: [{ type: "tool_use", id: "toolu_1", name: "mcp__pointer__memory_save", input: {} }] } };
+      yield { type: "user", parent_tool_use_id: null, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "saved" }] } };
+      await sleep(150);
+      yield result();
+    });
+    const kept = await createPointerBrain(deps, { queryFn: changed.queryFn, silenceMs: 40 }).reply(baseReq(), ctx);
+    expect(changed.calls).toHaveLength(1);
+    expect(kept).toMatchObject({ text: "Here is the answer.", provider: "kimi" });
+
+    // Kimi alone, silent until the reply's time runs out: the message says it sent nothing.
+    const alone = await routed((c) => (c.ai.routes = { chat: ["kimi"] }));
+    const silent = fakeQuery(async function* (call) {
+      yield { type: "system", subtype: "init" };
+      await untilStopped(call);
+      throw new Error("Claude Code process aborted by user");
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const out = await createPointerBrain(alone, { queryFn: silent.queryFn, timeoutMs: 120, silenceMs: 40 }).reply(baseReq(), ctx);
+    const warned = warn.mock.calls.map((c) => String(c[0]));
+    warn.mockRestore();
+    restore();
+    expect(silent.calls).toHaveLength(1);
+    expect(out.isError).toBe(true);
+    expect(out.text).toMatch(/^I ran out of time \(1 min limit\) on this one\. Kimi had sent nothing for the last \d+ s\.$/);
+    expect(warned.some((w) => /^\[pointer\] out of time \(1 min\) on Kimi: nothing from Kimi for \d+ s; tools called: none$/.test(w))).toBe(true);
   });
 
   it("runs a chat model set for one provider only there: after a fallback, the next provider runs its main model, said once", async () => {

@@ -535,6 +535,6 @@ describe("Pointer brain activity", () => {
       for (const m of stream) yield m as SDKMessage;
     };
     await createPointerBrain(await deps(), { queryFn: slackQuery }).reply({ ...req, channel: "D1", surface: undefined }, { startRepoTask: async () => ({ ok: false, error: "x" }) });
-    expect(slackSeen).toEqual([undefined]);
+    expect(slackSeen).toEqual([true]);
   });
 });
