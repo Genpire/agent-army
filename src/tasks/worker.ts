@@ -562,7 +562,10 @@ const cents = (usd: number): number => Math.floor(usd * 100) / 100;
  * and told what the failed runs did in a browser (takeOverPrompt), within
  * what is left of the task's budget and of the next provider's caps
  * (`capLeft`); `aborted` (the task's time) stops it. `switchTo` rebuilds
- * everything provider-bound before the run.
+ * everything provider-bound before the run. Each run is told whether a
+ * provider comes after its own (`mayMoveOn`): such a run stops by itself when
+ * Claude Code's retries show its provider in trouble (routing.ts
+ * RETRY_TROUBLE), ending on that failure, rather than waiting them out.
  *
  * It does not move on when the failed run changed things in apps (an app's
  * write tool, outside the checkout): running the task again could do them
@@ -578,7 +581,8 @@ export async function runOnRoute<R extends RouteRun>(o: {
   prompt: string;
   budgetUsd: number;
   aborted: () => boolean;
-  run: (prompt: string, budgetUsd: number) => Promise<R>;
+  /** `mayMoveOn`: the route has a provider after this run's, so the run may stop for it when its provider is in trouble mid-run. */
+  run: (prompt: string, budgetUsd: number, mayMoveOn: boolean) => Promise<R>;
   switchTo: (runtime: ProviderRuntime, note: FallbackNote) => Promise<void>;
   /** What is left of the caps that bound a task on that provider (budget.ts remainingForTask), or undefined when none applies. */
   capLeft?: (provider: AiProviderId) => Promise<{ usd: number; scope: "monthly" | "repo" | "provider" } | undefined>;
@@ -589,7 +593,7 @@ export async function runOnRoute<R extends RouteRun>(o: {
   /** The next provider could not be set up (its session did not start): the task stops with the failed run. */
   onSwitchFailed?: (note: FallbackNote, err: unknown) => void;
 }): Promise<{ run: R; costUsd: number; turns: number; fallback: FallbackNote[]; heldBack?: string }> {
-  let run = await o.run(o.prompt, o.budgetUsd);
+  let run = await o.run(o.prompt, o.budgetUsd, o.runtimes.length > 1);
   let costUsd = run.costUsd;
   let turns = run.turns;
   const fallback: FallbackNote[] = [];
@@ -632,7 +636,7 @@ export async function runOnRoute<R extends RouteRun>(o: {
       if (known) known.count += call.count;
       else browser.push({ ...call });
     }
-    run = await o.run(takeOverPrompt(o.prompt, { provider: from.label, reason: note.reason, browser }), left);
+    run = await o.run(takeOverPrompt(o.prompt, { provider: from.label, reason: note.reason, browser }), left, i + 1 < o.runtimes.length);
     costUsd += run.costUsd;
     turns += run.turns;
     from = to;
@@ -1866,6 +1870,11 @@ export async function main(): Promise<void> {
         context: OrchestratorContext;
         /** What the dashboard says the team is doing before its first step. */
         phaseLabel?: string;
+        /**
+         * The task route has a provider after this one (runOnRoute): when Claude Code's retries show this one in
+         * trouble (routing.ts RETRY_TROUBLE) before the team changed things in apps, the run stops so it can take over.
+         */
+        mayMoveOn?: boolean;
       },
     ): Promise<TeamRun> => {
       const tracker = new ProgressTracker({
@@ -1914,12 +1923,17 @@ export async function main(): Promise<void> {
       const watch = new RunWatch(effectOf);
       // The provider this run is on: its cost is that provider's (switchTo changes `runtime` only between runs).
       const runOn = runtime.provider;
+      // This run's own stop: the task's time (opts.abort), or its provider's retries (below), which leave the task's time running.
+      const runAbort = new AbortController();
+      const taskOver = () => runAbort.abort();
+      if (opts.abort.signal.aborted) runAbort.abort();
+      else opts.abort.signal.addEventListener("abort", taskOver, { once: true });
       try {
         for await (const message of query({
           prompt: runPrompt,
           options: {
             cwd: repoDir,
-            abortController: opts.abort,
+            abortController: runAbort,
             ...teamQueryOptions(runConfig, opts.context, attachmentsDir, { browser, skills, apps, engines, provider: runtime }),
             // Headless: nothing can prompt, so anything not in allowedTools is denied.
             permissionMode: "dontAsk",
@@ -1959,12 +1973,22 @@ export async function main(): Promise<void> {
               failure = `The team stopped early: ${why[message.subtype] ?? (message.errors.join("; ") || message.subtype)}.`;
             }
           }
+          // Claude Code keeps retrying a provider in trouble: the next provider of the route takes over from the checkout,
+          // as after any provider failure (runOnRoute), unless the team changed things in apps, which it would not redo.
+          const trouble = opts.mayMoveOn && !watch.outside.app.length && !runAbort.signal.aborted ? watch.stopForRetries() : undefined;
+          if (trouble) {
+            failure = `${runtime.label} kept failing (${trouble.reason}), so the run was stopped for the next provider of the task route.`;
+            console.warn(`[worker] ${failure}`);
+            runAbort.abort();
+            break;
+          }
         }
       } catch (err) {
         watch.thrown(err);
         // The SDK also throws after an error result; keep the more specific message.
         failure ??= redact(`The team could not run: ${errorText(err)}`);
       } finally {
+        opts.abort.signal.removeEventListener("abort", taskOver);
         // No progress save may land after the final status below.
         clearInterval(updateTimer);
         await updating;
@@ -2124,8 +2148,8 @@ export async function main(): Promise<void> {
       prompt,
       budgetUsd: taskBudgetUsd,
       aborted: () => abort.signal.aborted,
-      run: (runPrompt, budgetUsd) =>
-        runTeam(runPrompt, { budgetUsd, abort, timeoutMin: Math.round(firstRunMs / 60_000), since: startSha, context }),
+      run: (runPrompt, budgetUsd, mayMoveOn) =>
+        runTeam(runPrompt, { budgetUsd, abort, timeoutMin: Math.round(firstRunMs / 60_000), since: startSha, context, mayMoveOn }),
       switchTo,
       capLeft: (provider) => spending.leftFor(task.repo, provider),
       onShort: (note, left) =>

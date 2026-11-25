@@ -46,7 +46,7 @@ describe("the team's first run on the task route (real git)", () => {
   /** A route of runtimes whose runs answer by provider; `current` follows switchTo as the worker's does. */
   function route(runtimes: ProviderRuntime[], runs: Record<string, (prompt: string, budgetUsd: number) => Promise<RouteRun>>) {
     let current = runtimes[0]!;
-    const seen: { provider: string; prompt: string; budgetUsd: number }[] = [];
+    const seen: { provider: string; prompt: string; budgetUsd: number; mayMoveOn: boolean }[] = [];
     const switched: { to: string; note: FallbackNote }[] = [];
     const short: { note: FallbackNote; left: number }[] = [];
     const capped: { note: FallbackNote; left: number }[] = [];
@@ -64,8 +64,8 @@ describe("the team's first run on the task route (real git)", () => {
         prompt: o.prompt ?? "Fix the login bug.",
         budgetUsd: o.budgetUsd ?? 10,
         aborted: o.aborted ?? (() => false),
-        run: async (prompt: string, budgetUsd: number) => {
-          seen.push({ provider: current.provider, prompt, budgetUsd });
+        run: async (prompt: string, budgetUsd: number, mayMoveOn: boolean) => {
+          seen.push({ provider: current.provider, prompt, budgetUsd, mayMoveOn });
           return runs[current.provider]!(prompt, budgetUsd);
         },
         switchTo: async (next: ProviderRuntime, note: FallbackNote) => {
@@ -131,6 +131,8 @@ describe("the team's first run on the task route (real git)", () => {
       ["anthropic", 9.25],
     ]);
     expect(r.seen[2]!.prompt).toContain("on DeepSeek, stopped before it finished (out of credit)");
+    // Each run but the last may stop by itself over its provider's retries: a provider comes after it.
+    expect(r.seen.map((s) => s.mayMoveOn)).toEqual([true, true, false]);
     expect(out.fallback.map((n) => n.to)).toEqual(["deepseek", "anthropic"]);
     // The last provider failed too: the task stops with that run, as before routes.
     expect(out.run.providerFailure?.reason).toBe("overloaded");
@@ -168,6 +170,8 @@ describe("the team's first run on the task route (real git)", () => {
     const alone = route([kimi], { kimi: async () => ({ costUsd: 1, turns: 1, providerFailure: RATE_LIMITED }) });
     expect((await runOnRoute(alone.options())).run.providerFailure).toEqual(RATE_LIMITED);
     expect(alone.seen).toHaveLength(1);
+    // With no provider after it, a run waits out Claude Code's retries, as before.
+    expect(alone.seen[0]!.mayMoveOn).toBe(false);
   });
 
   it("bounds the next run by what is left of that provider's caps, and skips one whose own cap leaves too little", async () => {

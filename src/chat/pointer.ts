@@ -600,9 +600,19 @@ export function createPointerBrain(
        * The reply on one provider: Pointer's tool server and integrations of
        * its own, the provider's environment (its credential files written
        * outside any checkout until the attempt ends), its own spend.
+       *
+       * It stops when the reply's time is up (`replyAbort`), and on its own
+       * when Claude Code's retries show the provider in trouble (routing.ts
+       * RETRY_TROUBLE) while the next provider can still take over
+       * (`mayMoveOn`, and no tool ran yet). That stop is this attempt's alone:
+       * the reply's time limit keeps running for the next one.
        */
-      const attempt = async (runtime: ProviderRuntime, abort: AbortController): Promise<ReplyAttempt> => {
+      const attempt = async (runtime: ProviderRuntime, replyAbort: AbortSignal, mayMoveOn: boolean): Promise<ReplyAttempt> => {
         const watch = new RunWatch();
+        const abort = new AbortController();
+        const replyOver = () => abort.abort();
+        if (replyAbort.aborted) abort.abort();
+        else replyAbort.addEventListener("abort", replyOver, { once: true });
         const tools = createPointerToolServer({
           // One read-only client per GitHub connection; each repository goes to the connection that covers it.
           ...githubToolOptions(config, (token) => new GitHub(token)),
@@ -741,21 +751,31 @@ export function createPointerBrain(
               reply = { ...mapResult(message, limits), agentCosts: spend.costs(message), provider: runtime.provider };
             }
             if (mapper) for (const activity of mapper.feed(message)) tell(activity);
+            // Claude Code keeps retrying a provider in trouble: the next provider answers instead, while nothing has run.
+            const trouble = mayMoveOn && !watch.toolRan && !abort.signal.aborted ? watch.stopForRetries() : undefined;
+            if (trouble) {
+              console.warn(`[pointer] ${runtime.label} is stopped after Claude Code's retries (${trouble.reason}), for the next provider of the route.`);
+              abort.abort();
+              break;
+            }
           }
         } catch (err) {
           watch.thrown(err);
           const why = redact(err instanceof Error ? err.message : String(err));
-          console.error("[pointer] query failed:", why.slice(0, 300));
+          // A stop over the retries was said above; the SDK's "aborted" after it is no news.
+          if (!watch.stoppedForRetries) console.error("[pointer] query failed:", why.slice(0, 300));
           // The SDK also throws after an error result; keep the more specific message.
           reply ??= { text: `Something went wrong: ${why}`, isError: true };
         } finally {
+          replyAbort.removeEventListener("abort", replyOver);
           await session?.dispose();
           await rm(tmp, { recursive: true, force: true }).catch(() => {});
         }
         return { reply, watch };
       };
 
-      // One time limit for the whole reply, whichever providers answer it.
+      // One time limit for the whole reply, whichever providers answer it. An attempt stopped over its
+      // provider's retries stops alone (its own controller): the next one has the time that is left.
       const abort = new AbortController();
       const timer = setTimeout(() => abort.abort(), limitMs);
       const attempts: ReplyAttempt[] = [];
@@ -766,7 +786,7 @@ export function createPointerBrain(
       try {
         for (let i = 0; i < route.runtimes.length; i += 1) {
           last = route.runtimes[i]!;
-          const run = await attempt(last, abort);
+          const run = await attempt(last, abort.signal, i + 1 < route.runtimes.length);
           attempts.push(run);
           const failure = run.watch.failure;
           const next = route.runtimes[i + 1];

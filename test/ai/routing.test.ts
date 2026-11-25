@@ -27,6 +27,9 @@ function config(patch: (c: Config) => void = () => undefined): Config {
 
 const assistant = (error?: string) => ({ type: "assistant", message: { content: [] }, parent_tool_use_id: null, ...(error ? { error } : {}) }) as unknown as SDKMessage;
 const result = (patch: Record<string, unknown>) => ({ type: "result", subtype: "success", is_error: true, result: "", ...patch }) as unknown as SDKMessage;
+/** Claude Code's system/api_retry message: a request failed and will be retried after retry_delay_ms. */
+const apiRetry = (patch: Record<string, unknown>) =>
+  ({ type: "system", subtype: "api_retry", attempt: 1, max_retries: 10, retry_delay_ms: 500, error_status: 500, error: "server_error", uuid: "u", session_id: "s", ...patch }) as unknown as SDKMessage;
 
 describe("routes", () => {
   it("default to the chat and task providers alone, routines and light work following chat", () => {
@@ -169,6 +172,73 @@ describe("watching a run", () => {
     expect(w.outside).toEqual({ app: [{ tool: "mcp__app-stripe__create_issue", count: 1 }], browser: [{ tool: "mcp__browser__browser_click", count: 2 }] });
     // Without a way to tell, nothing is collected.
     expect(watch(calls(null, "mcp__app-stripe__create_issue")).outside).toEqual({ app: [], browser: [] });
+  });
+});
+
+describe("watching Claude Code's retries", () => {
+  /** A watch on a fake clock: `at(ms)` feeds a message that many ms after the watch began. */
+  const timed = () => {
+    let now = 0;
+    const w = new RunWatch(undefined, { now: () => now });
+    return { w, at: (ms: number, m: SDKMessage) => ((now = ms), w.feed(m)) };
+  };
+  const answer = assistant();
+
+  it("show trouble after two retries in a row, and none after a retry the provider got over", () => {
+    const { w, at } = timed();
+    at(1000, apiRetry({ error: "server_error", error_status: 500 }));
+    expect(w.retryTrouble).toBeUndefined();
+    // The retried request went through: the provider is answering.
+    at(2000, answer);
+    at(3000, apiRetry({ error: "overloaded", error_status: 529 }));
+    expect(w.retryTrouble).toBeUndefined();
+    at(4000, apiRetry({ error: "overloaded", error_status: 529, attempt: 2 }));
+    expect(w.retryTrouble).toEqual({ kind: "overloaded", reason: "overloaded, 2 retries" });
+    // Nothing changes until the caller stops the run.
+    expect(w.failure).toBeUndefined();
+    // A stream starting (a message_start) is not an answer: a stream that then fails mid-way keeps the count.
+    const second = timed();
+    second.at(1000, apiRetry({ error: "unknown", error_status: null }));
+    second.at(2000, { type: "stream_event", parent_tool_use_id: null, event: { type: "message_start" } } as unknown as SDKMessage);
+    second.at(3000, apiRetry({ error: "unknown", error_status: null, attempt: 2 }));
+    expect(second.w.retryTrouble?.reason).toBe("its requests kept failing, 2 retries");
+  });
+
+  it("show trouble at once for a provider error with a long wait, or a retry after minutes without a word", () => {
+    const long = timed();
+    long.at(1000, apiRetry({ error: "rate_limit", error_status: 429, retry_delay_ms: 60_000 }));
+    expect(long.w.retryTrouble).toEqual({ kind: "rate_limit", reason: "rate limited, asked to wait 60 s" });
+    // A long wait for an error that is not the provider's own trouble needs a second retry.
+    const unknown = timed();
+    unknown.at(1000, apiRetry({ error: "unknown", error_status: null, retry_delay_ms: 60_000 }));
+    expect(unknown.w.retryTrouble).toBeUndefined();
+    // Gemini thought, silent, until the bridge gave up after 10 minutes: one retry is enough.
+    const hung = timed();
+    hung.at(5000, { type: "stream_event", parent_tool_use_id: null, event: { type: "message_start" } } as unknown as SDKMessage);
+    hung.at(5000 + 10 * 60_000, apiRetry({ error: "overloaded", error_status: 529 }));
+    expect(hung.w.retryTrouble).toEqual({ kind: "overloaded", reason: "overloaded, no answer for 10 min" });
+  });
+
+  it("let a brief rate limit (too many requests at once) pass", () => {
+    const { w, at } = timed();
+    for (let i = 1; i <= 3; i += 1) at(i * 1000, apiRetry({ error: "rate_limit", error_status: 429, retry_delay_ms: 1000, attempt: i }));
+    expect(w.retryTrouble).toBeUndefined();
+    at(5000, apiRetry({ error: "rate_limit", error_status: 429, retry_delay_ms: 4000, attempt: 4 }));
+    at(10_000, apiRetry({ error: "rate_limit", error_status: 429, retry_delay_ms: 8000, attempt: 5 }));
+    expect(w.retryTrouble?.reason).toBe("rate limited, 2 retries");
+  });
+
+  it("end the run on the trouble once the caller stops it, whatever the stop throws or the result says", () => {
+    const { w, at } = timed();
+    expect(w.stopForRetries()).toBeUndefined();
+    expect(w.stoppedForRetries).toBe(false);
+    at(1000, apiRetry({ error: "server_error", error_status: 500 }));
+    at(2000, apiRetry({ error: "server_error", error_status: 500, attempt: 2 }));
+    expect(w.stopForRetries()?.reason).toBe("a server error, 2 retries");
+    expect(w.stoppedForRetries).toBe(true);
+    w.thrown(new Error("Claude Code process aborted by user"));
+    at(3000, result({ subtype: "error_during_execution", is_error: true }));
+    expect(w.failure).toEqual({ kind: "server_error", reason: "a server error, 2 retries" });
   });
 });
 

@@ -2452,6 +2452,105 @@ describe("Pointer brain: routes and fallback", () => {
     expect(reply.text).toContain("Kimi failed (rate limited) after it had started using tools, so Claude did not take over");
   });
 
+  /** Claude Code's system/api_retry message. */
+  const apiRetry = (attempt: number, patch: Record<string, unknown> = {}) => ({
+    type: "system",
+    subtype: "api_retry",
+    attempt,
+    max_retries: 10,
+    retry_delay_ms: 1000,
+    error_status: 529,
+    error: "overloaded",
+    uuid: `u${attempt}`,
+    session_id: "s",
+    ...patch,
+  });
+  /** Waits until the query is stopped, as Claude Code does while it waits out its retries. */
+  const untilStopped = (call: Call) =>
+    new Promise<void>((resolve) => {
+      const signal = call.options.abortController?.signal;
+      if (!signal || signal.aborted) resolve();
+      else signal.addEventListener("abort", () => resolve(), { once: true });
+    });
+
+  it("stops a provider Claude Code keeps retrying before any tool ran, and the next one answers in the reply's time", async () => {
+    const deps = await routed();
+    const seenAborted: boolean[] = [];
+    const { queryFn, calls } = fakeQuery(async function* (call) {
+      seenAborted.push(Boolean(call.options.abortController?.signal.aborted));
+      if (onKimi(call)) {
+        yield { type: "system", subtype: "init" };
+        yield apiRetry(1);
+        yield apiRetry(2);
+        // Claude Code would go on retrying until the reply's time is up.
+        await untilStopped(call);
+        throw new Error("Claude Code process aborted by user");
+      }
+      yield result();
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const reply = await createPointerBrain(deps, { queryFn, timeoutMs: 60_000 }).reply(baseReq(), ctx);
+    const warned = warn.mock.calls.map((c) => String(c[0]));
+    const errors = error.mock.calls.length;
+    warn.mockRestore();
+    error.mockRestore();
+
+    expect(calls).toHaveLength(2);
+    expect(onKimi(calls[0]!)).toBe(true);
+    // Kimi's attempt was stopped; its stop is its own, so Claude started with the reply's time still running.
+    expect(calls[0]!.options.abortController?.signal.aborted).toBe(true);
+    expect(calls[1]!.options.abortController).not.toBe(calls[0]!.options.abortController);
+    expect(seenAborted).toEqual([false, false]);
+    expect(calls[1]!.options.abortController?.signal.aborted).toBe(false);
+    expect(reply).toMatchObject({ text: "Here is the answer.", isError: false, provider: "anthropic", fallback: [{ from: "kimi", to: "anthropic", reason: "overloaded, 2 retries" }] });
+    expect(warned).toContain("[pointer] Kimi is stopped after Claude Code's retries (overloaded, 2 retries), for the next provider of the route.");
+    expect(warned).toContain("[pointer] Kimi failed (overloaded, 2 retries); Claude took over instead.");
+    // The stop is not reported as a failed query.
+    expect(errors).toBe(0);
+  });
+
+  it("stops at once for a provider error with a long wait, and keeps waiting when no provider comes after or a tool ran", async () => {
+    const restore = quiet();
+    const deps = await routed();
+    const limited = fakeQuery(async function* (call) {
+      if (onKimi(call)) {
+        yield apiRetry(1, { error: "rate_limit", error_status: 429, retry_delay_ms: 45_000 });
+        await untilStopped(call);
+        return;
+      }
+      yield result();
+    });
+    const moved = await createPointerBrain(deps, { queryFn: limited.queryFn }).reply(baseReq(), ctx);
+    expect(moved.fallback).toEqual([{ from: "kimi", to: "anthropic", reason: "rate limited, asked to wait 45 s" }]);
+
+    // Kimi alone: Claude Code's retries are waited out, and they went through.
+    const alone = await routed((c) => (c.ai.routes = { chat: ["kimi"] }));
+    const recovered = fakeQuery(async function* () {
+      yield apiRetry(1);
+      yield apiRetry(2);
+      yield apiRetry(3);
+      yield result();
+    });
+    const waited = await createPointerBrain(alone, { queryFn: recovered.queryFn }).reply(baseReq(), ctx);
+    expect(recovered.calls).toHaveLength(1);
+    expect(recovered.calls[0]!.options.abortController?.signal.aborted).toBe(false);
+    expect(waited).toMatchObject({ text: "Here is the answer.", isError: false, provider: "kimi" });
+
+    // A tool ran: running the request again could repeat it, so the retries are waited out here too.
+    const used = fakeQuery(async function* () {
+      yield { type: "assistant", parent_tool_use_id: null, message: { content: [{ type: "tool_use", id: "toolu_1", name: "WebFetch", input: {} }] } };
+      yield apiRetry(1);
+      yield apiRetry(2);
+      yield result();
+    });
+    const after = await createPointerBrain(deps, { queryFn: used.queryFn }).reply(baseReq(), ctx);
+    restore();
+    expect(used.calls).toHaveLength(1);
+    expect(after).toMatchObject({ text: "Here is the answer.", isError: false, provider: "kimi" });
+    expect(after.fallback).toBeUndefined();
+  });
+
   it("does not move on for the work's own failures, and says what happened when the last provider fails too", async () => {
     const deps = await routed();
     const turns = fakeQuery(async function* () {
