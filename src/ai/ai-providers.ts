@@ -79,8 +79,10 @@ export interface ProviderRuntime {
   /**
    * Why this provider does not run a configured model: an id of another
    * provider's family ("gemini-4-carbon" on Claude), which neither its model
-   * list nor its connection's tiers have. Undefined when it runs it, maps it
-   * (a Claude id) or cannot tell (an id of no known family: an alias, a
+   * list nor its connection's tiers have. On Anthropic and Gemini any other
+   * family's; elsewhere only a Gemini id (the clouds and the other APIs name
+   * and host models their own way). Undefined when it runs it, maps it (a
+   * Claude id) or cannot tell (an id of no known family: an alias, a
    * deployment's own name).
    */
   foreignModel(model: string): string | undefined;
@@ -198,7 +200,7 @@ export function configuredModel(
   return runtime.model(model);
 }
 
-const nonEmpty =(record: Partial<Record<string, string>>): Record<string, string> =>
+const nonEmpty = (record: Partial<Record<string, string>>): Record<string, string> =>
   Object.fromEntries(Object.entries(record).filter((e): e is [string, string] => typeof e[1] === "string" && e[1].trim() !== ""));
 
 /** The saved connection of a provider (Anthropic's from config.anthropic), or undefined when there is none. */
@@ -533,11 +535,16 @@ export function buildRuntime(id: AiProviderId, conn: ConnectionValues): Provider
 
   // A model of another provider's family is not this one's, unless its list or its connection's tiers have it
   // (a setting made for one provider of a route reaching another after a fallback, or Pointer's model set to Gemini).
+  // Strict on Anthropic (Claude Code refuses an id it does not know there) and on Gemini (the bridge takes Gemini
+  // ids only); elsewhere only a Gemini id, which nothing but the bridge serves: the clouds and the other providers'
+  // APIs name and host models their own way (a Foundry deployment "gpt-claude-prod", DeepSeek on Model Studio).
   const family = presetFamily(preset);
+  const strict = id === "anthropic" || id === "google-ai";
   const ownIds = new Set([...preset.models.map((m) => m.id), ...Object.values(nonEmpty(conn.models))].map(sameId));
   const foreignModel = (model: string): string | undefined => {
     const of = model ? modelFamily(model) : undefined;
     if (!of || of === "claude" || !family || of === family || ownIds.has(sameId(model))) return undefined;
+    if (!strict && of !== "gemini") return undefined;
     return `"${model}" is a ${FAMILY_NAMES[of]} model, and ${preset.short} runs ${FAMILY_NAMES[family]} models`;
   };
 

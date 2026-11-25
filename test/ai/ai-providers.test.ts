@@ -261,6 +261,21 @@ describe("provider environments", () => {
     expect(buildRuntime("custom", CONNECTIONS.custom).model("gemini-4-carbon")).toBe("gemini-4-carbon");
   });
 
+  it("trust any id but a Gemini one on the clouds and other providers' APIs, which name and host models their own way", () => {
+    // A Foundry deployment is named by the owner; Model Studio hosts other families' models.
+    const foundry = buildRuntime("foundry", CONNECTIONS.foundry);
+    expect(foundry.model("gpt-claude-prod")).toBe("gpt-claude-prod");
+    expect(foundry.foreignModel("gpt-claude-prod")).toBeUndefined();
+    expect(buildRuntime("qwen", CONNECTIONS.qwen).model("deepseek-v3.2")).toBe("deepseek-v3.2");
+    expect(buildRuntime("bedrock", CONNECTIONS.bedrock).model("kimi-k3")).toBe("kimi-k3");
+    // A Gemini id runs only on Gemini, through its bridge.
+    expect(foundry.model("gemini-4-carbon")).toBeUndefined();
+    expect(buildRuntime("qwen", CONNECTIONS.qwen).model("gemini-4-carbon")).toBeUndefined();
+    // Anthropic and Gemini stay strict: Claude Code refuses another id on Anthropic, the bridge on Gemini.
+    expect(anthropicRuntime("sk-ant-x-123456789").model("deepseek-v3.2")).toBeUndefined();
+    expect(buildRuntime("google-ai", CONNECTIONS["google-ai"]).model("deepseek-v3.2")).toBeUndefined();
+  });
+
   it("tell model families apart, and give every provider's own API a family", () => {
     expect(modelFamily("claude-opus-5-5")).toBe("claude");
     expect(modelFamily("sonnet[1m]")).toBe("claude");
